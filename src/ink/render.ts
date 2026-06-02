@@ -1,4 +1,4 @@
-import { InkDocument, InkStroke, getInkBounds } from './model';
+import { InkDocument, InkStroke, INK_WRAP_WORLD_WIDTH } from './model';
 
 export interface InlineRenderMetrics {
 	cssHeight: number;
@@ -7,12 +7,18 @@ export interface InlineRenderMetrics {
 }
 
 const INLINE_MIN_HEIGHT = 140;
-const INLINE_BASE_WORLD_WIDTH = 900;
+const INLINE_WRAP_MARGIN_X = 16;
+
+interface StrokePlacement {
+	wrapIndex: number;
+	xOffset: number;
+}
 
 export function resizeCanvasForDpr(
 	canvas: HTMLCanvasElement,
 	cssWidth: number,
 	cssHeight: number,
+	setCssSize = true,
 ): void {
 	const dpr = Math.max(1, window.devicePixelRatio || 1);
 	const nextWidth = Math.max(1, Math.floor(cssWidth * dpr));
@@ -23,16 +29,18 @@ export function resizeCanvasForDpr(
 		canvas.height = nextHeight;
 	}
 
-	canvas.style.width = `${cssWidth}px`;
-	canvas.style.height = `${cssHeight}px`;
+	if (setCssSize) {
+		canvas.style.width = `${cssWidth}px`;
+		canvas.style.height = `${cssHeight}px`;
+	}
 }
 
 export function computeInlineMetrics(
 	doc: InkDocument,
 	cssWidth: number,
 ): InlineRenderMetrics {
-	const bounds = getInkBounds(doc);
-	const contentWorldWidth = Math.max(INLINE_BASE_WORLD_WIDTH, bounds.maxX + 50);
+	const bounds = getWrappedBounds(doc, INK_WRAP_WORLD_WIDTH);
+	const contentWorldWidth = INK_WRAP_WORLD_WIDTH;
 	const contentWorldHeight = Math.max(doc.meta.lineHeight, bounds.maxY + 50);
 	const lineCount = Math.max(1, Math.ceil(contentWorldHeight / doc.meta.lineHeight));
 	const uniformScale = cssWidth / contentWorldWidth;
@@ -77,7 +85,7 @@ export function drawInlineCanvas(
 		ctx.stroke();
 	}
 
-	drawStrokes(ctx, doc.strokes, (x, y) => ({ x: x * scale, y: y * scale }));
+	drawWrappedInlineStrokes(ctx, doc, metrics.worldWidth, scale);
 	return metrics;
 }
 
@@ -88,9 +96,13 @@ export function drawDrawerCanvas(
 	lineOffsetY: number,
 	activeStroke: InkStroke | null,
 ): void {
-	const cssWidth = Math.max(300, canvas.clientWidth || canvas.parentElement?.clientWidth || 300);
-	const cssHeight = Math.max(140, canvas.clientHeight || 220);
-	resizeCanvasForDpr(canvas, cssWidth, cssHeight);
+	const rect = canvas.getBoundingClientRect();
+	const cssWidth = Math.floor(rect.width || canvas.clientWidth);
+	const cssHeight = Math.floor(rect.height || canvas.clientHeight);
+	if (cssWidth <= 0 || cssHeight <= 0) {
+		return;
+	}
+	resizeCanvasForDpr(canvas, cssWidth, cssHeight, false);
 
 	const ctx = canvas.getContext('2d');
 	if (!ctx) {
@@ -143,6 +155,189 @@ export function drawDrawerCanvas(
 			y: y - lineOffsetY,
 		}));
 	}
+}
+
+function getWrappedBounds(
+	doc: InkDocument,
+	wrapWidth: number,
+): { minX: number; maxX: number; minY: number; maxY: number } {
+	let minX = 0;
+	let maxX = 0;
+	let minY = 0;
+	let maxY = 0;
+	let hasPoint = false;
+
+	for (const stroke of doc.strokes) {
+		const placement = getStrokePlacement(stroke, wrapWidth);
+		for (const point of stroke.points) {
+			const wrapped = wrapPoint(
+				point.x,
+				point.y,
+				wrapWidth,
+				doc.meta.lineHeight,
+				placement,
+			);
+			if (!hasPoint) {
+				minX = wrapped.x;
+				maxX = wrapped.x;
+				minY = wrapped.y;
+				maxY = wrapped.y;
+				hasPoint = true;
+				continue;
+			}
+			if (wrapped.x < minX) minX = wrapped.x;
+			if (wrapped.x > maxX) maxX = wrapped.x;
+			if (wrapped.y < minY) minY = wrapped.y;
+			if (wrapped.y > maxY) maxY = wrapped.y;
+		}
+	}
+
+	if (!hasPoint) {
+		return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+	}
+
+	return { minX, maxX, minY, maxY };
+}
+
+function drawWrappedInlineStrokes(
+	ctx: CanvasRenderingContext2D,
+	doc: InkDocument,
+	wrapWidth: number,
+	scale: number,
+): void {
+	for (const stroke of doc.strokes) {
+		if (!stroke.points.length) {
+			continue;
+		}
+
+		const placement = getStrokePlacement(stroke, wrapWidth);
+		const points: Array<{ x: number; y: number }> = [];
+
+		for (const point of stroke.points) {
+			const wrapped = wrapPoint(
+				point.x,
+				point.y,
+				wrapWidth,
+				doc.meta.lineHeight,
+				placement,
+			);
+			points.push({
+				x: wrapped.x * scale,
+				y: wrapped.y * scale,
+			});
+		}
+
+		ctx.strokeStyle = stroke.color;
+		ctx.fillStyle = stroke.color;
+		ctx.lineCap = 'round';
+		ctx.lineJoin = 'round';
+		ctx.lineWidth = stroke.width;
+		drawSmoothSegment(ctx, points, stroke.width);
+	}
+}
+
+function drawSmoothSegment(
+	ctx: CanvasRenderingContext2D,
+	points: Array<{ x: number; y: number }>,
+	width: number,
+): void {
+	const first = points[0];
+	if (!first) {
+		return;
+	}
+
+	if (points.length === 1) {
+		ctx.beginPath();
+		ctx.arc(first.x, first.y, Math.max(1, width / 2), 0, Math.PI * 2);
+		ctx.fill();
+		return;
+	}
+
+	ctx.beginPath();
+	ctx.moveTo(first.x, first.y);
+
+	for (let i = 1; i < points.length; i += 1) {
+		const prev = points[i - 1];
+		const curr = points[i];
+		if (!prev || !curr) {
+			continue;
+		}
+		const midX = (prev.x + curr.x) * 0.5;
+		const midY = (prev.y + curr.y) * 0.5;
+		ctx.quadraticCurveTo(prev.x, prev.y, midX, midY);
+	}
+
+	const last = points[points.length - 1];
+	if (last) {
+		ctx.lineTo(last.x, last.y);
+	}
+	ctx.stroke();
+}
+
+function wrapPoint(
+	x: number,
+	y: number,
+	wrapWidth: number,
+	lineHeight: number,
+	placement: StrokePlacement,
+): { x: number; y: number } {
+	const wrappedX = x - placement.wrapIndex * wrapWidth + placement.xOffset;
+	const wrappedY = y + placement.wrapIndex * lineHeight;
+	return {
+		x: wrappedX,
+		y: wrappedY,
+	};
+}
+
+function getStrokePlacement(stroke: InkStroke, wrapWidth: number): StrokePlacement {
+	const firstPoint = stroke.points[0];
+	if (!firstPoint) {
+		return { wrapIndex: 0, xOffset: 0 };
+	}
+
+	const baseWrapIndex = Math.floor(Math.max(0, firstPoint.x) / wrapWidth);
+	let minX = firstPoint.x;
+	let maxX = firstPoint.x;
+	for (const point of stroke.points) {
+		if (point.x < minX) {
+			minX = point.x;
+		}
+		if (point.x > maxX) {
+			maxX = point.x;
+		}
+	}
+
+	const localMin = minX - baseWrapIndex * wrapWidth;
+	const localMax = maxX - baseWrapIndex * wrapWidth;
+	if (localMin >= 0 && localMax <= wrapWidth) {
+		return {
+			wrapIndex: baseWrapIndex,
+			xOffset: 0,
+		};
+	}
+
+	if (localMax > wrapWidth) {
+		const nextWrapIndex = baseWrapIndex + 1;
+		const firstLocalX = firstPoint.x - nextWrapIndex * wrapWidth;
+		return {
+			wrapIndex: nextWrapIndex,
+			xOffset: INLINE_WRAP_MARGIN_X - firstLocalX,
+		};
+	}
+
+	if (localMin < 0 && baseWrapIndex > 0) {
+		const prevWrapIndex = baseWrapIndex - 1;
+		const firstLocalX = firstPoint.x - prevWrapIndex * wrapWidth;
+		return {
+			wrapIndex: prevWrapIndex,
+			xOffset: INLINE_WRAP_MARGIN_X - firstLocalX,
+		};
+	}
+
+	return {
+		wrapIndex: baseWrapIndex,
+		xOffset: 0,
+	};
 }
 
 export function drawStrokes(

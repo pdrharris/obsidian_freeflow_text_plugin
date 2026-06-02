@@ -129,7 +129,9 @@ export class InkBlockRegistry {
 
 		const onDocumentChanged = (): void => {
 			renderInline();
-			scheduleSave();
+			if (!isActiveKey(blockKey)) {
+				scheduleSave();
+			}
 		};
 
 		const openDrawer = (): void => {

@@ -1,15 +1,13 @@
 import {
 	createStrokeId,
-	eraserHitTest,
 	InkDocument,
 	InkStroke,
-	InkTool,
 	InkViewport,
+	INK_WRAP_WORLD_WIDTH,
 } from './model';
 import { drawDrawerCanvas } from './render';
 
 const STEP_RATIO = 0.72;
-const ERASER_RADIUS = 18;
 const DEFAULT_PEN_COLOR = '#111827';
 const DEFAULT_PEN_WIDTH = 3;
 
@@ -32,12 +30,12 @@ export class InkDrawer {
 	private readonly statusEl: HTMLDivElement;
 
 	private session: DrawerSession | null = null;
-	private tool: InkTool = 'pen';
 	private activePointerId: number | null = null;
 	private activeStroke: InkStroke | null = null;
 	private hasPenInSession = false;
 	private redrawQueued = false;
 	private lastLocalX: number | null = null;
+	private pendingAdvanceOnRelease = false;
 
 	constructor() {
 		this.rootEl = activeDocument.createElement('div');
@@ -103,7 +101,7 @@ export class InkDrawer {
 		this.activeStroke = null;
 		this.hasPenInSession = false;
 		this.lastLocalX = null;
-		this.tool = 'pen';
+		this.pendingAdvanceOnRelease = false;
 		this.updateToolUi();
 
 		this.rootEl.classList.add('is-open');
@@ -114,7 +112,7 @@ export class InkDrawer {
 		if (!this.session) {
 			return;
 		}
-		this.finishStroke();
+		this.finishStroke(false);
 		const closingSession = this.session;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
@@ -124,11 +122,11 @@ export class InkDrawer {
 	private attachListeners(): void {
 		this.canvasEl.addEventListener('pointerdown', this.onPointerDown);
 		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
-		this.canvasEl.addEventListener('pointerup', this.onPointerUpOrCancel);
-		this.canvasEl.addEventListener('pointercancel', this.onPointerUpOrCancel);
-		this.canvasEl.addEventListener('lostpointercapture', this.onPointerUpOrCancel);
+		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
+		this.canvasEl.addEventListener('pointercancel', this.onPointerCancel);
+		this.canvasEl.addEventListener('lostpointercapture', this.onPointerCancel);
 		window.addEventListener('resize', this.onResize);
-		this.eraseButtonEl.addEventListener('click', this.onToggleErase);
+		this.eraseButtonEl.addEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
 		this.closeButtonEl.addEventListener('click', this.onClose);
 		this.rootEl.addEventListener('click', this.onBackdropClick);
@@ -137,11 +135,11 @@ export class InkDrawer {
 	private detachListeners(): void {
 		this.canvasEl.removeEventListener('pointerdown', this.onPointerDown);
 		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
-		this.canvasEl.removeEventListener('pointerup', this.onPointerUpOrCancel);
-		this.canvasEl.removeEventListener('pointercancel', this.onPointerUpOrCancel);
-		this.canvasEl.removeEventListener('lostpointercapture', this.onPointerUpOrCancel);
+		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
+		this.canvasEl.removeEventListener('pointercancel', this.onPointerCancel);
+		this.canvasEl.removeEventListener('lostpointercapture', this.onPointerCancel);
 		window.removeEventListener('resize', this.onResize);
-		this.eraseButtonEl.removeEventListener('click', this.onToggleErase);
+		this.eraseButtonEl.removeEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
 		this.closeButtonEl.removeEventListener('click', this.onClose);
 		this.rootEl.removeEventListener('click', this.onBackdropClick);
@@ -157,9 +155,8 @@ export class InkDrawer {
 		}
 	};
 
-	private onToggleErase = (): void => {
-		this.tool = this.tool === 'eraser' ? 'pen' : 'eraser';
-		this.updateToolUi();
+	private onEraseLastStroke = (): void => {
+		this.eraseLastStroke();
 	};
 
 	private onNewLine = (): void => {
@@ -167,12 +164,18 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
+		const lastPoint = getLastPoint(session.doc);
+		const anchorY = Math.max(session.viewport.lineOffsetY, lastPoint?.y ?? 0);
+		const wrappedLineOffset =
+			Math.floor(Math.max(0, session.viewport.viewportX) / INK_WRAP_WORLD_WIDTH) * lineHeight;
 		session.viewport = {
 			viewportX: 0,
-			lineOffsetY: session.viewport.lineOffsetY + session.doc.meta.lineHeight,
+			lineOffsetY: anchorY + wrappedLineOffset + lineHeight,
 		};
 		session.onViewportChanged(session.viewport);
 		this.lastLocalX = null;
+		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
 	};
 
@@ -195,15 +198,7 @@ export class InkDrawer {
 		this.activePointerId = event.pointerId;
 		this.canvasEl.setPointerCapture(event.pointerId);
 		event.preventDefault();
-
-		if (this.tool === 'eraser') {
-			const changed = this.eraseAtEvent(event);
-			if (changed) {
-				session.onDocumentChanged();
-			}
-			this.requestDraw();
-			return;
-		}
+		this.pendingAdvanceOnRelease = false;
 
 		this.activeStroke = {
 			id: createStrokeId(),
@@ -224,15 +219,6 @@ export class InkDrawer {
 		}
 		event.preventDefault();
 
-		if (this.tool === 'eraser') {
-			const changed = this.eraseAtEvent(event);
-			if (changed) {
-				session.onDocumentChanged();
-			}
-			this.requestDraw();
-			return;
-		}
-
 		if (!this.activeStroke) {
 			return;
 		}
@@ -242,14 +228,21 @@ export class InkDrawer {
 		this.requestDraw();
 	};
 
-	private onPointerUpOrCancel = (event: PointerEvent): void => {
+	private onPointerUp = (event: PointerEvent): void => {
 		if (this.activePointerId !== event.pointerId) {
 			return;
 		}
-		this.finishStroke();
+		this.finishStroke(true);
 	};
 
-	private finishStroke(): void {
+	private onPointerCancel = (event: PointerEvent): void => {
+		if (this.activePointerId !== event.pointerId) {
+			return;
+		}
+		this.finishStroke(false);
+	};
+
+	private finishStroke(applyPendingAdvance: boolean): void {
 		const session = this.session;
 		if (!session) {
 			return;
@@ -263,9 +256,57 @@ export class InkDrawer {
 			session.onDocumentChanged();
 		}
 
+		if (applyPendingAdvance && this.pendingAdvanceOnRelease) {
+			const drawerWidth =
+				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
+			if (drawerWidth > 0) {
+				this.advanceStep(drawerWidth);
+			}
+		}
+
 		this.activePointerId = null;
 		this.activeStroke = null;
 		this.lastLocalX = null;
+		this.pendingAdvanceOnRelease = false;
+		this.requestDraw();
+	}
+
+	private eraseLastStroke(): void {
+		const session = this.session;
+		if (!session) {
+			return;
+		}
+
+		if (this.activePointerId !== null) {
+			return;
+		}
+
+		if (session.doc.strokes.length === 0) {
+			return;
+		}
+
+		session.doc.strokes.pop();
+
+		const drawerWidth =
+			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 480;
+		const lastStroke = session.doc.strokes[session.doc.strokes.length - 1];
+		const lastPoint = lastStroke?.points[lastStroke.points.length - 1];
+		if (!lastPoint) {
+			session.viewport = {
+				viewportX: 0,
+				lineOffsetY: 0,
+			};
+		} else {
+			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
+			session.viewport = {
+				viewportX: Math.max(0, lastPoint.x - drawerWidth * 0.7),
+				lineOffsetY: Math.max(0, Math.floor(lastPoint.y / lineHeight) * lineHeight),
+			};
+		}
+
+		session.onViewportChanged(session.viewport);
+		session.onDocumentChanged();
+		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
 	}
 
@@ -309,13 +350,13 @@ export class InkDrawer {
 			});
 
 			if (localX >= rightEdgeTrigger) {
-				this.advanceStep(rect.width);
+				this.pendingAdvanceOnRelease = true;
 			} else if (
 				this.lastLocalX !== null &&
 				this.lastLocalX > rect.width * 0.9 &&
 				localX < rect.width * 0.15
 			) {
-				this.advanceStep(rect.width);
+				this.pendingAdvanceOnRelease = true;
 			}
 
 			this.lastLocalX = localX;
@@ -333,25 +374,6 @@ export class InkDrawer {
 			lineOffsetY: session.viewport.lineOffsetY,
 		};
 		session.onViewportChanged(session.viewport);
-	}
-
-	private eraseAtEvent(event: PointerEvent): boolean {
-		const session = this.session;
-		if (!session) {
-			return false;
-		}
-
-		const rect = this.canvasEl.getBoundingClientRect();
-		const localX = event.clientX - rect.left;
-		const localY = event.clientY - rect.top;
-		const worldX = session.viewport.viewportX + localX;
-		const worldY = session.viewport.lineOffsetY + localY;
-
-		const beforeCount = session.doc.strokes.length;
-		session.doc.strokes = session.doc.strokes.filter(
-			(stroke) => !eraserHitTest(stroke, worldX, worldY, ERASER_RADIUS),
-		);
-		return beforeCount !== session.doc.strokes.length;
 	}
 
 	private requestDraw(): void {
@@ -380,7 +402,21 @@ export class InkDrawer {
 	}
 
 	private updateToolUi(): void {
-		this.eraseButtonEl.classList.toggle('is-active', this.tool === 'eraser');
-		this.statusEl.textContent = this.tool === 'eraser' ? 'Eraser' : 'Pen';
+		this.eraseButtonEl.classList.remove('is-active');
+		this.statusEl.textContent = 'Pen';
 	}
+}
+
+function getLastPoint(doc: InkDocument): { x: number; y: number } | null {
+	for (let i = doc.strokes.length - 1; i >= 0; i -= 1) {
+		const stroke = doc.strokes[i];
+		if (!stroke || stroke.points.length === 0) {
+			continue;
+		}
+		const point = stroke.points[stroke.points.length - 1];
+		if (point) {
+			return { x: point.x, y: point.y };
+		}
+	}
+	return null;
 }
