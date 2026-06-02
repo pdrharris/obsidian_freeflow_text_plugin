@@ -38,6 +38,7 @@ export const DEFAULT_INK_DOCUMENT: InkDocument = {
 
 export const INK_CODE_BLOCK_LANGUAGE = 'fii-ink';
 export const INK_WRAP_WORLD_WIDTH = 900;
+export const INK_BASELINE_RATIO_FROM_TOP = 2 / 3;
 
 export function parseInkDocument(source: string): InkDocument {
 	if (!source.trim()) {

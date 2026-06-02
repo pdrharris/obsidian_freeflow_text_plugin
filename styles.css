@@ -31,8 +31,17 @@
 }
 
 .freeflow-ink-meta-action {
+	appearance: none;
+	border: 0;
+	padding: 0;
+	background: transparent;
 	color: var(--interactive-accent);
 	font-weight: 600;
+	cursor: pointer;
+}
+
+.freeflow-ink-meta-action:hover {
+	text-decoration: underline;
 }
 
 .freeflow-ink-block.is-over-limit {
@@ -161,6 +170,21 @@
 	background: rgba(220, 38, 38, 0.1);
 	border-color: rgba(220, 38, 38, 0.5);
 	color: #b91c1c;
+}
+
+.freeflow-ink-settings-value {
+	font-size: 12px;
+	color: var(--text-muted);
+	min-width: 52px;
+	text-align: right;
+}
+
+.freeflow-ink-settings-preview {
+	margin-top: 6px;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--text-muted);
+	white-space: pre-line;
 }
 
 @media (max-width: 780px) {

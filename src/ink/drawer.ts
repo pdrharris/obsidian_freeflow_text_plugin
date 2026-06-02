@@ -1,9 +1,9 @@
 import {
 	createStrokeId,
+	INK_BASELINE_RATIO_FROM_TOP,
 	InkDocument,
 	InkStroke,
 	InkViewport,
-	INK_WRAP_WORLD_WIDTH,
 } from './model';
 import { drawDrawerCanvas } from './render';
 
@@ -15,12 +15,21 @@ export interface DrawerSession {
 	key: string;
 	doc: InkDocument;
 	viewport: InkViewport;
+	cursorIndex: number;
 	onDocumentChanged: () => void;
 	onViewportChanged: (viewport: InkViewport) => void;
+	onCursorChanged: (cursorIndex: number) => void;
 	onClose: () => void;
 }
 
+export interface DrawerRuntimeConfig {
+	wrapWidth: number;
+	idleAdvanceMs: number;
+	showWritingLine: boolean;
+}
+
 export class InkDrawer {
+	private readonly getRuntimeConfig: () => DrawerRuntimeConfig;
 	private readonly rootEl: HTMLDivElement;
 	private readonly sheetEl: HTMLDivElement;
 	private readonly canvasEl: HTMLCanvasElement;
@@ -36,8 +45,11 @@ export class InkDrawer {
 	private redrawQueued = false;
 	private lastLocalX: number | null = null;
 	private pendingAdvanceOnRelease = false;
+	private idleAdvanceTimer = 0;
+	private snapNextStrokeToCursor = false;
 
-	constructor() {
+	constructor(getRuntimeConfig: () => DrawerRuntimeConfig) {
+		this.getRuntimeConfig = getRuntimeConfig;
 		this.rootEl = activeDocument.createElement('div');
 		this.rootEl.className = 'freeflow-ink-drawer-root';
 
@@ -88,7 +100,12 @@ export class InkDrawer {
 	destroy(): void {
 		this.close();
 		this.detachListeners();
+		this.clearIdleAdvanceTimer();
 		this.rootEl.remove();
+	}
+
+	refreshLayout(): void {
+		this.requestDraw();
 	}
 
 	open(session: DrawerSession): void {
@@ -97,14 +114,39 @@ export class InkDrawer {
 		}
 
 		this.session = session;
+		this.session.cursorIndex = this.clampCursorIndex(
+			this.session.cursorIndex,
+			this.session.doc.strokes.length,
+		);
+		this.session.onCursorChanged(this.session.cursorIndex);
 		this.activePointerId = null;
 		this.activeStroke = null;
 		this.hasPenInSession = false;
 		this.lastLocalX = null;
+		this.snapNextStrokeToCursor = true;
 		this.pendingAdvanceOnRelease = false;
+		this.clearIdleAdvanceTimer();
 		this.updateToolUi();
 
 		this.rootEl.classList.add('is-open');
+		this.requestDraw();
+	}
+
+	updateCursor(sessionKey: string, cursorIndex: number, viewport: InkViewport): void {
+		if (!this.session || this.session.key !== sessionKey) {
+			return;
+		}
+		if (this.activePointerId !== null) {
+			return;
+		}
+
+		this.clearIdleAdvanceTimer();
+		this.pendingAdvanceOnRelease = false;
+		this.session.cursorIndex = this.clampCursorIndex(cursorIndex, this.session.doc.strokes.length);
+		this.snapNextStrokeToCursor = true;
+		this.session.viewport = viewport;
+		this.session.onCursorChanged(this.session.cursorIndex);
+		this.session.onViewportChanged(this.session.viewport);
 		this.requestDraw();
 	}
 
@@ -112,8 +154,10 @@ export class InkDrawer {
 		if (!this.session) {
 			return;
 		}
+		this.clearIdleAdvanceTimer();
 		this.finishStroke(false);
 		const closingSession = this.session;
+		this.snapNextStrokeToCursor = false;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
 		closingSession.onClose();
@@ -156,6 +200,7 @@ export class InkDrawer {
 	};
 
 	private onEraseLastStroke = (): void => {
+		this.clearIdleAdvanceTimer();
 		this.eraseLastStroke();
 	};
 
@@ -164,16 +209,17 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.clearIdleAdvanceTimer();
 		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-		const lastPoint = getLastPoint(session.doc);
-		const anchorY = Math.max(session.viewport.lineOffsetY, lastPoint?.y ?? 0);
-		const wrappedLineOffset =
-			Math.floor(Math.max(0, session.viewport.viewportX) / INK_WRAP_WORLD_WIDTH) * lineHeight;
+		const anchor = this.getCursorAnchorPoint(session);
+		const anchorY = anchor?.y ?? session.viewport.lineOffsetY;
+		const targetLineStart = (Math.floor(anchorY / lineHeight) + 1) * lineHeight;
 		session.viewport = {
 			viewportX: 0,
-			lineOffsetY: anchorY + wrappedLineOffset + lineHeight,
+			lineOffsetY: Math.max(lineHeight, targetLineStart),
 		};
 		session.onViewportChanged(session.viewport);
+		this.snapNextStrokeToCursor = true;
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
@@ -188,6 +234,7 @@ export class InkDrawer {
 		if (!session || this.activePointerId !== null) {
 			return;
 		}
+		this.clearIdleAdvanceTimer();
 		if (this.hasPenInSession && event.pointerType !== 'pen') {
 			return;
 		}
@@ -251,16 +298,34 @@ export class InkDrawer {
 			this.canvasEl.releasePointerCapture(this.activePointerId);
 		}
 
+		let strokePeakLocalX: number | null = null;
 		if (this.activeStroke && this.activeStroke.points.length > 0) {
-			session.doc.strokes.push(this.activeStroke);
+			const insertionIndex = this.clampCursorIndex(session.cursorIndex, session.doc.strokes.length);
+			const cursorAnchor = this.getCursorAnchorPoint(session);
+			if (this.snapNextStrokeToCursor) {
+				if (cursorAnchor) {
+					this.alignStrokeToCursorX(this.activeStroke, cursorAnchor.x);
+				}
+				this.snapNextStrokeToCursor = false;
+			}
+			const activeBounds = this.getStrokeBounds(this.activeStroke);
+			if (activeBounds) {
+				strokePeakLocalX = activeBounds.maxX - session.viewport.viewportX;
+			}
+			session.doc.strokes.splice(insertionIndex, 0, this.activeStroke);
+			this.shiftFollowingStrokesForInsertion(session.doc, insertionIndex, cursorAnchor?.x ?? null);
+			session.cursorIndex = insertionIndex + 1;
+			session.onCursorChanged(session.cursorIndex);
 			session.onDocumentChanged();
 		}
 
+		let didAdvanceOnRelease = false;
 		if (applyPendingAdvance && this.pendingAdvanceOnRelease) {
 			const drawerWidth =
 				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
 			if (drawerWidth > 0) {
 				this.advanceStep(drawerWidth);
+				didAdvanceOnRelease = true;
 			}
 		}
 
@@ -269,6 +334,9 @@ export class InkDrawer {
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
+		if (applyPendingAdvance && !didAdvanceOnRelease) {
+			this.scheduleIdleAdvance(strokePeakLocalX);
+		}
 	}
 
 	private eraseLastStroke(): void {
@@ -285,27 +353,47 @@ export class InkDrawer {
 			return;
 		}
 
-		session.doc.strokes.pop();
+		const cursorIndex = this.clampCursorIndex(session.cursorIndex, session.doc.strokes.length);
+		if (cursorIndex <= 0) {
+			return;
+		}
+		const removeIndex = cursorIndex - 1;
+
+		session.doc.strokes.splice(removeIndex, 1);
+		session.cursorIndex = removeIndex;
+		session.onCursorChanged(session.cursorIndex);
 
 		const drawerWidth =
 			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 480;
-		const lastStroke = session.doc.strokes[session.doc.strokes.length - 1];
-		const lastPoint = lastStroke?.points[lastStroke.points.length - 1];
-		if (!lastPoint) {
+		const prevStroke = removeIndex > 0 ? session.doc.strokes[removeIndex - 1] : undefined;
+		const nextStroke = removeIndex < session.doc.strokes.length ? session.doc.strokes[removeIndex] : undefined;
+		const prevPoint = prevStroke?.points[prevStroke.points.length - 1];
+		const nextPoint = nextStroke?.points[0];
+		const anchorPoint =
+			prevPoint && nextPoint
+				? {
+					x: (prevPoint.x + nextPoint.x) * 0.5,
+					y: (prevPoint.y + nextPoint.y) * 0.5,
+				}
+				: prevPoint || nextPoint;
+
+		if (!anchorPoint) {
+			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
 			session.viewport = {
 				viewportX: 0,
-				lineOffsetY: 0,
+				lineOffsetY: lineHeight,
 			};
 		} else {
 			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
 			session.viewport = {
-				viewportX: Math.max(0, lastPoint.x - drawerWidth * 0.7),
-				lineOffsetY: Math.max(0, Math.floor(lastPoint.y / lineHeight) * lineHeight),
+				viewportX: Math.max(0, anchorPoint.x - drawerWidth * 0.5),
+				lineOffsetY: Math.max(0, Math.floor(anchorPoint.y / lineHeight) * lineHeight),
 			};
 		}
 
 		session.onViewportChanged(session.viewport);
 		session.onDocumentChanged();
+		this.snapNextStrokeToCursor = true;
 		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
 	}
@@ -323,6 +411,7 @@ export class InkDrawer {
 		const points = samples.length > 0 ? samples : [event];
 		const rect = this.canvasEl.getBoundingClientRect();
 		const rightEdgeTrigger = rect.width * 0.85;
+		const baselineLocalY = rect.height * INK_BASELINE_RATIO_FROM_TOP;
 
 		for (const sample of points) {
 			const localX = sample.clientX - rect.left;
@@ -332,7 +421,7 @@ export class InkDrawer {
 			}
 
 			const worldX = session.viewport.viewportX + localX;
-			const worldY = session.viewport.lineOffsetY + localY;
+			const worldY = session.viewport.lineOffsetY + (localY - baselineLocalY);
 			const previous = this.activeStroke.points[this.activeStroke.points.length - 1];
 			if (previous) {
 				const dx = previous.x - worldX;
@@ -376,6 +465,52 @@ export class InkDrawer {
 		session.onViewportChanged(session.viewport);
 	}
 
+	private scheduleIdleAdvance(strokePeakLocalX: number | null): void {
+		const session = this.session;
+		if (!session || strokePeakLocalX === null) {
+			return;
+		}
+		const delay = Math.max(500, this.getRuntimeConfig().idleAdvanceMs);
+		this.clearIdleAdvanceTimer();
+		this.idleAdvanceTimer = window.setTimeout(() => {
+			this.idleAdvanceTimer = 0;
+			if (!this.session || this.activePointerId !== null) {
+				return;
+			}
+			const drawerWidth =
+				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
+			if (drawerWidth <= 0) {
+				return;
+			}
+			const rightThreshold = drawerWidth * 0.52;
+			if (strokePeakLocalX < rightThreshold) {
+				return;
+			}
+			const targetLocalX = drawerWidth * 0.4;
+			const rawShift = strokePeakLocalX - targetLocalX;
+			if (rawShift <= drawerWidth * 0.05) {
+				return;
+			}
+			const minShift = drawerWidth * 0.1;
+			const maxShift = drawerWidth * 0.55;
+			const shift = Math.round(Math.max(minShift, Math.min(maxShift, rawShift)));
+			session.viewport = {
+				viewportX: session.viewport.viewportX + shift,
+				lineOffsetY: session.viewport.lineOffsetY,
+			};
+			session.onViewportChanged(session.viewport);
+			this.requestDraw();
+		}, delay);
+	}
+
+	private clearIdleAdvanceTimer(): void {
+		if (!this.idleAdvanceTimer) {
+			return;
+		}
+		window.clearTimeout(this.idleAdvanceTimer);
+		this.idleAdvanceTimer = 0;
+	}
+
 	private requestDraw(): void {
 		if (this.redrawQueued) {
 			return;
@@ -392,12 +527,15 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		const runtime = this.getRuntimeConfig();
 		drawDrawerCanvas(
 			this.canvasEl,
 			session.doc,
 			session.viewport.viewportX,
 			session.viewport.lineOffsetY,
+			session.cursorIndex,
 			this.activeStroke,
+			runtime.showWritingLine,
 		);
 	}
 
@@ -405,18 +543,169 @@ export class InkDrawer {
 		this.eraseButtonEl.classList.remove('is-active');
 		this.statusEl.textContent = 'Pen';
 	}
-}
 
-function getLastPoint(doc: InkDocument): { x: number; y: number } | null {
-	for (let i = doc.strokes.length - 1; i >= 0; i -= 1) {
-		const stroke = doc.strokes[i];
-		if (!stroke || stroke.points.length === 0) {
-			continue;
+	private clampCursorIndex(cursorIndex: number, length: number): number {
+		if (!Number.isFinite(cursorIndex)) {
+			return Math.max(0, length);
 		}
-		const point = stroke.points[stroke.points.length - 1];
-		if (point) {
-			return { x: point.x, y: point.y };
+		const normalizedLength = Math.max(0, length);
+		return Math.max(0, Math.min(normalizedLength, Math.floor(cursorIndex)));
+	}
+
+	private shiftFollowingStrokesForInsertion(
+		doc: InkDocument,
+		insertionIndex: number,
+		insertionAnchorX: number | null,
+	): void {
+		const insertedStroke = doc.strokes[insertionIndex];
+		if (!insertedStroke) {
+			return;
+		}
+		const insertedBounds = this.getStrokeBounds(insertedStroke);
+		if (!insertedBounds) {
+			return;
+		}
+
+		const lineHeight = Math.max(80, doc.meta.lineHeight);
+		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
+		const desiredGap = this.getInsertionWordGap(lineHeight);
+		const boundaryX =
+			typeof insertionAnchorX === 'number' && Number.isFinite(insertionAnchorX)
+				? insertionAnchorX
+				: insertedBounds.minX;
+		const boundaryTolerance = Math.max(4, desiredGap * 0.5);
+
+		let firstFollowingMinX = Number.POSITIVE_INFINITY;
+		for (let index = insertionIndex + 1; index < doc.strokes.length; index += 1) {
+			const stroke = doc.strokes[index];
+			if (!stroke) {
+				continue;
+			}
+			const bounds = this.getStrokeBounds(stroke);
+			if (!bounds) {
+				continue;
+			}
+			if (Math.abs(bounds.centerY - insertedBounds.centerY) > sameLineTolerance) {
+				continue;
+			}
+			if (bounds.maxX < boundaryX - boundaryTolerance) {
+				continue;
+			}
+			if (bounds.minX < firstFollowingMinX) {
+				firstFollowingMinX = bounds.minX;
+			}
+		}
+
+		if (!Number.isFinite(firstFollowingMinX)) {
+			return;
+		}
+
+		const shiftDelta = insertedBounds.maxX + desiredGap - firstFollowingMinX;
+		if (shiftDelta <= 0) {
+			return;
+		}
+
+		for (let index = insertionIndex + 1; index < doc.strokes.length; index += 1) {
+			const stroke = doc.strokes[index];
+			if (!stroke) {
+				continue;
+			}
+			const bounds = this.getStrokeBounds(stroke);
+			if (!bounds) {
+				continue;
+			}
+			if (Math.abs(bounds.centerY - insertedBounds.centerY) > sameLineTolerance) {
+				continue;
+			}
+			if (bounds.maxX < boundaryX - boundaryTolerance) {
+				continue;
+			}
+			for (const point of stroke.points) {
+				point.x += shiftDelta;
+			}
 		}
 	}
-	return null;
+
+	private getInsertionWordGap(lineHeight: number): number {
+		const wrapWordGapThreshold = Math.max(8, Math.min(26, lineHeight * 0.12));
+		return wrapWordGapThreshold + 2;
+	}
+
+	private alignStrokeToCursorX(stroke: InkStroke, cursorX: number): void {
+		const firstPoint = stroke.points[0];
+		if (!firstPoint) {
+			return;
+		}
+		const shiftX = cursorX - firstPoint.x;
+		if (!Number.isFinite(shiftX) || Math.abs(shiftX) < 0.5) {
+			return;
+		}
+		for (const point of stroke.points) {
+			point.x += shiftX;
+		}
+	}
+
+	private getStrokeBounds(stroke: InkStroke): {
+		minX: number;
+		maxX: number;
+		centerY: number;
+	} | null {
+		const firstPoint = stroke.points[0];
+		if (!firstPoint) {
+			return null;
+		}
+
+		let minX = firstPoint.x;
+		let maxX = firstPoint.x;
+		let minY = firstPoint.y;
+		let maxY = firstPoint.y;
+		for (const point of stroke.points) {
+			if (point.x < minX) minX = point.x;
+			if (point.x > maxX) maxX = point.x;
+			if (point.y < minY) minY = point.y;
+			if (point.y > maxY) maxY = point.y;
+		}
+
+		return {
+			minX,
+			maxX,
+			centerY: (minY + maxY) * 0.5,
+		};
+	}
+
+	private getCursorAnchorPoint(session: DrawerSession): { x: number; y: number } | null {
+		const cursorIndex = this.clampCursorIndex(session.cursorIndex, session.doc.strokes.length);
+		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
+		const prevStroke = cursorIndex > 0 ? session.doc.strokes[cursorIndex - 1] : undefined;
+		const nextStroke =
+			cursorIndex < session.doc.strokes.length ? session.doc.strokes[cursorIndex] : undefined;
+		const prevBounds = prevStroke ? this.getStrokeBounds(prevStroke) : null;
+		const nextBounds = nextStroke ? this.getStrokeBounds(nextStroke) : null;
+
+		if (prevBounds && nextBounds) {
+			const isSameLine = Math.abs(nextBounds.centerY - prevBounds.centerY) <= lineHeight * 0.6;
+			return {
+				x: isSameLine
+					? (prevBounds.maxX + nextBounds.minX) * 0.5
+					: prevBounds.maxX + 20,
+				y: (prevBounds.centerY + nextBounds.centerY) * 0.5,
+			};
+		}
+
+		if (prevBounds) {
+			return {
+				x: prevBounds.maxX + 24,
+				y: prevBounds.centerY,
+			};
+		}
+
+		if (nextBounds) {
+			return {
+				x: Math.max(0, nextBounds.minX - 24),
+				y: nextBounds.centerY,
+			};
+		}
+
+		return null;
+	}
 }

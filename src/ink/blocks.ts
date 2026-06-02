@@ -10,25 +10,45 @@ import {
 	getInkBounds,
 	INK_CODE_BLOCK_LANGUAGE,
 	InkDocument,
+	InkStroke,
 	InkViewport,
 	parseInkDocument,
 	serializeInkDocument,
 } from './model';
-import { drawInlineCanvas } from './render';
+import { drawInlineCanvas, findInlineInsertionIndex } from './render';
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
-const SOFT_LIMIT_BYTES = 300_000;
-const HARD_LIMIT_BYTES = 1_000_000;
 
 export class InkBlockRegistry {
 	private readonly plugin: Plugin;
 	private readonly drawer: InkDrawer;
+	private readonly getWrapWidthWorld: () => number;
+	private readonly getRenderLineHeightScale: () => number;
+	private readonly getShowWritingLine: () => boolean;
+	private readonly getSoftBlockLimitBytes: () => number;
+	private readonly getHardBlockLimitBytes: () => number;
+	private readonly getShowSoftLimitNotice: () => boolean;
 	private activeKey: string | null = null;
 
-	constructor(plugin: Plugin, drawer: InkDrawer) {
+	constructor(
+		plugin: Plugin,
+		drawer: InkDrawer,
+		getWrapWidthWorld: () => number,
+		getRenderLineHeightScale: () => number,
+		getShowWritingLine: () => boolean,
+		getSoftBlockLimitBytes: () => number,
+		getHardBlockLimitBytes: () => number,
+		getShowSoftLimitNotice: () => boolean,
+	) {
 		this.plugin = plugin;
 		this.drawer = drawer;
+		this.getWrapWidthWorld = getWrapWidthWorld;
+		this.getRenderLineHeightScale = getRenderLineHeightScale;
+		this.getShowWritingLine = getShowWritingLine;
+		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
+		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
+		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
 	}
 
 	register(): void {
@@ -67,7 +87,9 @@ export class InkBlockRegistry {
 		}
 
 		let documentModel = parsed;
-		let viewport = initialViewportFor(documentModel);
+		let viewport = initialViewportFor(documentModel, this.getWrapWidthWorld());
+		let cursorIndex = documentModel.strokes.length;
+		let showInlineCaret = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
 		let softWarned = false;
@@ -79,12 +101,22 @@ export class InkBlockRegistry {
 			attr: { role: 'button', 'aria-label': 'Open freeflow ink drawer' },
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
-		metaRowEl.createSpan({ text: 'Tap to write' });
-		const actionEl = metaRowEl.createSpan({ cls: 'freeflow-ink-meta-action', text: 'Open' });
-		actionEl.ariaHidden = 'true';
+		metaRowEl.createSpan({ text: 'Tap to place cursor' });
+		const actionEl = metaRowEl.createEl('button', {
+			cls: 'freeflow-ink-meta-action',
+			text: 'Open',
+		});
+		actionEl.type = 'button';
 
 		const renderInline = (): void => {
-			drawInlineCanvas(canvasEl, documentModel);
+			drawInlineCanvas(
+				canvasEl,
+				documentModel,
+				this.getWrapWidthWorld(),
+				this.getRenderLineHeightScale(),
+				this.getShowWritingLine(),
+				showInlineCaret ? cursorIndex : null,
+			);
 		};
 		renderInline();
 
@@ -92,21 +124,27 @@ export class InkBlockRegistry {
 			if (isDisposed) {
 				return;
 			}
+			const hardLimitBytes = this.getHardBlockLimitBytes();
+			const softLimitBytes = Math.min(this.getSoftBlockLimitBytes(), hardLimitBytes - 1);
 			const serialized = serializeInkDocument(documentModel);
 			const byteSize = serialized.length;
-			if (byteSize > HARD_LIMIT_BYTES) {
+			if (byteSize > hardLimitBytes) {
 				if (!hardWarned) {
 					hardWarned = true;
-					new Notice('Freeflow ink block is over 1 mb. Split into multiple blocks before saving more strokes.');
+					new Notice(
+						`Freeflow ink block is over ${formatBlockLimit(hardLimitBytes)}. Saving pauses above this hard limit.`,
+					);
 				}
 				containerEl.classList.add('is-over-limit');
 				return;
 			}
 			containerEl.classList.remove('is-over-limit');
 
-			if (byteSize > SOFT_LIMIT_BYTES && !softWarned) {
+			if (this.getShowSoftLimitNotice() && byteSize > softLimitBytes && !softWarned) {
 				softWarned = true;
-				new Notice('Freeflow ink block is growing large. Consider splitting at around 300 kb for best iOS performance.');
+				new Notice(
+					`Freeflow ink block is growing large (${formatBlockLimit(softLimitBytes)}+). You can raise this threshold in plugin settings.`,
+				);
 			}
 
 			try {
@@ -128,21 +166,34 @@ export class InkBlockRegistry {
 		};
 
 		const onDocumentChanged = (): void => {
+			cursorIndex = clampInsertionIndex(cursorIndex, documentModel.strokes.length);
 			renderInline();
 			if (!isActiveKey(blockKey)) {
 				scheduleSave();
 			}
 		};
 
-		const openDrawer = (): void => {
+		const openDrawer = (nextCursorIndex?: number): void => {
+			if (typeof nextCursorIndex === 'number' && Number.isFinite(nextCursorIndex)) {
+				cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
+				viewport = viewportForInsertion(documentModel, this.getWrapWidthWorld(), cursorIndex);
+			}
+			showInlineCaret = true;
+
 			setActiveKey(blockKey);
 			drawer.open({
 				key: blockKey,
 				doc: documentModel,
 				viewport,
+				cursorIndex,
 				onDocumentChanged,
 				onViewportChanged: (nextViewport) => {
 					viewport = nextViewport;
+				},
+				onCursorChanged: (nextCursorIndex) => {
+					cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
+					showInlineCaret = true;
+					renderInline();
 				},
 				onClose: () => {
 					if (isActiveKey(blockKey)) {
@@ -160,8 +211,44 @@ export class InkBlockRegistry {
 			}
 		};
 
-		canvasEl.addEventListener('click', openDrawer);
+		const onCanvasClick = (event: MouseEvent): void => {
+			const rect = canvasEl.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) {
+				showInlineCaret = true;
+				renderInline();
+				return;
+			}
+
+			const clickX = event.clientX - rect.left;
+			const clickY = event.clientY - rect.top;
+			cursorIndex = findInlineInsertionIndex(
+				documentModel,
+				this.getWrapWidthWorld(),
+				this.getRenderLineHeightScale(),
+				rect.width,
+				clickX,
+				clickY,
+			);
+			viewport = viewportForInsertion(documentModel, this.getWrapWidthWorld(), cursorIndex);
+			showInlineCaret = true;
+			renderInline();
+			if (isActiveKey(blockKey)) {
+				drawer.updateCursor(blockKey, cursorIndex, viewport);
+			}
+		};
+
+		const onCanvasDoubleClick = (): void => {
+			openDrawer(cursorIndex);
+		};
+
+		const onActionClick = (): void => {
+			openDrawer(cursorIndex);
+		};
+
+		canvasEl.addEventListener('click', onCanvasClick);
+		canvasEl.addEventListener('dblclick', onCanvasDoubleClick);
 		canvasEl.addEventListener('keydown', onCanvasKeyDown);
+		actionEl.addEventListener('click', onActionClick);
 		canvasEl.tabIndex = 0;
 
 		const resizeObserver = new ResizeObserver(() => {
@@ -174,8 +261,10 @@ export class InkBlockRegistry {
 				onunload(): void {
 					isDisposed = true;
 					resizeObserver.disconnect();
-					canvasEl.removeEventListener('click', openDrawer);
+						canvasEl.removeEventListener('click', onCanvasClick);
+						canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
 					canvasEl.removeEventListener('keydown', onCanvasKeyDown);
+						actionEl.removeEventListener('click', onActionClick);
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
 						saveTimeout = 0;
@@ -225,12 +314,91 @@ function toSectionInfoLike(value: unknown): SectionInfoLike | null {
 	};
 }
 
-function initialViewportFor(doc: InkDocument): InkViewport {
+function initialViewportFor(doc: InkDocument, wrapWidth: number): InkViewport {
 	const bounds = getInkBounds(doc);
 	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
-	const lineOffsetY = Math.max(0, Math.floor(bounds.maxY / lineHeight) * lineHeight);
+	const lineOffsetY = Math.max(lineHeight, Math.floor(bounds.maxY / lineHeight) * lineHeight);
 	return {
-		viewportX: Math.max(0, bounds.maxX - 600),
+		viewportX: Math.max(0, bounds.maxX - wrapWidth * 0.66),
 		lineOffsetY,
 	};
+}
+
+function viewportForInsertion(doc: InkDocument, wrapWidth: number, insertionIndex: number): InkViewport {
+	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
+	const clampedIndex = clampInsertionIndex(insertionIndex, doc.strokes.length);
+	const prevStroke = clampedIndex > 0 ? doc.strokes[clampedIndex - 1] : undefined;
+	const nextStroke = clampedIndex < doc.strokes.length ? doc.strokes[clampedIndex] : undefined;
+	const prevAnchor = getStrokeAnchor(prevStroke);
+	const nextAnchor = getStrokeAnchor(nextStroke);
+
+	if (!prevAnchor && !nextAnchor) {
+		return initialViewportFor(doc, wrapWidth);
+	}
+	const isSameLine =
+		!!prevAnchor &&
+		!!nextAnchor &&
+		Math.abs(nextAnchor.centerY - prevAnchor.centerY) <= lineHeight * 0.6;
+
+	const anchorX =
+		prevAnchor && nextAnchor
+			? isSameLine
+				? (prevAnchor.rightX + nextAnchor.leftX) * 0.5
+				: prevAnchor.rightX + 20
+			: prevAnchor
+				? prevAnchor.rightX + 24
+				: Math.max(0, (nextAnchor?.leftX ?? 0) - 24);
+	const anchorY =
+		prevAnchor && nextAnchor
+			? (prevAnchor.centerY + nextAnchor.centerY) * 0.5
+			: prevAnchor
+				? prevAnchor.centerY
+				: (nextAnchor?.centerY ?? lineHeight);
+
+	return {
+		viewportX: Math.max(0, anchorX - wrapWidth * 0.4),
+		lineOffsetY: Math.max(lineHeight, Math.floor(anchorY / lineHeight) * lineHeight),
+	};
+}
+
+function getStrokeAnchor(stroke: InkStroke | undefined): {
+	leftX: number;
+	rightX: number;
+	centerY: number;
+} | null {
+	if (!stroke || stroke.points.length === 0) {
+		return null;
+	}
+
+	let minX = stroke.points[0]?.x ?? 0;
+	let maxX = stroke.points[0]?.x ?? 0;
+	let minY = stroke.points[0]?.y ?? 0;
+	let maxY = stroke.points[0]?.y ?? 0;
+	for (const point of stroke.points) {
+		if (point.x < minX) minX = point.x;
+		if (point.x > maxX) maxX = point.x;
+		if (point.y < minY) minY = point.y;
+		if (point.y > maxY) maxY = point.y;
+	}
+
+	return {
+		leftX: minX,
+		rightX: maxX,
+		centerY: (minY + maxY) * 0.5,
+	};
+}
+
+function clampInsertionIndex(value: number, length: number): number {
+	if (!Number.isFinite(value)) {
+		return length;
+	}
+	const normalizedLength = Math.max(0, length);
+	return Math.max(0, Math.min(normalizedLength, Math.floor(value)));
+}
+
+function formatBlockLimit(bytes: number): string {
+	if (bytes >= 1_000_000) {
+		return `${(bytes / 1_000_000).toFixed(1)} MB`;
+	}
+	return `${Math.round(bytes / 1000)} KB`;
 }

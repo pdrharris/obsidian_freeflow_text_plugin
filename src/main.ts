@@ -1,18 +1,166 @@
 import { Plugin } from 'obsidian';
 import { InkBlockRegistry } from './ink/blocks';
-import { InkDrawer } from './ink/drawer';
+import { DrawerRuntimeConfig, InkDrawer } from './ink/drawer';
+import {
+	DEFAULT_FREEFLOW_SETTINGS,
+	FreeFlowInkSettingTab,
+	FreeFlowInkSettings,
+} from './settings';
+
+export interface FreeFlowInkAdaptiveMetrics {
+	viewportWidth: number;
+	viewportHeight: number;
+	isPhoneLike: boolean;
+	lineWidthBasePx: number;
+	lineWidthPx: number;
+	renderLineHeightScale: number;
+	drawerHeightBasePx: number;
+	drawerHeightPx: number;
+}
 
 export default class FreeFlowInkPlugin extends Plugin {
+	settings: FreeFlowInkSettings = { ...DEFAULT_FREEFLOW_SETTINGS };
 	private drawer: InkDrawer | null = null;
+	private runtimeStyleEl: HTMLStyleElement | null = null;
 
-	onload(): void {
-		this.drawer = new InkDrawer();
-		const registry = new InkBlockRegistry(this, this.drawer);
+	async onload(): Promise<void> {
+		await this.loadSettings();
+		this.ensureRuntimeStyle();
+		this.applyRuntimeStyles();
+
+		this.drawer = new InkDrawer(() => this.getDrawerRuntimeConfig());
+		const registry = new InkBlockRegistry(
+			this,
+			this.drawer,
+			() => this.getWrapWidthWorld(),
+			() => this.getRenderLineHeightScale(),
+			() => this.settings.showWritingLine,
+			() => this.getSoftBlockLimitBytes(),
+			() => this.getHardBlockLimitBytes(),
+			() => this.settings.showSoftLimitNotice,
+		);
 		registry.register();
+		this.addSettingTab(new FreeFlowInkSettingTab(this.app, this));
+		this.registerDomEvent(activeWindow, 'resize', () => this.applyRuntimeStyles());
 
 		this.register(() => {
 			this.drawer?.destroy();
 			this.drawer = null;
+			this.runtimeStyleEl?.remove();
+			this.runtimeStyleEl = null;
 		});
 	}
+
+	async loadSettings(): Promise<void> {
+		this.settings = Object.assign(
+			{},
+			DEFAULT_FREEFLOW_SETTINGS,
+			(await this.loadData()) as Partial<FreeFlowInkSettings>,
+		);
+		this.normalizeSettings();
+	}
+
+	async saveSettings(): Promise<void> {
+		this.normalizeSettings();
+		await this.saveData(this.settings);
+		this.applyRuntimeStyles();
+	}
+
+	private getDrawerRuntimeConfig(): DrawerRuntimeConfig {
+		return {
+			wrapWidth: this.getWrapWidthWorld(),
+			idleAdvanceMs: this.settings.idleAdvanceMs,
+			showWritingLine: this.settings.showWritingLine,
+		};
+	}
+
+	getAdaptiveMetrics(): FreeFlowInkAdaptiveMetrics {
+		const viewportWidth = Math.max(320, activeWindow.innerWidth || window.innerWidth || 1024);
+		const viewportHeight = Math.max(420, activeWindow.innerHeight || window.innerHeight || 900);
+		const isPhoneLike = viewportWidth <= 700;
+
+		const drawerFrameWidth = Math.max(240, viewportWidth - (isPhoneLike ? 86 : 100));
+		const lineWidthBasePx = Math.round(drawerFrameWidth * (isPhoneLike ? 0.94 : 0.9));
+		const lineWidthPx = clamp(
+			Math.round(lineWidthBasePx * this.settings.lineWidthScale),
+			80,
+			1400,
+		);
+
+		const drawerHeightBasePx = Math.round(viewportHeight * (isPhoneLike ? 0.34 : 0.26));
+		const drawerHeightPx = clamp(
+			Math.round(drawerHeightBasePx * this.settings.drawerHeightScale),
+			isPhoneLike ? 70 : 80,
+			isPhoneLike ? 380 : 320,
+		);
+
+		return {
+			viewportWidth,
+			viewportHeight,
+			isPhoneLike,
+			lineWidthBasePx,
+			lineWidthPx,
+			renderLineHeightScale: this.getRenderLineHeightScale(),
+			drawerHeightBasePx,
+			drawerHeightPx,
+		};
+	}
+
+	getRenderLineHeightScale(): number {
+		return clamp(this.settings.renderLineHeightScale, 0.1, 1.3);
+	}
+
+	private getWrapWidthWorld(): number {
+		return this.getAdaptiveMetrics().lineWidthPx;
+	}
+
+	private getSoftBlockLimitBytes(): number {
+		return Math.max(200_000, Math.round(this.settings.softBlockLimitKb * 1024));
+	}
+
+	private getHardBlockLimitBytes(): number {
+		return Math.max(512_000, Math.round(this.settings.hardBlockLimitKb * 1024));
+	}
+
+	private getDrawerHeightPx(): number {
+		return this.getAdaptiveMetrics().drawerHeightPx;
+	}
+
+	private ensureRuntimeStyle(): void {
+		if (this.runtimeStyleEl) {
+			return;
+		}
+		const styleEl = activeDocument.createElement('style');
+		styleEl.id = 'freeflow-ink-runtime-style';
+		activeDocument.head.appendChild(styleEl);
+		this.runtimeStyleEl = styleEl;
+	}
+
+	private applyRuntimeStyles(): void {
+		this.ensureRuntimeStyle();
+		if (!this.runtimeStyleEl) {
+			return;
+		}
+		const drawerHeight = this.getDrawerHeightPx();
+		this.runtimeStyleEl.textContent = `.freeflow-ink-drawer-canvas { height: ${drawerHeight}px; }`;
+		this.drawer?.refreshLayout();
+	}
+
+	private normalizeSettings(): void {
+		this.settings.softBlockLimitKb = clamp(Math.round(this.settings.softBlockLimitKb), 200, 12000);
+		this.settings.hardBlockLimitKb = clamp(Math.round(this.settings.hardBlockLimitKb), 512, 16000);
+		if (this.settings.hardBlockLimitKb <= this.settings.softBlockLimitKb) {
+			this.settings.hardBlockLimitKb = Math.min(16000, this.settings.softBlockLimitKb + 256);
+		}
+	}
+}
+
+function clamp(value: number, min: number, max: number): number {
+	if (value < min) {
+		return min;
+	}
+	if (value > max) {
+		return max;
+	}
+	return value;
 }
