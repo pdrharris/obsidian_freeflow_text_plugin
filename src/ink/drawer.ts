@@ -374,7 +374,7 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
 		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.addEventListener('pointercancel', this.onPointerCancel);
-		this.canvasEl.addEventListener('lostpointercapture', this.onPointerCancel);
+		this.canvasEl.addEventListener('lostpointercapture', this.onLostPointerCapture);
 		window.addEventListener('resize', this.onResize);
 		this.eraseButtonEl.addEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
@@ -387,7 +387,7 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
 		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerCancel);
-		this.canvasEl.removeEventListener('lostpointercapture', this.onPointerCancel);
+		this.canvasEl.removeEventListener('lostpointercapture', this.onLostPointerCapture);
 		window.removeEventListener('resize', this.onResize);
 		this.eraseButtonEl.removeEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
@@ -471,7 +471,16 @@ export class InkDrawer {
 
 	private onPointerDown = (event: PointerEvent): void => {
 		const session = this.session;
-		if (!session || this.activePointerId !== null) {
+		if (!session) {
+			return;
+		}
+		if (
+			this.activePointerId !== null &&
+			!this.canvasEl.hasPointerCapture(this.activePointerId)
+		) {
+			this.finishStroke(false);
+		}
+		if (this.activePointerId !== null) {
 			return;
 		}
 		this.clearIdleAdvanceTimer();
@@ -524,6 +533,19 @@ export class InkDrawer {
 
 	private onPointerCancel = (event: PointerEvent): void => {
 		if (this.activePointerId !== event.pointerId) {
+			return;
+		}
+		this.finishStroke(false);
+	};
+
+	private onLostPointerCapture = (event: PointerEvent): void => {
+		if (this.activePointerId === null) {
+			return;
+		}
+		if (
+			event.pointerId !== this.activePointerId &&
+			this.canvasEl.hasPointerCapture(this.activePointerId)
+		) {
 			return;
 		}
 		this.finishStroke(false);
