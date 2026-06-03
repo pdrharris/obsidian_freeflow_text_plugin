@@ -545,6 +545,7 @@ export class InkDrawer {
 				typeof this.pendingSnapAnchorX === 'number' && Number.isFinite(this.pendingSnapAnchorX)
 					? this.pendingSnapAnchorX
 					: (cursorAnchor?.x ?? null);
+			const shouldEnforceLeadingGap = this.snapNextStrokeToCursor;
 			if (this.snapNextStrokeToCursor) {
 				if (typeof insertionAnchorX === 'number' && Number.isFinite(insertionAnchorX)) {
 					this.alignStrokeToCursorX(this.activeStroke, insertionAnchorX);
@@ -557,7 +558,11 @@ export class InkDrawer {
 				strokePeakLocalX = activeBounds.maxX - session.viewport.viewportX;
 			}
 			session.doc.strokes.splice(insertionIndex, 0, this.activeStroke);
-			this.ensureInsertedStrokeGapFromPrevious(session.doc, insertionIndex);
+			this.ensureInsertedStrokeGapFromPrevious(
+				session.doc,
+				insertionIndex,
+				shouldEnforceLeadingGap,
+			);
 			this.shiftFollowingStrokesForInsertion(session.doc, insertionIndex, insertionAnchorX);
 			session.cursorIndex = insertionIndex + 1;
 			session.linePreference = 'prev';
@@ -893,7 +898,11 @@ export class InkDrawer {
 	private ensureInsertedStrokeGapFromPrevious(
 		doc: InkDocument,
 		insertionIndex: number,
+		enforceLeadingGap: boolean,
 	): void {
+		if (!enforceLeadingGap) {
+			return;
+		}
 		const insertedStroke = doc.strokes[insertionIndex];
 		if (!insertedStroke) {
 			return;
