@@ -1,6 +1,6 @@
-import { Plugin } from 'obsidian';
+import { Notice, Plugin } from 'obsidian';
 import { InkBlockRegistry } from './ink/blocks';
-import { DrawerRuntimeConfig, InkDrawer } from './ink/drawer';
+import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import {
 	DEFAULT_FREEFLOW_SETTINGS,
 	FreeFlowInkSettingTab,
@@ -29,6 +29,13 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.applyRuntimeStyles();
 
 		this.drawer = new InkDrawer(() => this.getDrawerRuntimeConfig());
+		this.addCommand({
+			id: 'run-basic-ink-diagnostics',
+			name: 'Run basic diagnostics',
+			callback: () => {
+				this.runBasicInkDiagnostics();
+			},
+		});
 		const registry = new InkBlockRegistry(
 			this,
 			this.drawer,
@@ -152,6 +159,28 @@ export default class FreeFlowInkPlugin extends Plugin {
 		if (this.settings.hardBlockLimitKb <= this.settings.softBlockLimitKb) {
 			this.settings.hardBlockLimitKb = Math.min(16000, this.settings.softBlockLimitKb + 256);
 		}
+	}
+
+	private runBasicInkDiagnostics(): void {
+		if (!this.drawer) {
+			new Notice('Freeflow ink drawer is not ready yet.');
+			return;
+		}
+
+		const results = this.drawer.runBasicDiagnostics();
+		const failed = results.filter((result) => !result.pass);
+		const status = failed.length === 0 ? 'PASS' : 'FAIL';
+		const summary = `Ink diagnostics ${status}: ${results.length - failed.length}/${results.length} passing`;
+		if (failed.length === 0) {
+			new Notice(summary, 7000);
+			return;
+		}
+
+		const failureLines = failed
+			.slice(0, 3)
+			.map((result: InkDiagnosticResult) => `${result.name}: ${result.detail}`)
+			.join(' | ');
+		new Notice(`${summary}. ${failureLines}`, 9000);
 	}
 }
 

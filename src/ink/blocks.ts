@@ -7,18 +7,23 @@ import {
 import { InkDrawer } from './drawer';
 import {
 	DEFAULT_INK_DOCUMENT,
-	getInkBounds,
 	INK_CODE_BLOCK_LANGUAGE,
 	InkDocument,
 	InkStroke,
 	InkViewport,
+	isLineBreakMarkerStroke,
 	parseInkDocument,
 	serializeInkDocument,
 } from './model';
-import { drawInlineCanvas, findInlineInsertionIndex } from './render';
+import {
+	drawInlineCanvas,
+	findInlineInsertionSelection,
+	type InsertionLinePreference,
+} from './render';
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
+const NEW_LINE_START_PADDING = 24;
 
 export class InkBlockRegistry {
 	private readonly plugin: Plugin;
@@ -89,6 +94,7 @@ export class InkBlockRegistry {
 		let documentModel = parsed;
 		let viewport = initialViewportFor(documentModel, this.getWrapWidthWorld());
 		let cursorIndex = documentModel.strokes.length;
+		let cursorLinePreference: InsertionLinePreference = 'auto';
 		let showInlineCaret = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
@@ -116,6 +122,7 @@ export class InkBlockRegistry {
 				this.getRenderLineHeightScale(),
 				this.getShowWritingLine(),
 				showInlineCaret ? cursorIndex : null,
+				cursorLinePreference,
 			);
 		};
 		renderInline();
@@ -175,8 +182,17 @@ export class InkBlockRegistry {
 
 		const openDrawer = (nextCursorIndex?: number): void => {
 			if (typeof nextCursorIndex === 'number' && Number.isFinite(nextCursorIndex)) {
-				cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
-				viewport = viewportForInsertion(documentModel, this.getWrapWidthWorld(), cursorIndex);
+				const nextIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
+				if (nextIndex !== cursorIndex) {
+					cursorIndex = nextIndex;
+					cursorLinePreference = 'auto';
+					viewport = viewportForInsertion(
+						documentModel,
+						this.getWrapWidthWorld(),
+						cursorIndex,
+						cursorLinePreference,
+					);
+				}
 			}
 			showInlineCaret = true;
 
@@ -186,12 +202,18 @@ export class InkBlockRegistry {
 				doc: documentModel,
 				viewport,
 				cursorIndex,
+				linePreference: cursorLinePreference,
 				onDocumentChanged,
 				onViewportChanged: (nextViewport) => {
 					viewport = nextViewport;
 				},
 				onCursorChanged: (nextCursorIndex) => {
 					cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
+					showInlineCaret = true;
+					renderInline();
+				},
+				onLinePreferenceChanged: (nextLinePreference) => {
+					cursorLinePreference = nextLinePreference;
 					showInlineCaret = true;
 					renderInline();
 				},
@@ -221,7 +243,7 @@ export class InkBlockRegistry {
 
 			const clickX = event.clientX - rect.left;
 			const clickY = event.clientY - rect.top;
-			cursorIndex = findInlineInsertionIndex(
+			const selection = findInlineInsertionSelection(
 				documentModel,
 				this.getWrapWidthWorld(),
 				this.getRenderLineHeightScale(),
@@ -229,11 +251,18 @@ export class InkBlockRegistry {
 				clickX,
 				clickY,
 			);
-			viewport = viewportForInsertion(documentModel, this.getWrapWidthWorld(), cursorIndex);
+			cursorIndex = selection.index;
+			cursorLinePreference = selection.linePreference;
+			viewport = viewportForInsertion(
+				documentModel,
+				this.getWrapWidthWorld(),
+				cursorIndex,
+				cursorLinePreference,
+			);
 			showInlineCaret = true;
 			renderInline();
 			if (isActiveKey(blockKey)) {
-				drawer.updateCursor(blockKey, cursorIndex, viewport);
+				drawer.updateCursor(blockKey, cursorIndex, cursorLinePreference, viewport);
 			}
 		};
 
@@ -315,16 +344,21 @@ function toSectionInfoLike(value: unknown): SectionInfoLike | null {
 }
 
 function initialViewportFor(doc: InkDocument, wrapWidth: number): InkViewport {
-	const bounds = getInkBounds(doc);
+	const bounds = getVisibleInkBounds(doc);
 	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
-	const lineOffsetY = Math.max(lineHeight, Math.floor(bounds.maxY / lineHeight) * lineHeight);
+	const lineOffsetY = quantizeLineOffset(bounds.maxY, lineHeight);
 	return {
 		viewportX: Math.max(0, bounds.maxX - wrapWidth * 0.66),
 		lineOffsetY,
 	};
 }
 
-function viewportForInsertion(doc: InkDocument, wrapWidth: number, insertionIndex: number): InkViewport {
+function viewportForInsertion(
+	doc: InkDocument,
+	wrapWidth: number,
+	insertionIndex: number,
+	linePreference: InsertionLinePreference = 'auto',
+): InkViewport {
 	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
 	const clampedIndex = clampInsertionIndex(insertionIndex, doc.strokes.length);
 	const prevStroke = clampedIndex > 0 ? doc.strokes[clampedIndex - 1] : undefined;
@@ -344,20 +378,26 @@ function viewportForInsertion(doc: InkDocument, wrapWidth: number, insertionInde
 		prevAnchor && nextAnchor
 			? isSameLine
 				? (prevAnchor.rightX + nextAnchor.leftX) * 0.5
-				: prevAnchor.rightX + 20
+				: linePreference === 'prev'
+					? prevAnchor.rightX + 20
+					: Math.max(0, nextAnchor.leftX - 24)
 			: prevAnchor
 				? prevAnchor.rightX + 24
 				: Math.max(0, (nextAnchor?.leftX ?? 0) - 24);
 	const anchorY =
 		prevAnchor && nextAnchor
-			? (prevAnchor.centerY + nextAnchor.centerY) * 0.5
+			? isSameLine
+				? (prevAnchor.centerY + nextAnchor.centerY) * 0.5
+				: linePreference === 'prev'
+					? prevAnchor.centerY
+					: nextAnchor.centerY
 			: prevAnchor
 				? prevAnchor.centerY
 				: (nextAnchor?.centerY ?? lineHeight);
 
 	return {
-		viewportX: Math.max(0, anchorX - wrapWidth * 0.4),
-		lineOffsetY: Math.max(lineHeight, Math.floor(anchorY / lineHeight) * lineHeight),
+		viewportX: Math.max(0, anchorX - wrapWidth * 0.3),
+		lineOffsetY: quantizeLineOffset(anchorY, lineHeight),
 	};
 }
 
@@ -368,6 +408,14 @@ function getStrokeAnchor(stroke: InkStroke | undefined): {
 } | null {
 	if (!stroke || stroke.points.length === 0) {
 		return null;
+	}
+	if (isLineBreakMarkerStroke(stroke)) {
+		const markerY = stroke.points[0]?.y ?? 0;
+		return {
+			leftX: NEW_LINE_START_PADDING,
+			rightX: NEW_LINE_START_PADDING,
+			centerY: markerY,
+		};
 	}
 
 	let minX = stroke.points[0]?.x ?? 0;
@@ -401,4 +449,55 @@ function formatBlockLimit(bytes: number): string {
 		return `${(bytes / 1_000_000).toFixed(1)} MB`;
 	}
 	return `${Math.round(bytes / 1000)} KB`;
+}
+
+function getVisibleInkBounds(doc: InkDocument): {
+	minX: number;
+	maxX: number;
+	minY: number;
+	maxY: number;
+} {
+	let minX = 0;
+	let maxX = 0;
+	let minY = 0;
+	let maxY = 0;
+	let hasPoint = false;
+
+	for (const stroke of doc.strokes) {
+		if (isLineBreakMarkerStroke(stroke)) {
+			continue;
+		}
+		for (const point of stroke.points) {
+			if (!hasPoint) {
+				minX = point.x;
+				maxX = point.x;
+				minY = point.y;
+				maxY = point.y;
+				hasPoint = true;
+				continue;
+			}
+			if (point.x < minX) minX = point.x;
+			if (point.x > maxX) maxX = point.x;
+			if (point.y < minY) minY = point.y;
+			if (point.y > maxY) maxY = point.y;
+		}
+	}
+
+	if (!hasPoint) {
+		return {
+			minX: 0,
+			maxX: 0,
+			minY: 0,
+			maxY: 0,
+		};
+	}
+
+	return { minX, maxX, minY, maxY };
+}
+
+function quantizeLineOffset(y: number, lineHeight: number): number {
+	if (!Number.isFinite(y)) {
+		return lineHeight;
+	}
+	return Math.max(lineHeight, Math.round(y / lineHeight) * lineHeight);
 }

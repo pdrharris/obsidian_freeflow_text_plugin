@@ -1,4 +1,9 @@
-﻿import { InkDocument, InkStroke, INK_BASELINE_RATIO_FROM_TOP } from './model';
+﻿import {
+	InkDocument,
+	InkStroke,
+	INK_BASELINE_RATIO_FROM_TOP,
+	isLineBreakMarkerStroke,
+} from './model';
 
 export interface InlineRenderMetrics {
 cssHeight: number;
@@ -47,10 +52,18 @@ minY: number;
 maxY: number;
 }
 
+export type InsertionLinePreference = 'auto' | 'prev' | 'next';
+
+export interface InlineInsertionSelection {
+	index: number;
+	linePreference: InsertionLinePreference;
+}
+
 interface InsertionBoundary {
 index: number;
 x: number;
 y: number;
+	linePreference: InsertionLinePreference;
 }
 
 interface InlineCaretMarker {
@@ -110,8 +123,30 @@ cssWidth: number,
 clickCssX: number,
 clickCssY: number,
 ): number {
+const selection = findInlineInsertionSelection(
+	doc,
+	wrapWidth,
+	renderLineHeightScale,
+	cssWidth,
+	clickCssX,
+	clickCssY,
+);
+return selection.index;
+}
+
+export function findInlineInsertionSelection(
+	doc: InkDocument,
+	wrapWidth: number,
+	renderLineHeightScale: number,
+	cssWidth: number,
+	clickCssX: number,
+	clickCssY: number,
+): InlineInsertionSelection {
 if (doc.strokes.length === 0) {
-return 0;
+	return {
+		index: 0,
+		linePreference: 'auto',
+	};
 }
 
 const contentWorldWidth = Math.max(220, wrapWidth);
@@ -127,15 +162,21 @@ layout.strokePoints,
 layout.effectiveLineHeight,
 );
 if (boundaries.length === 0) {
-return doc.strokes.length;
+	return {
+		index: doc.strokes.length,
+		linePreference: 'auto',
+	};
 }
-const bestIndex = resolveInsertionIndexFromClick(
+const bestBoundary = resolveInsertionBoundaryFromClick(
 boundaries,
 clickWorldX,
 clickWorldY,
 layout.effectiveLineHeight,
 );
-return clamp(bestIndex, 0, doc.strokes.length);
+	return {
+		index: clamp(bestBoundary.index, 0, doc.strokes.length),
+		linePreference: bestBoundary.linePreference,
+	};
 }
 
 export function drawInlineCanvas(
@@ -145,6 +186,7 @@ wrapWidth: number,
 renderLineHeightScale: number,
 showWritingLine: boolean,
 insertionIndex: number | null = null,
+linePreference: InsertionLinePreference = 'auto',
 ): InlineRenderMetrics {
 const cssWidth = Math.max(280, canvas.parentElement?.clientWidth ?? canvas.clientWidth ?? 280);
 const metrics = computeInlineMetrics(doc, cssWidth, wrapWidth, renderLineHeightScale);
@@ -180,7 +222,7 @@ ctx.stroke();
 
 drawWrappedInlineStrokes(ctx, doc, layout.strokePoints, scale);
 if (typeof insertionIndex === 'number' && Number.isFinite(insertionIndex)) {
-const marker = getInlineCaretMarker(doc, layout, insertionIndex);
+	const marker = getInlineCaretMarker(doc, layout, insertionIndex, linePreference);
 if (marker) {
 const caretX = marker.x * scale;
 const caretY = marker.y * scale;
@@ -253,7 +295,10 @@ ctx.setLineDash([]);
 
 const clampedCursorIndex = clamp(cursorIndex, 0, doc.strokes.length);
 const visibleStrokes = doc.strokes.slice(0, clampedCursorIndex);
-const inLineStrokes = visibleStrokes.filter((stroke) => {
+	const inLineStrokes = visibleStrokes.filter((stroke) => {
+		if (isLineBreakMarkerStroke(stroke)) {
+			return false;
+		}
 const first = stroke.points[0];
 const last = stroke.points[stroke.points.length - 1];
 if (!first || !last) {
@@ -408,7 +453,20 @@ doc: InkDocument,
 strokePoints: Map<InkStroke, Array<{ x: number; y: number }>>,
 effectiveLineHeight: number,
 ): InsertionBoundary[] {
+	const lineStartX = INLINE_WRAP_MARGIN_X;
 	const strokeAnchors = doc.strokes.map((stroke) => {
+		if (isLineBreakMarkerStroke(stroke)) {
+			const markerPoints = strokePoints.get(stroke);
+			const markerY = markerPoints?.[0]?.y;
+			if (typeof markerY !== 'number' || !Number.isFinite(markerY)) {
+				return null;
+			}
+			return {
+				leftX: lineStartX,
+				rightX: lineStartX,
+				centerY: markerY,
+			};
+		}
 const points = strokePoints.get(stroke);
 if (!points || points.length === 0) {
 return null;
@@ -456,7 +514,7 @@ return value;
 return null;
 };
 
-const boundaries: InsertionBoundary[] = [];
+	const boundaries: InsertionBoundary[] = [];
 for (let index = 0; index <= doc.strokes.length; index += 1) {
 		const prevAnchor = getPrevAnchor(index - 1);
 		const nextAnchor = getNextAnchor(index);
@@ -472,32 +530,35 @@ if (isSameLine) {
 					maxX >= minX
 						? clamp(desiredX, minX, maxX)
 						: desiredX;
-boundaries.push({
-index,
+				boundaries.push({
+					index,
 					x: Math.max(0, resolvedX),
 					y: (prevAnchor.centerY + nextAnchor.centerY) * 0.5,
-});
-continue;
+					linePreference: 'auto',
+				});
+			} else {
+				boundaries.push({
+					index,
+					x: prevAnchor.rightX + 20,
+					y: prevAnchor.centerY,
+					linePreference: 'prev',
+				});
+				boundaries.push({
+					index,
+					x: lineStartX,
+					y: nextAnchor.centerY,
+					linePreference: 'next',
+				});
 }
-
-boundaries.push({
-index,
-				x: prevAnchor.rightX + 20,
-				y: prevAnchor.centerY,
-			});
-			boundaries.push({
-				index,
-				x: Math.max(0, nextAnchor.leftX - 20),
-				y: nextAnchor.centerY,
-});
 continue;
 }
 
 		if (nextAnchor) {
 boundaries.push({
 index,
-				x: Math.max(0, nextAnchor.leftX - 24),
+				x: lineStartX,
 				y: nextAnchor.centerY,
+				linePreference: 'next',
 });
 continue;
 }
@@ -507,46 +568,41 @@ boundaries.push({
 index,
 				x: prevAnchor.rightX + 24,
 				y: prevAnchor.centerY,
+				linePreference: 'prev',
 });
 continue;
 }
 
-boundaries.push({ index: 0, x: 0, y: 0 });
+boundaries.push({ index: 0, x: 0, y: 0, linePreference: 'auto' });
 }
 
 return boundaries;
 }
 
-function resolveInsertionIndexFromClick(
+function resolveInsertionBoundaryFromClick(
 boundaries: InsertionBoundary[],
 clickWorldX: number,
 clickWorldY: number,
 effectiveLineHeight: number,
-): number {
+): InsertionBoundary {
 const firstBoundary = boundaries[0];
 if (!firstBoundary) {
-return 0;
+	return {
+		index: 0,
+		x: 0,
+		y: 0,
+		linePreference: 'auto',
+	};
 }
-
-let nearestByY = firstBoundary;
-let nearestYDistance = Math.abs(clickWorldY - nearestByY.y);
-for (const boundary of boundaries) {
-const distanceY = Math.abs(clickWorldY - boundary.y);
-if (distanceY < nearestYDistance) {
-nearestByY = boundary;
-nearestYDistance = distanceY;
-}
-}
-
-const lineBand = Math.max(12, effectiveLineHeight * 0.42);
-const sameLineBoundaries = boundaries.filter(
-boundary => Math.abs(boundary.y - nearestByY.y) <= lineBand,
-);
-const candidates = sameLineBoundaries.length > 0 ? sameLineBoundaries : boundaries;
+	const verticalWindow = Math.max(6, effectiveLineHeight * 0.72);
+	const nearbyRows = boundaries.filter(
+		(boundary) => Math.abs(clickWorldY - boundary.y) <= verticalWindow,
+	);
+	const candidates = nearbyRows.length > 0 ? nearbyRows : boundaries;
 
 const firstCandidate = candidates[0];
 if (!firstCandidate) {
-return nearestByY.index;
+	return firstBoundary;
 }
 
 let best = firstCandidate;
@@ -554,20 +610,21 @@ let bestScore = Number.POSITIVE_INFINITY;
 for (const candidate of candidates) {
 const dx = Math.abs(clickWorldX - candidate.x);
 const dy = Math.abs(clickWorldY - candidate.y);
-const score = dx + dy * 0.2;
+	const score = dx + dy * 0.45;
 if (score < bestScore) {
 bestScore = score;
 best = candidate;
 }
 }
 
-return best.index;
+return best;
 }
 
 function getInlineCaretMarker(
 doc: InkDocument,
 layout: InlineLayout,
 insertionIndex: number,
+linePreference: InsertionLinePreference,
 ): InlineCaretMarker | null {
 const clampedIndex = clamp(insertionIndex, 0, doc.strokes.length);
 if (doc.strokes.length === 0) {
@@ -583,7 +640,13 @@ doc,
 layout.strokePoints,
 layout.effectiveLineHeight,
 );
-const boundary = boundaries.find((item) => item.index === clampedIndex);
+const preferredBoundary =
+	linePreference === 'auto'
+		? null
+		: boundaries.find(
+			(item) => item.index === clampedIndex && item.linePreference === linePreference,
+		);
+const boundary = preferredBoundary ?? boundaries.find((item) => item.index === clampedIndex);
 if (!boundary) {
 return null;
 }
@@ -735,6 +798,9 @@ strokePoints: Map<InkStroke, Array<{ x: number; y: number }>>,
 scale: number,
 ): void {
 for (const stroke of doc.strokes) {
+		if (isLineBreakMarkerStroke(stroke)) {
+			continue;
+		}
 const points = strokePoints.get(stroke);
 if (!points || points.length === 0) {
 continue;
