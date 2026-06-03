@@ -40,6 +40,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			this,
 			this.drawer,
 			() => this.getWrapWidthWorld(),
+			() => this.getWordGapScale(),
 			() => this.getRenderLineHeightScale(),
 			() => this.settings.showWritingLine,
 			() => this.getSoftBlockLimitBytes(),
@@ -76,9 +77,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 	private getDrawerRuntimeConfig(): DrawerRuntimeConfig {
 		return {
 			wrapWidth: this.getWrapWidthWorld(),
+			wordGapScale: this.getWordGapScale(),
 			idleAdvanceMs: this.settings.idleAdvanceMs,
 			showWritingLine: this.settings.showWritingLine,
 		};
+	}
+
+	private getWordGapScale(): number {
+		return clamp(this.settings.wordGapScale, 0.8, 2.5);
 	}
 
 	getAdaptiveMetrics(): FreeFlowInkAdaptiveMetrics {
@@ -156,6 +162,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 	private normalizeSettings(): void {
 		this.settings.softBlockLimitKb = clamp(Math.round(this.settings.softBlockLimitKb), 200, 12000);
 		this.settings.hardBlockLimitKb = clamp(Math.round(this.settings.hardBlockLimitKb), 512, 16000);
+		this.settings.wordGapScale = clamp(this.settings.wordGapScale, 0.8, 2.5);
 		if (this.settings.hardBlockLimitKb <= this.settings.softBlockLimitKb) {
 			this.settings.hardBlockLimitKb = Math.min(16000, this.settings.softBlockLimitKb + 256);
 		}

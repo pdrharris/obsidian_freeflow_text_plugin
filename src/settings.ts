@@ -3,6 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 export interface FreeFlowInkSettings {
 	lineWidthScale: number;
+	wordGapScale: number;
 	renderLineHeightScale: number;
 	drawerHeightScale: number;
 	idleAdvanceMs: number;
@@ -14,6 +15,7 @@ export interface FreeFlowInkSettings {
 
 export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	lineWidthScale: 1,
+	wordGapScale: 1.35,
 	renderLineHeightScale: 1,
 	drawerHeightScale: 1,
 	idleAdvanceMs: 2000,
@@ -94,6 +96,29 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 					}),
 			)
 			.controlEl.appendChild(lineWidthValueEl);
+
+		const wordGapValueEl = createDiv();
+		wordGapValueEl.addClass('freeflow-ink-settings-value');
+		const wordGapPercent = Math.round(this.plugin.settings.wordGapScale * 100);
+		wordGapValueEl.setText(`${wordGapPercent}%`);
+
+		new Setting(containerEl)
+			.setName('Word gap threshold')
+			.setDesc(
+				'Controls how much horizontal space is treated as a word break for wrapping and insertion spacing.',
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(80, 250, 5)
+					.setValue(wordGapPercent)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.wordGapScale = value / 100;
+						wordGapValueEl.setText(`${value}%`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(wordGapValueEl);
 
 		const renderLineHeightValueEl = createDiv();
 		renderLineHeightValueEl.addClass('freeflow-ink-settings-value');

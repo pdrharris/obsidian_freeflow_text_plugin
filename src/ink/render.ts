@@ -97,10 +97,11 @@ export function computeInlineMetrics(
 doc: InkDocument,
 cssWidth: number,
 wrapWidth: number,
+wordGapScale: number,
 renderLineHeightScale: number,
 ): InlineRenderMetrics {
 const contentWorldWidth = Math.max(220, wrapWidth);
-const layout = layoutInlineStrokes(doc, contentWorldWidth, renderLineHeightScale);
+const layout = layoutInlineStrokes(doc, contentWorldWidth, wordGapScale, renderLineHeightScale);
 const contentWorldHeight = Math.max(layout.effectiveLineHeight, layout.maxY + 24);
 const lineCount = Math.max(1, Math.ceil(contentWorldHeight / layout.effectiveLineHeight));
 const uniformScale = cssWidth / contentWorldWidth;
@@ -118,6 +119,7 @@ worldHeight: contentWorldHeight,
 export function findInlineInsertionIndex(
 doc: InkDocument,
 wrapWidth: number,
+wordGapScale: number,
 renderLineHeightScale: number,
 cssWidth: number,
 clickCssX: number,
@@ -126,6 +128,7 @@ clickCssY: number,
 const selection = findInlineInsertionSelection(
 	doc,
 	wrapWidth,
+	wordGapScale,
 	renderLineHeightScale,
 	cssWidth,
 	clickCssX,
@@ -137,6 +140,7 @@ return selection.index;
 export function findInlineInsertionSelection(
 	doc: InkDocument,
 	wrapWidth: number,
+	wordGapScale: number,
 	renderLineHeightScale: number,
 	cssWidth: number,
 	clickCssX: number,
@@ -150,7 +154,7 @@ if (doc.strokes.length === 0) {
 }
 
 const contentWorldWidth = Math.max(220, wrapWidth);
-const layout = layoutInlineStrokes(doc, contentWorldWidth, renderLineHeightScale);
+const layout = layoutInlineStrokes(doc, contentWorldWidth, wordGapScale, renderLineHeightScale);
 const safeCssWidth = Math.max(1, cssWidth);
 const scale = safeCssWidth / contentWorldWidth;
 const clickWorldX = clickCssX / scale;
@@ -183,14 +187,15 @@ export function drawInlineCanvas(
 canvas: HTMLCanvasElement,
 doc: InkDocument,
 wrapWidth: number,
+wordGapScale: number,
 renderLineHeightScale: number,
 showWritingLine: boolean,
 insertionIndex: number | null = null,
 linePreference: InsertionLinePreference = 'auto',
 ): InlineRenderMetrics {
 const cssWidth = Math.max(280, canvas.parentElement?.clientWidth ?? canvas.clientWidth ?? 280);
-const metrics = computeInlineMetrics(doc, cssWidth, wrapWidth, renderLineHeightScale);
-const layout = layoutInlineStrokes(doc, metrics.worldWidth, renderLineHeightScale);
+const metrics = computeInlineMetrics(doc, cssWidth, wrapWidth, wordGapScale, renderLineHeightScale);
+const layout = layoutInlineStrokes(doc, metrics.worldWidth, wordGapScale, renderLineHeightScale);
 resizeCanvasForDpr(canvas, cssWidth, metrics.cssHeight);
 
 const ctx = canvas.getContext('2d');
@@ -331,6 +336,7 @@ return cssHeight * INK_BASELINE_RATIO_FROM_TOP;
 function layoutInlineStrokes(
 doc: InkDocument,
 wrapWidth: number,
+wordGapScale: number,
 renderLineHeightScale: number,
 ): InlineLayout {
 const lineHeight = Math.max(80, doc.meta.lineHeight);
@@ -369,9 +375,9 @@ runningOutputRow += rowIndex - previousRowIndex - 1;
 }
 previousRowIndex = rowIndex;
 
-const words = buildWordsForRow(rowInfos, lineHeight);
+	const words = buildWordsForRow(rowInfos, lineHeight, wordGapScale);
 const placementWrapWidth = Math.max(80, wrapWidth / glyphScale);
-const placedWords = placeWordsInRow(words, placementWrapWidth, lineHeight);
+	const placedWords = placeWordsInRow(words, placementWrapWidth, lineHeight, wordGapScale);
 const rowLineCount =
 placedWords.length > 0
 ? Math.max(...placedWords.map((word) => word.localLine)) + 1
@@ -688,14 +694,18 @@ rowIndex,
 };
 }
 
-function buildWordsForRow(rowInfos: StrokeInfo[], lineHeight: number): WordInfo[] {
+function buildWordsForRow(
+	rowInfos: StrokeInfo[],
+	lineHeight: number,
+	wordGapScale: number,
+): WordInfo[] {
 const firstInfo = rowInfos[0];
 if (!firstInfo) {
 return [];
 }
 
 const words: WordInfo[] = [];
-const gapThreshold = computeWordGapThreshold(lineHeight);
+	const gapThreshold = computeWordGapThreshold(lineHeight, wordGapScale);
 let currentWord: WordInfo = {
 strokes: [firstInfo],
 minX: firstInfo.minX,
@@ -737,6 +747,7 @@ function placeWordsInRow(
 words: WordInfo[],
 wrapWidth: number,
 lineHeight: number,
+wordGapScale: number,
 ): PlacedWord[] {
 const placements: PlacedWord[] = [];
 const availableWidth = Math.max(80, wrapWidth - INLINE_WRAP_MARGIN_X * 2);
@@ -747,7 +758,7 @@ for (const word of words) {
 const wordWidth = Math.max(1, word.maxX - word.minX);
 let insertedGap = 0;
 if (cursorX > 0) {
-insertedGap = normalizeWordGap(word.gapFromPrev, lineHeight);
+		insertedGap = normalizeWordGap(word.gapFromPrev, lineHeight, wordGapScale);
 }
 
 if (cursorX > 0 && cursorX + insertedGap + wordWidth > availableWidth) {
@@ -769,12 +780,17 @@ xShift: startX - word.minX,
 return placements;
 }
 
-function computeWordGapThreshold(lineHeight: number): number {
-return clamp(lineHeight * 0.12, 8, 26);
+function computeWordGapThreshold(lineHeight: number, wordGapScale: number): number {
+	const normalizedScale = clamp(wordGapScale, 0.8, 2.5);
+	return clamp(lineHeight * 0.12 * normalizedScale, 8, 48);
 }
 
-function normalizeWordGap(originalGap: number, lineHeight: number): number {
-const threshold = computeWordGapThreshold(lineHeight);
+function normalizeWordGap(
+	originalGap: number,
+	lineHeight: number,
+	wordGapScale: number,
+): number {
+	const threshold = computeWordGapThreshold(lineHeight, wordGapScale);
 if (originalGap < threshold) {
 return 0;
 }

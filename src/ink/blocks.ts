@@ -29,6 +29,7 @@ export class InkBlockRegistry {
 	private readonly plugin: Plugin;
 	private readonly drawer: InkDrawer;
 	private readonly getWrapWidthWorld: () => number;
+	private readonly getWordGapScale: () => number;
 	private readonly getRenderLineHeightScale: () => number;
 	private readonly getShowWritingLine: () => boolean;
 	private readonly getSoftBlockLimitBytes: () => number;
@@ -40,6 +41,7 @@ export class InkBlockRegistry {
 		plugin: Plugin,
 		drawer: InkDrawer,
 		getWrapWidthWorld: () => number,
+		getWordGapScale: () => number,
 		getRenderLineHeightScale: () => number,
 		getShowWritingLine: () => boolean,
 		getSoftBlockLimitBytes: () => number,
@@ -49,6 +51,7 @@ export class InkBlockRegistry {
 		this.plugin = plugin;
 		this.drawer = drawer;
 		this.getWrapWidthWorld = getWrapWidthWorld;
+		this.getWordGapScale = getWordGapScale;
 		this.getRenderLineHeightScale = getRenderLineHeightScale;
 		this.getShowWritingLine = getShowWritingLine;
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
@@ -119,6 +122,7 @@ export class InkBlockRegistry {
 				canvasEl,
 				documentModel,
 				this.getWrapWidthWorld(),
+				this.getWordGapScale(),
 				this.getRenderLineHeightScale(),
 				this.getShowWritingLine(),
 				showInlineCaret ? cursorIndex : null,
@@ -246,6 +250,7 @@ export class InkBlockRegistry {
 			const selection = findInlineInsertionSelection(
 				documentModel,
 				this.getWrapWidthWorld(),
+				this.getWordGapScale(),
 				this.getRenderLineHeightScale(),
 				rect.width,
 				clickX,

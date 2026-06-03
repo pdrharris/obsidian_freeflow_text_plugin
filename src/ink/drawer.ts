@@ -29,6 +29,7 @@ export interface DrawerSession {
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
+	wordGapScale: number;
 	idleAdvanceMs: number;
 	showWritingLine: boolean;
 }
@@ -541,28 +542,24 @@ export class InkDrawer {
 		if (this.activeStroke && this.activeStroke.points.length > 0) {
 			const insertionIndex = this.resolveEffectiveInsertionIndex(session);
 			const cursorAnchor = this.getCursorAnchorPoint(session);
-			const insertionAnchorX =
+			const caretAnchorX =
 				typeof this.pendingSnapAnchorX === 'number' && Number.isFinite(this.pendingSnapAnchorX)
 					? this.pendingSnapAnchorX
 					: (cursorAnchor?.x ?? null);
-			const shouldEnforceLeadingGap = this.snapNextStrokeToCursor;
 			if (this.snapNextStrokeToCursor) {
-				if (typeof insertionAnchorX === 'number' && Number.isFinite(insertionAnchorX)) {
-					this.alignStrokeToCursorX(this.activeStroke, insertionAnchorX);
-				}
 				this.snapNextStrokeToCursor = false;
 				this.pendingSnapAnchorX = null;
 			}
 			const activeBounds = this.getStrokeBounds(this.activeStroke);
+			const insertionAnchorX =
+				activeBounds?.minX ??
+				(typeof caretAnchorX === 'number' && Number.isFinite(caretAnchorX)
+					? caretAnchorX
+					: null);
 			if (activeBounds) {
 				strokePeakLocalX = activeBounds.maxX - session.viewport.viewportX;
 			}
 			session.doc.strokes.splice(insertionIndex, 0, this.activeStroke);
-			this.ensureInsertedStrokeGapFromPrevious(
-				session.doc,
-				insertionIndex,
-				shouldEnforceLeadingGap,
-			);
 			this.shiftFollowingStrokesForInsertion(session.doc, insertionIndex, insertionAnchorX);
 			session.cursorIndex = insertionIndex + 1;
 			session.linePreference = 'prev';
@@ -895,58 +892,6 @@ export class InkDrawer {
 		}
 	}
 
-	private ensureInsertedStrokeGapFromPrevious(
-		doc: InkDocument,
-		insertionIndex: number,
-		enforceLeadingGap: boolean,
-	): void {
-		if (!enforceLeadingGap) {
-			return;
-		}
-		const insertedStroke = doc.strokes[insertionIndex];
-		if (!insertedStroke) {
-			return;
-		}
-		const insertedBounds = this.getStrokeBounds(insertedStroke);
-		if (!insertedBounds) {
-			return;
-		}
-
-		const lineHeight = Math.max(80, doc.meta.lineHeight);
-		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
-		const desiredGap = this.getInsertionWordGap(lineHeight);
-
-		let previousMaxX: number | null = null;
-		for (let index = insertionIndex - 1; index >= 0; index -= 1) {
-			const stroke = doc.strokes[index];
-			if (!stroke || isLineBreakMarkerStroke(stroke)) {
-				continue;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (Math.abs(bounds.centerY - insertedBounds.centerY) > sameLineTolerance) {
-				continue;
-			}
-			previousMaxX = bounds.maxX;
-			break;
-		}
-
-		if (previousMaxX === null) {
-			return;
-		}
-
-		const shiftDelta = previousMaxX + desiredGap - insertedBounds.minX;
-		if (shiftDelta <= 0) {
-			return;
-		}
-
-		for (const point of insertedStroke.points) {
-			point.x += shiftDelta;
-		}
-	}
-
 	private applyCarriageReturnAtCursor(
 		session: DrawerSession,
 		cursorIndex: number,
@@ -1120,7 +1065,8 @@ export class InkDrawer {
 	}
 
 	private getInsertionWordGap(lineHeight: number): number {
-		const wrapWordGapThreshold = Math.max(8, Math.min(26, lineHeight * 0.12));
+		const wordGapScale = Math.max(0.8, Math.min(2.5, this.getRuntimeConfig().wordGapScale));
+		const wrapWordGapThreshold = Math.max(8, Math.min(48, lineHeight * 0.12 * wordGapScale));
 		return wrapWordGapThreshold + 6;
 	}
 
