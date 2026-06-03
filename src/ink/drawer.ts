@@ -474,20 +474,21 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
-		if (
-			this.activePointerId !== null &&
-			!this.canvasEl.hasPointerCapture(this.activePointerId)
-		) {
-			this.finishStroke(false);
+		const incomingIsPenLike = this.isLikelyPenPointer(event);
+		if (this.activePointerId !== null) {
+			const activePointerLostCapture = !this.canvasEl.hasPointerCapture(this.activePointerId);
+			if (activePointerLostCapture || incomingIsPenLike) {
+				this.finishStroke(false);
+			}
 		}
 		if (this.activePointerId !== null) {
 			return;
 		}
 		this.clearIdleAdvanceTimer();
-		if (this.hasPenInSession && event.pointerType !== 'pen') {
+		if (this.hasPenInSession && !incomingIsPenLike) {
 			return;
 		}
-		if (event.pointerType === 'pen') {
+		if (incomingIsPenLike) {
 			this.hasPenInSession = true;
 		}
 
@@ -1215,6 +1216,19 @@ export class InkDrawer {
 			};
 		}
 		return this.getStrokeBounds(stroke);
+	}
+
+	private isLikelyPenPointer(event: PointerEvent): boolean {
+		if (event.pointerType === 'pen') {
+			return true;
+		}
+		if (event.pointerType !== 'touch') {
+			return false;
+		}
+		if (event.pressure > 0.15) {
+			return true;
+		}
+		return event.width <= 3 && event.height <= 3;
 	}
 
 	private pruneLineBreakMarkersIfNoVisibleStrokes(doc: InkDocument): boolean {
