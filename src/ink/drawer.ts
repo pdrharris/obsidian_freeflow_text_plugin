@@ -13,6 +13,9 @@ const STEP_RATIO = 0.72;
 const DEFAULT_PEN_COLOR = '#111827';
 const DEFAULT_PEN_WIDTH = 3;
 const NEW_LINE_START_PADDING = 24;
+const INFERRED_PEN_START_MOVE_PX = 1.8;
+const INFERRED_PEN_START_MAX_AGE_MS = 220;
+const INFERRED_PEN_START_AFTER_UP_MS = 1200;
 
 export interface DrawerSession {
 	key: string;
@@ -51,6 +54,9 @@ interface PencilTimingDiagnostics {
 	staleSameIdDownCount: number;
 	crossIdFinalizeCount: number;
 	moveStartCount: number;
+	rawStartCount: number;
+	inferredStartCount: number;
+	upOnlyStartCount: number;
 	touchFallbackStartCount: number;
 	upAddedPointCount: number;
 	zeroPointFinishCount: number;
@@ -87,6 +93,10 @@ export class InkDrawer {
 	private lastPointerUpAt = 0;
 	private pendingTouchId: number | null = null;
 	private activeTouchId: number | null = null;
+	private pendingInferredPenPointerId: number | null = null;
+	private pendingInferredPenClientX = 0;
+	private pendingInferredPenClientY = 0;
+	private pendingInferredPenAt = 0;
 	private readonly pencilTiming: PencilTimingDiagnostics = {
 		downCount: 0,
 		upCount: 0,
@@ -96,6 +106,9 @@ export class InkDrawer {
 		staleSameIdDownCount: 0,
 		crossIdFinalizeCount: 0,
 		moveStartCount: 0,
+		rawStartCount: 0,
+		inferredStartCount: 0,
+		upOnlyStartCount: 0,
 		touchFallbackStartCount: 0,
 		upAddedPointCount: 0,
 		zeroPointFinishCount: 0,
@@ -357,7 +370,7 @@ export class InkDrawer {
 		return [
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, rawStart=${this.pencilTiming.rawStartCount}, inferredStart=${this.pencilTiming.inferredStartCount}, upOnlyStart=${this.pencilTiming.upOnlyStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -373,6 +386,9 @@ export class InkDrawer {
 		this.pencilTiming.staleSameIdDownCount = 0;
 		this.pencilTiming.crossIdFinalizeCount = 0;
 		this.pencilTiming.moveStartCount = 0;
+		this.pencilTiming.rawStartCount = 0;
+		this.pencilTiming.inferredStartCount = 0;
+		this.pencilTiming.upOnlyStartCount = 0;
 		this.pencilTiming.touchFallbackStartCount = 0;
 		this.pencilTiming.upAddedPointCount = 0;
 		this.pencilTiming.zeroPointFinishCount = 0;
@@ -386,6 +402,7 @@ export class InkDrawer {
 		this.lastPointerUpAt = 0;
 		this.pendingTouchId = null;
 		this.activeTouchId = null;
+		this.clearInferredPenStart();
 	}
 
 	open(session: DrawerSession): void {
@@ -404,6 +421,7 @@ export class InkDrawer {
 		this.activePointerId = null;
 		this.pendingTouchId = null;
 		this.activeTouchId = null;
+		this.clearInferredPenStart();
 		this.activeStroke = null;
 		this.hasPenInSession = false;
 		this.lastPenLikeEventAt = 0;
@@ -461,6 +479,7 @@ export class InkDrawer {
 	private attachListeners(): void {
 		this.canvasEl.addEventListener('pointerdown', this.onPointerDown);
 		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
+		this.canvasEl.addEventListener('pointerrawupdate', this.onPointerRawUpdate);
 		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.addEventListener('pointercancel', this.onPointerCancel);
 		this.canvasEl.addEventListener('lostpointercapture', this.onLostPointerCapture);
@@ -468,10 +487,13 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('touchmove', this.onTouchMove, { passive: false });
 		this.canvasEl.addEventListener('touchend', this.onTouchEnd, { passive: false });
 		this.canvasEl.addEventListener('touchcancel', this.onTouchCancel, { passive: false });
+		window.addEventListener('pointermove', this.onWindowPointerMove);
 		window.addEventListener('pointerup', this.onWindowPointerUp);
 		window.addEventListener('pointercancel', this.onWindowPointerCancel);
 		window.addEventListener('touchend', this.onWindowTouchEnd, { passive: false });
 		window.addEventListener('touchcancel', this.onWindowTouchCancel, { passive: false });
+		window.addEventListener('blur', this.onWindowBlur);
+		activeDocument.addEventListener('visibilitychange', this.onDocumentVisibilityChange);
 		window.addEventListener('resize', this.onResize);
 		this.eraseButtonEl.addEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
@@ -482,6 +504,7 @@ export class InkDrawer {
 	private detachListeners(): void {
 		this.canvasEl.removeEventListener('pointerdown', this.onPointerDown);
 		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
+		this.canvasEl.removeEventListener('pointerrawupdate', this.onPointerRawUpdate);
 		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerCancel);
 		this.canvasEl.removeEventListener('lostpointercapture', this.onLostPointerCapture);
@@ -489,10 +512,13 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('touchmove', this.onTouchMove);
 		this.canvasEl.removeEventListener('touchend', this.onTouchEnd);
 		this.canvasEl.removeEventListener('touchcancel', this.onTouchCancel);
+		window.removeEventListener('pointermove', this.onWindowPointerMove);
 		window.removeEventListener('pointerup', this.onWindowPointerUp);
 		window.removeEventListener('pointercancel', this.onWindowPointerCancel);
 		window.removeEventListener('touchend', this.onWindowTouchEnd);
 		window.removeEventListener('touchcancel', this.onWindowTouchCancel);
+		window.removeEventListener('blur', this.onWindowBlur);
+		activeDocument.removeEventListener('visibilitychange', this.onDocumentVisibilityChange);
 		window.removeEventListener('resize', this.onResize);
 		this.eraseButtonEl.removeEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
@@ -585,6 +611,7 @@ export class InkDrawer {
 		if (!touch) {
 			return;
 		}
+		this.clearInferredPenStart();
 		this.pendingTouchId = touch.identifier;
 	};
 
@@ -606,6 +633,7 @@ export class InkDrawer {
 			}
 			this.activeTouchId = touch.identifier;
 			this.pendingTouchId = null;
+			this.clearInferredPenStart();
 			this.pencilTiming.touchFallbackStartCount += 1;
 			this.trackPointerDown(now, 'touch', true);
 			this.hasPenInSession = true;
@@ -687,6 +715,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.clearInferredPenStart();
 		if (this.activeTouchId !== null) {
 			return;
 		}
@@ -738,6 +767,17 @@ export class InkDrawer {
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
+		this.handlePointerMotion(event, 'move');
+	};
+
+	private onPointerRawUpdate = (event: Event): void => {
+		if (!(event instanceof PointerEvent)) {
+			return;
+		}
+		this.handlePointerMotion(event, 'raw');
+	};
+
+	private handlePointerMotion(event: PointerEvent, source: 'move' | 'raw'): void {
 		const session = this.session;
 		if (!session) {
 			return;
@@ -745,14 +785,27 @@ export class InkDrawer {
 		if (this.activePointerId === null) {
 			const now = performance.now();
 			const penLike = this.isLikelyPenPointer(event, now);
-			if (!penLike || !this.isPointerInContact(event)) {
+			if (!penLike) {
+				this.clearInferredPenStart();
 				return;
 			}
-			this.pencilTiming.moveStartCount += 1;
+			const inContact = this.isPointerEventInContact(event);
+			if (!inContact && !this.shouldInferPenStartFromMotion(event, now)) {
+				return;
+			}
+			if (!inContact) {
+				this.pencilTiming.inferredStartCount += 1;
+			} else if (source === 'raw') {
+				this.pencilTiming.rawStartCount += 1;
+			} else {
+				this.pencilTiming.moveStartCount += 1;
+			}
 			this.trackPointerDown(now, event.pointerType, penLike);
 			this.lastPenLikeEventAt = now;
 			this.hasPenInSession = true;
 			this.pendingTouchId = null;
+			this.activeTouchId = null;
+			this.clearInferredPenStart();
 			this.activePointerId = event.pointerId;
 			this.setCapturedPointer(event.pointerId);
 			this.pendingAdvanceOnRelease = false;
@@ -781,9 +834,34 @@ export class InkDrawer {
 
 		this.pushStrokePoints(event);
 		this.requestDraw();
-	};
+	}
 
 	private onPointerUp = (event: PointerEvent): void => {
+		if (this.activePointerId === null) {
+			this.clearInferredPenStart();
+			const now = performance.now();
+			const penLike = this.isLikelyPenPointer(event, now);
+			if (!penLike || !this.isPointerEventInContact(event)) {
+				return;
+			}
+			this.pencilTiming.upOnlyStartCount += 1;
+			this.trackPointerDown(now, event.pointerType, penLike);
+			this.lastPenLikeEventAt = now;
+			this.hasPenInSession = true;
+			this.pendingTouchId = null;
+			this.activeTouchId = null;
+			this.clearInferredPenStart();
+			this.pendingAdvanceOnRelease = false;
+			this.activePointerId = event.pointerId;
+			this.activeStroke = {
+				id: createStrokeId(),
+				tool: 'pen',
+				color: DEFAULT_PEN_COLOR,
+				width: DEFAULT_PEN_WIDTH,
+				points: [],
+			};
+			this.pushStrokePoints(event);
+		}
 		if (this.activePointerId !== event.pointerId) {
 			if (!this.shouldFinalizeCrossPointerId(event)) {
 				return;
@@ -832,6 +910,13 @@ export class InkDrawer {
 		this.onPointerUp(event);
 	};
 
+	private onWindowPointerMove = (event: PointerEvent): void => {
+		if (this.activePointerId === null) {
+			return;
+		}
+		this.handlePointerMotion(event, 'move');
+	};
+
 	private onWindowPointerCancel = (event: PointerEvent): void => {
 		this.onPointerCancel(event);
 	};
@@ -842,6 +927,17 @@ export class InkDrawer {
 
 	private onWindowTouchCancel = (event: TouchEvent): void => {
 		this.onTouchCancel(event);
+	};
+
+	private onWindowBlur = (): void => {
+		this.cancelActiveStrokeFromLifecycle();
+	};
+
+	private onDocumentVisibilityChange = (): void => {
+		if (!activeDocument.hidden) {
+			return;
+		}
+		this.cancelActiveStrokeFromLifecycle();
 	};
 
 	private finishStroke(applyPendingAdvance: boolean): void {
@@ -898,6 +994,7 @@ export class InkDrawer {
 		this.activePointerId = null;
 		this.activeTouchId = null;
 		this.pendingTouchId = null;
+		this.clearInferredPenStart();
 		this.activeStroke = null;
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
@@ -1561,6 +1658,51 @@ export class InkDrawer {
 		}
 	}
 
+	private clearInferredPenStart(): void {
+		this.pendingInferredPenPointerId = null;
+		this.pendingInferredPenClientX = 0;
+		this.pendingInferredPenClientY = 0;
+		this.pendingInferredPenAt = 0;
+	}
+
+	private shouldInferPenStartFromMotion(event: PointerEvent, now: number): boolean {
+		if (event.pointerType !== 'pen') {
+			this.clearInferredPenStart();
+			return false;
+		}
+		if (this.lastPointerUpAt <= 0 || now - this.lastPointerUpAt > INFERRED_PEN_START_AFTER_UP_MS) {
+			this.clearInferredPenStart();
+			return false;
+		}
+		if (
+			this.pendingInferredPenPointerId !== event.pointerId ||
+			now - this.pendingInferredPenAt > INFERRED_PEN_START_MAX_AGE_MS
+		) {
+			this.pendingInferredPenPointerId = event.pointerId;
+			this.pendingInferredPenClientX = event.clientX;
+			this.pendingInferredPenClientY = event.clientY;
+			this.pendingInferredPenAt = now;
+			return false;
+		}
+
+		const dx = event.clientX - this.pendingInferredPenClientX;
+		const dy = event.clientY - this.pendingInferredPenClientY;
+		if (dx * dx + dy * dy < INFERRED_PEN_START_MOVE_PX * INFERRED_PEN_START_MOVE_PX) {
+			return false;
+		}
+
+		this.clearInferredPenStart();
+		return true;
+	}
+
+	private cancelActiveStrokeFromLifecycle(): void {
+		if (this.activePointerId === null && this.activeTouchId === null) {
+			return;
+		}
+		this.trackPointerCancel(performance.now());
+		this.finishStroke(false);
+	}
+
 	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {
 		this.pencilTiming.downCount += 1;
 		if (pointerType === 'touch') {
@@ -1643,6 +1785,27 @@ export class InkDrawer {
 			return true;
 		}
 		return event.buttons === 1;
+	}
+
+	private isPointerEventInContact(event: PointerEvent): boolean {
+		if (this.isPointerInContact(event)) {
+			return true;
+		}
+		let coalesced: PointerEvent[];
+		try {
+			coalesced = event.getCoalescedEvents();
+		} catch {
+			return false;
+		}
+		if (!coalesced || coalesced.length === 0) {
+			return false;
+		}
+		for (const sample of coalesced) {
+			if (this.isPointerInContact(sample)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private findTouchById(touchList: TouchList, id: number): Touch | null {
