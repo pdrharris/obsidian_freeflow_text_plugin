@@ -48,6 +48,7 @@ interface PencilTimingDiagnostics {
 	cancelCount: number;
 	lostCaptureCount: number;
 	recoveredOnDownCount: number;
+	staleSameIdDownCount: number;
 	moveStartCount: number;
 	penLikeDownCount: number;
 	touchDownCount: number;
@@ -86,6 +87,7 @@ export class InkDrawer {
 		cancelCount: 0,
 		lostCaptureCount: 0,
 		recoveredOnDownCount: 0,
+		staleSameIdDownCount: 0,
 		moveStartCount: 0,
 		penLikeDownCount: 0,
 		touchDownCount: 0,
@@ -345,7 +347,7 @@ export class InkDrawer {
 		return [
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, moveStart=${this.pencilTiming.moveStartCount}`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, moveStart=${this.pencilTiming.moveStartCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -358,6 +360,7 @@ export class InkDrawer {
 		this.pencilTiming.cancelCount = 0;
 		this.pencilTiming.lostCaptureCount = 0;
 		this.pencilTiming.recoveredOnDownCount = 0;
+		this.pencilTiming.staleSameIdDownCount = 0;
 		this.pencilTiming.moveStartCount = 0;
 		this.pencilTiming.penLikeDownCount = 0;
 		this.pencilTiming.touchDownCount = 0;
@@ -443,6 +446,8 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.addEventListener('pointercancel', this.onPointerCancel);
 		this.canvasEl.addEventListener('lostpointercapture', this.onLostPointerCapture);
+		window.addEventListener('pointerup', this.onWindowPointerUp);
+		window.addEventListener('pointercancel', this.onWindowPointerCancel);
 		window.addEventListener('resize', this.onResize);
 		this.eraseButtonEl.addEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
@@ -456,6 +461,8 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerCancel);
 		this.canvasEl.removeEventListener('lostpointercapture', this.onLostPointerCapture);
+		window.removeEventListener('pointerup', this.onWindowPointerUp);
+		window.removeEventListener('pointercancel', this.onWindowPointerCancel);
 		window.removeEventListener('resize', this.onResize);
 		this.eraseButtonEl.removeEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
@@ -547,12 +554,16 @@ export class InkDrawer {
 		this.trackPointerDown(now, event.pointerType, incomingIsPenLike);
 		if (this.activePointerId !== null) {
 			if (event.pointerId === this.activePointerId) {
-				return;
-			}
-			const activePointerLostCapture = !this.hasCapturedPointer(this.activePointerId);
-			if (activePointerLostCapture || incomingIsPenLike) {
+				this.pencilTiming.staleSameIdDownCount += 1;
 				this.pencilTiming.recoveredOnDownCount += 1;
 				this.finishStroke(false);
+			}
+			if (this.activePointerId !== null) {
+				const activePointerLostCapture = !this.hasCapturedPointer(this.activePointerId);
+				if (activePointerLostCapture || incomingIsPenLike) {
+					this.pencilTiming.recoveredOnDownCount += 1;
+					this.finishStroke(false);
+				}
 			}
 		}
 		if (this.activePointerId !== null) {
@@ -657,6 +668,14 @@ export class InkDrawer {
 		}
 		this.trackPointerCancel(performance.now());
 		this.finishStroke(false);
+	};
+
+	private onWindowPointerUp = (event: PointerEvent): void => {
+		this.onPointerUp(event);
+	};
+
+	private onWindowPointerCancel = (event: PointerEvent): void => {
+		this.onPointerCancel(event);
 	};
 
 	private finishStroke(applyPendingAdvance: boolean): void {
