@@ -81,6 +81,7 @@ export class InkDrawer {
 	private session: DrawerSession | null = null;
 	private activePointerId: number | null = null;
 	private activeStroke: InkStroke | null = null;
+	private activeStrokeAwaitingContact = false;
 	private hasPenInSession = false;
 	private redrawQueued = false;
 	private lastLocalX: number | null = null;
@@ -423,6 +424,7 @@ export class InkDrawer {
 		this.activeTouchId = null;
 		this.clearInferredPenStart();
 		this.activeStroke = null;
+		this.activeStrokeAwaitingContact = false;
 		this.hasPenInSession = false;
 		this.lastPenLikeEventAt = 0;
 		this.lastLocalX = null;
@@ -646,6 +648,7 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
+			this.activeStrokeAwaitingContact = false;
 			this.appendTouchPoint(touch, 0.5);
 			this.requestDraw();
 			event.preventDefault();
@@ -762,6 +765,7 @@ export class InkDrawer {
 			width: DEFAULT_PEN_WIDTH,
 			points: [],
 		};
+		this.activeStrokeAwaitingContact = false;
 		this.pushStrokePoints(event);
 		this.requestDraw();
 	};
@@ -816,8 +820,11 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
-			this.pushStrokePoints(event);
-			this.requestDraw();
+			this.activeStrokeAwaitingContact = !inContact;
+			if (inContact) {
+				this.pushStrokePoints(event);
+				this.requestDraw();
+			}
 			return;
 		}
 		if (this.activePointerId !== event.pointerId) {
@@ -825,6 +832,13 @@ export class InkDrawer {
 		}
 		if (this.isLikelyPenPointer(event)) {
 			this.lastPenLikeEventAt = performance.now();
+		}
+		const inContact = this.isPointerEventInContact(event);
+		if (this.activeStrokeAwaitingContact) {
+			if (!inContact) {
+				return;
+			}
+			this.activeStrokeAwaitingContact = false;
 		}
 		event.preventDefault();
 
@@ -860,6 +874,7 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
+			this.activeStrokeAwaitingContact = false;
 			this.pushStrokePoints(event);
 		}
 		if (this.activePointerId !== event.pointerId) {
@@ -869,6 +884,13 @@ export class InkDrawer {
 			this.pencilTiming.crossIdFinalizeCount += 1;
 		}
 		const pointCountBeforeUp = this.activeStroke?.points.length ?? 0;
+		if (this.activeStroke && this.activeStrokeAwaitingContact) {
+			if (this.isPointerEventInContact(event)) {
+				this.activeStrokeAwaitingContact = false;
+			} else {
+				this.activeStroke = null;
+			}
+		}
 		if (this.activeStroke) {
 			this.pushStrokePoints(event);
 		}
@@ -996,6 +1018,7 @@ export class InkDrawer {
 		this.pendingTouchId = null;
 		this.clearInferredPenStart();
 		this.activeStroke = null;
+		this.activeStrokeAwaitingContact = false;
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
