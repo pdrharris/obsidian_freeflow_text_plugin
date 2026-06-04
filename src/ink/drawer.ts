@@ -51,6 +51,7 @@ interface PencilTimingDiagnostics {
 	staleSameIdDownCount: number;
 	crossIdFinalizeCount: number;
 	moveStartCount: number;
+	touchFallbackStartCount: number;
 	upAddedPointCount: number;
 	zeroPointFinishCount: number;
 	penLikeDownCount: number;
@@ -84,6 +85,8 @@ export class InkDrawer {
 	private lastPenLikeEventAt = 0;
 	private lastPointerDownAt = 0;
 	private lastPointerUpAt = 0;
+	private pendingTouchId: number | null = null;
+	private activeTouchId: number | null = null;
 	private readonly pencilTiming: PencilTimingDiagnostics = {
 		downCount: 0,
 		upCount: 0,
@@ -93,6 +96,7 @@ export class InkDrawer {
 		staleSameIdDownCount: 0,
 		crossIdFinalizeCount: 0,
 		moveStartCount: 0,
+		touchFallbackStartCount: 0,
 		upAddedPointCount: 0,
 		zeroPointFinishCount: 0,
 		penLikeDownCount: 0,
@@ -353,7 +357,7 @@ export class InkDrawer {
 		return [
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -369,6 +373,7 @@ export class InkDrawer {
 		this.pencilTiming.staleSameIdDownCount = 0;
 		this.pencilTiming.crossIdFinalizeCount = 0;
 		this.pencilTiming.moveStartCount = 0;
+		this.pencilTiming.touchFallbackStartCount = 0;
 		this.pencilTiming.upAddedPointCount = 0;
 		this.pencilTiming.zeroPointFinishCount = 0;
 		this.pencilTiming.penLikeDownCount = 0;
@@ -379,6 +384,8 @@ export class InkDrawer {
 		this.pencilTiming.finishStrokeMs.length = 0;
 		this.lastPointerDownAt = 0;
 		this.lastPointerUpAt = 0;
+		this.pendingTouchId = null;
+		this.activeTouchId = null;
 	}
 
 	open(session: DrawerSession): void {
@@ -395,6 +402,8 @@ export class InkDrawer {
 		this.session.onCursorChanged(this.session.cursorIndex);
 		this.session.onLinePreferenceChanged(this.session.linePreference);
 		this.activePointerId = null;
+		this.pendingTouchId = null;
+		this.activeTouchId = null;
 		this.activeStroke = null;
 		this.hasPenInSession = false;
 		this.lastPenLikeEventAt = 0;
@@ -455,8 +464,14 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.addEventListener('pointercancel', this.onPointerCancel);
 		this.canvasEl.addEventListener('lostpointercapture', this.onLostPointerCapture);
+		this.canvasEl.addEventListener('touchstart', this.onTouchStart, { passive: false });
+		this.canvasEl.addEventListener('touchmove', this.onTouchMove, { passive: false });
+		this.canvasEl.addEventListener('touchend', this.onTouchEnd, { passive: false });
+		this.canvasEl.addEventListener('touchcancel', this.onTouchCancel, { passive: false });
 		window.addEventListener('pointerup', this.onWindowPointerUp);
 		window.addEventListener('pointercancel', this.onWindowPointerCancel);
+		window.addEventListener('touchend', this.onWindowTouchEnd, { passive: false });
+		window.addEventListener('touchcancel', this.onWindowTouchCancel, { passive: false });
 		window.addEventListener('resize', this.onResize);
 		this.eraseButtonEl.addEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
@@ -470,8 +485,14 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerCancel);
 		this.canvasEl.removeEventListener('lostpointercapture', this.onLostPointerCapture);
+		this.canvasEl.removeEventListener('touchstart', this.onTouchStart);
+		this.canvasEl.removeEventListener('touchmove', this.onTouchMove);
+		this.canvasEl.removeEventListener('touchend', this.onTouchEnd);
+		this.canvasEl.removeEventListener('touchcancel', this.onTouchCancel);
 		window.removeEventListener('pointerup', this.onWindowPointerUp);
 		window.removeEventListener('pointercancel', this.onWindowPointerCancel);
+		window.removeEventListener('touchend', this.onWindowTouchEnd);
+		window.removeEventListener('touchcancel', this.onWindowTouchCancel);
 		window.removeEventListener('resize', this.onResize);
 		this.eraseButtonEl.removeEventListener('click', this.onEraseLastStroke);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
@@ -553,9 +574,120 @@ export class InkDrawer {
 		this.close();
 	};
 
+	private onTouchStart = (event: TouchEvent): void => {
+		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return;
+		}
+		if (this.activePointerId !== null || this.activeTouchId !== null) {
+			return;
+		}
+		const touch = event.changedTouches[0];
+		if (!touch) {
+			return;
+		}
+		this.pendingTouchId = touch.identifier;
+	};
+
+	private onTouchMove = (event: TouchEvent): void => {
+		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return;
+		}
+		if (this.activePointerId !== null) {
+			return;
+		}
+		const now = performance.now();
+		if (this.activeTouchId === null) {
+			if (this.pendingTouchId === null) {
+				return;
+			}
+			const touch = this.findTouchById(event.changedTouches, this.pendingTouchId);
+			if (!touch) {
+				return;
+			}
+			this.activeTouchId = touch.identifier;
+			this.pendingTouchId = null;
+			this.pencilTiming.touchFallbackStartCount += 1;
+			this.trackPointerDown(now, 'touch', true);
+			this.hasPenInSession = true;
+			this.lastPenLikeEventAt = now;
+			this.pendingAdvanceOnRelease = false;
+			this.activeStroke = {
+				id: createStrokeId(),
+				tool: 'pen',
+				color: DEFAULT_PEN_COLOR,
+				width: DEFAULT_PEN_WIDTH,
+				points: [],
+			};
+			this.appendTouchPoint(touch, 0.5);
+			this.requestDraw();
+			event.preventDefault();
+			return;
+		}
+
+		const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
+		if (!touch || !this.activeStroke) {
+			return;
+		}
+		this.appendTouchPoint(touch, 0.5);
+		this.requestDraw();
+		event.preventDefault();
+	};
+
+	private onTouchEnd = (event: TouchEvent): void => {
+		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return;
+		}
+		if (this.activeTouchId !== null) {
+			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
+			if (touch && this.activeStroke) {
+				this.appendTouchPoint(touch, 0.5);
+				this.pencilTiming.upAddedPointCount += 1;
+			}
+			this.trackPointerUp(performance.now());
+			this.finishStroke(true);
+			this.activeTouchId = null;
+			this.pendingTouchId = null;
+			event.preventDefault();
+			return;
+		}
+		if (this.pendingTouchId !== null) {
+			const pendingTouch = this.findTouchById(event.changedTouches, this.pendingTouchId);
+			if (pendingTouch) {
+				this.pendingTouchId = null;
+			}
+		}
+	};
+
+	private onTouchCancel = (event: TouchEvent): void => {
+		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return;
+		}
+		if (this.activeTouchId !== null) {
+			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
+			if (touch && this.activeStroke) {
+				this.appendTouchPoint(touch, 0.5);
+			}
+			this.trackPointerCancel(performance.now());
+			this.finishStroke(false);
+			this.activeTouchId = null;
+			this.pendingTouchId = null;
+			event.preventDefault();
+			return;
+		}
+		if (this.pendingTouchId !== null) {
+			const pendingTouch = this.findTouchById(event.changedTouches, this.pendingTouchId);
+			if (pendingTouch) {
+				this.pendingTouchId = null;
+			}
+		}
+	};
+
 	private onPointerDown = (event: PointerEvent): void => {
 		const session = this.session;
 		if (!session) {
+			return;
+		}
+		if (this.activeTouchId !== null) {
 			return;
 		}
 		const now = performance.now();
@@ -586,6 +718,8 @@ export class InkDrawer {
 			this.hasPenInSession = true;
 			this.lastPenLikeEventAt = now;
 		}
+		this.pendingTouchId = null;
+		this.activeTouchId = null;
 
 		this.activePointerId = event.pointerId;
 		this.setCapturedPointer(event.pointerId);
@@ -618,6 +752,7 @@ export class InkDrawer {
 			this.trackPointerDown(now, event.pointerType, penLike);
 			this.lastPenLikeEventAt = now;
 			this.hasPenInSession = true;
+			this.pendingTouchId = null;
 			this.activePointerId = event.pointerId;
 			this.setCapturedPointer(event.pointerId);
 			this.pendingAdvanceOnRelease = false;
@@ -701,6 +836,14 @@ export class InkDrawer {
 		this.onPointerCancel(event);
 	};
 
+	private onWindowTouchEnd = (event: TouchEvent): void => {
+		this.onTouchEnd(event);
+	};
+
+	private onWindowTouchCancel = (event: TouchEvent): void => {
+		this.onTouchCancel(event);
+	};
+
 	private finishStroke(applyPendingAdvance: boolean): void {
 		const session = this.session;
 		if (!session) {
@@ -753,6 +896,8 @@ export class InkDrawer {
 		}
 
 		this.activePointerId = null;
+		this.activeTouchId = null;
+		this.pendingTouchId = null;
 		this.activeStroke = null;
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
@@ -847,47 +992,58 @@ export class InkDrawer {
 				? event.getCoalescedEvents()
 				: [event];
 		const points = samples.length > 0 ? samples : [event];
-		const rect = this.canvasEl.getBoundingClientRect();
-		const rightEdgeTrigger = rect.width * 0.85;
-		const baselineLocalY = rect.height * INK_BASELINE_RATIO_FROM_TOP;
-
 		for (const sample of points) {
-			const localX = sample.clientX - rect.left;
-			const localY = sample.clientY - rect.top;
-			if (!Number.isFinite(localX) || !Number.isFinite(localY)) {
-				continue;
-			}
-
-			const worldX = session.viewport.viewportX + localX;
-			const worldY = session.viewport.lineOffsetY + (localY - baselineLocalY);
-			const previous = this.activeStroke.points[this.activeStroke.points.length - 1];
-			if (previous) {
-				const dx = previous.x - worldX;
-				const dy = previous.y - worldY;
-				if (dx * dx + dy * dy < 0.35) {
-					continue;
-				}
-			}
-
-			this.activeStroke.points.push({
-				x: worldX,
-				y: worldY,
-				pressure: sample.pressure > 0 ? sample.pressure : 0.5,
-				time: Date.now(),
-			});
-
-			if (localX >= rightEdgeTrigger) {
-				this.pendingAdvanceOnRelease = true;
-			} else if (
-				this.lastLocalX !== null &&
-				this.lastLocalX > rect.width * 0.9 &&
-				localX < rect.width * 0.15
-			) {
-				this.pendingAdvanceOnRelease = true;
-			}
-
-			this.lastLocalX = localX;
+			this.appendSamplePoint(sample.clientX, sample.clientY, sample.pressure > 0 ? sample.pressure : 0.5);
 		}
+	}
+
+	private appendTouchPoint(touch: Touch, pressure: number): void {
+		this.appendSamplePoint(touch.clientX, touch.clientY, pressure);
+	}
+
+	private appendSamplePoint(clientX: number, clientY: number, pressure: number): void {
+		const session = this.session;
+		if (!session || !this.activeStroke) {
+			return;
+		}
+		const rect = this.canvasEl.getBoundingClientRect();
+		const localX = clientX - rect.left;
+		const localY = clientY - rect.top;
+		if (!Number.isFinite(localX) || !Number.isFinite(localY)) {
+			return;
+		}
+
+		const baselineLocalY = rect.height * INK_BASELINE_RATIO_FROM_TOP;
+		const worldX = session.viewport.viewportX + localX;
+		const worldY = session.viewport.lineOffsetY + (localY - baselineLocalY);
+		const previous = this.activeStroke.points[this.activeStroke.points.length - 1];
+		if (previous) {
+			const dx = previous.x - worldX;
+			const dy = previous.y - worldY;
+			if (dx * dx + dy * dy < 0.35) {
+				return;
+			}
+		}
+
+		this.activeStroke.points.push({
+			x: worldX,
+			y: worldY,
+			pressure: pressure > 0 ? pressure : 0.5,
+			time: Date.now(),
+		});
+
+		const rightEdgeTrigger = rect.width * 0.85;
+		if (localX >= rightEdgeTrigger) {
+			this.pendingAdvanceOnRelease = true;
+		} else if (
+			this.lastLocalX !== null &&
+			this.lastLocalX > rect.width * 0.9 &&
+			localX < rect.width * 0.15
+		) {
+			this.pendingAdvanceOnRelease = true;
+		}
+
+		this.lastLocalX = localX;
 	}
 
 	private advanceStep(drawerWidth: number): void {
@@ -1487,6 +1643,19 @@ export class InkDrawer {
 			return true;
 		}
 		return event.buttons === 1;
+	}
+
+	private findTouchById(touchList: TouchList, id: number): Touch | null {
+		for (let index = 0; index < touchList.length; index += 1) {
+			const touch = touchList.item(index);
+			if (!touch) {
+				continue;
+			}
+			if (touch.identifier === id) {
+				return touch;
+			}
+		}
+		return null;
 	}
 
 	private shouldFinalizeCrossPointerId(event: PointerEvent): boolean {
