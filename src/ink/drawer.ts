@@ -49,7 +49,10 @@ interface PencilTimingDiagnostics {
 	lostCaptureCount: number;
 	recoveredOnDownCount: number;
 	staleSameIdDownCount: number;
+	crossIdFinalizeCount: number;
 	moveStartCount: number;
+	upAddedPointCount: number;
+	zeroPointFinishCount: number;
 	penLikeDownCount: number;
 	touchDownCount: number;
 	otherDownCount: number;
@@ -88,7 +91,10 @@ export class InkDrawer {
 		lostCaptureCount: 0,
 		recoveredOnDownCount: 0,
 		staleSameIdDownCount: 0,
+		crossIdFinalizeCount: 0,
 		moveStartCount: 0,
+		upAddedPointCount: 0,
+		zeroPointFinishCount: 0,
 		penLikeDownCount: 0,
 		touchDownCount: 0,
 		otherDownCount: 0,
@@ -347,7 +353,7 @@ export class InkDrawer {
 		return [
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, moveStart=${this.pencilTiming.moveStartCount}`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -361,7 +367,10 @@ export class InkDrawer {
 		this.pencilTiming.lostCaptureCount = 0;
 		this.pencilTiming.recoveredOnDownCount = 0;
 		this.pencilTiming.staleSameIdDownCount = 0;
+		this.pencilTiming.crossIdFinalizeCount = 0;
 		this.pencilTiming.moveStartCount = 0;
+		this.pencilTiming.upAddedPointCount = 0;
+		this.pencilTiming.zeroPointFinishCount = 0;
 		this.pencilTiming.penLikeDownCount = 0;
 		this.pencilTiming.touchDownCount = 0;
 		this.pencilTiming.otherDownCount = 0;
@@ -641,7 +650,18 @@ export class InkDrawer {
 
 	private onPointerUp = (event: PointerEvent): void => {
 		if (this.activePointerId !== event.pointerId) {
-			return;
+			if (!this.shouldFinalizeCrossPointerId(event)) {
+				return;
+			}
+			this.pencilTiming.crossIdFinalizeCount += 1;
+		}
+		const pointCountBeforeUp = this.activeStroke?.points.length ?? 0;
+		if (this.activeStroke) {
+			this.pushStrokePoints(event);
+		}
+		const pointCountAfterUp = this.activeStroke?.points.length ?? pointCountBeforeUp;
+		if (pointCountAfterUp > pointCountBeforeUp) {
+			this.pencilTiming.upAddedPointCount += 1;
 		}
 		this.trackPointerUp(performance.now());
 		this.finishStroke(true);
@@ -649,7 +669,10 @@ export class InkDrawer {
 
 	private onPointerCancel = (event: PointerEvent): void => {
 		if (this.activePointerId !== event.pointerId) {
-			return;
+			if (!this.shouldFinalizeCrossPointerId(event)) {
+				return;
+			}
+			this.pencilTiming.crossIdFinalizeCount += 1;
 		}
 		this.trackPointerCancel(performance.now());
 		this.finishStroke(false);
@@ -684,6 +707,7 @@ export class InkDrawer {
 			return;
 		}
 		const finishStartAt = performance.now();
+		const preFinishPointCount = this.activeStroke?.points.length ?? 0;
 		if (this.activePointerId !== null) {
 			this.releaseCapturedPointer(this.activePointerId);
 		}
@@ -735,6 +759,9 @@ export class InkDrawer {
 		this.requestDraw();
 		if (applyPendingAdvance && !didAdvanceOnRelease) {
 			this.scheduleIdleAdvance(strokePeakLocalX);
+		}
+		if (preFinishPointCount === 0) {
+			this.pencilTiming.zeroPointFinishCount += 1;
 		}
 		this.pushTimingSample(this.pencilTiming.finishStrokeMs, performance.now() - finishStartAt);
 	}
@@ -1460,6 +1487,16 @@ export class InkDrawer {
 			return true;
 		}
 		return event.buttons === 1;
+	}
+
+	private shouldFinalizeCrossPointerId(event: PointerEvent): boolean {
+		if (this.activePointerId === null) {
+			return false;
+		}
+		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return false;
+		}
+		return event.pointerType !== 'mouse';
 	}
 
 	private isLikelyPenPointer(event: PointerEvent, now = performance.now()): boolean {
