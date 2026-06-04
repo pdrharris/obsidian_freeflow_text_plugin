@@ -573,7 +573,6 @@ export class InkDrawer {
 			points: [],
 		};
 		this.pushStrokePoints(event);
-		session.onDocumentChanged();
 		this.requestDraw();
 	};
 
@@ -592,7 +591,6 @@ export class InkDrawer {
 		}
 
 		this.pushStrokePoints(event);
-		session.onDocumentChanged();
 		this.requestDraw();
 	};
 

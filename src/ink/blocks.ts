@@ -101,6 +101,7 @@ export class InkBlockRegistry {
 		let showInlineCaret = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
+		let pendingInlineRefreshWhileActive = false;
 		let softWarned = false;
 		let hardWarned = false;
 		const blockKey = `${ctx.sourcePath}:${section.lineStart}:${section.lineEnd}`;
@@ -178,10 +179,12 @@ export class InkBlockRegistry {
 
 		const onDocumentChanged = (): void => {
 			cursorIndex = clampInsertionIndex(cursorIndex, documentModel.strokes.length);
-			renderInline();
-			if (!isActiveKey(blockKey)) {
-				scheduleSave();
+			if (isActiveKey(blockKey)) {
+				pendingInlineRefreshWhileActive = true;
+				return;
 			}
+			renderInline();
+			scheduleSave();
 		};
 
 		const openDrawer = (nextCursorIndex?: number): void => {
@@ -224,6 +227,10 @@ export class InkBlockRegistry {
 				onClose: () => {
 					if (isActiveKey(blockKey)) {
 						setActiveKey(null);
+					}
+					if (pendingInlineRefreshWhileActive) {
+						pendingInlineRefreshWhileActive = false;
+						renderInline();
 					}
 					void flushSave();
 				},

@@ -1,4 +1,4 @@
-import { Notice, Platform, Plugin } from 'obsidian';
+import { Modal, Notice, Platform, Plugin } from 'obsidian';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import {
@@ -211,7 +211,20 @@ export default class FreeFlowInkPlugin extends Plugin {
 			return;
 		}
 		const summary = this.drawer.getPencilTimingSummary();
-		new Notice(`Pencil timing: ${summary}`, 12000);
+		const modal = new Modal(this.app);
+		modal.setTitle('Pencil timing summary');
+		const infoEl = modal.contentEl.createEl('p', {
+			text: 'Copy this text and paste it into chat.',
+		});
+		infoEl.addClass('freeflow-ink-diagnostic-hint');
+		const textEl = modal.contentEl.createEl('textarea');
+		textEl.addClass('freeflow-ink-diagnostic-textarea');
+		textEl.value = `Pencil timing: ${summary}`;
+		textEl.rows = 8;
+		textEl.readOnly = true;
+		textEl.focus();
+		textEl.select();
+		modal.open();
 	}
 
 	private resetPencilTimingSummary(): void {
