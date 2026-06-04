@@ -32,12 +32,27 @@ export interface DrawerRuntimeConfig {
 	wordGapScale: number;
 	idleAdvanceMs: number;
 	showWritingLine: boolean;
+	usePointerCapture: boolean;
 }
 
 export interface InkDiagnosticResult {
 	name: string;
 	pass: boolean;
 	detail: string;
+}
+
+interface PencilTimingDiagnostics {
+	downCount: number;
+	upCount: number;
+	cancelCount: number;
+	lostCaptureCount: number;
+	recoveredOnDownCount: number;
+	penLikeDownCount: number;
+	touchDownCount: number;
+	otherDownCount: number;
+	downToUpMs: number[];
+	upToDownMs: number[];
+	finishStrokeMs: number[];
 }
 
 export class InkDrawer {
@@ -60,6 +75,22 @@ export class InkDrawer {
 	private idleAdvanceTimer = 0;
 	private snapNextStrokeToCursor = false;
 	private pendingSnapAnchorX: number | null = null;
+	private lastPenLikeEventAt = 0;
+	private lastPointerDownAt = 0;
+	private lastPointerUpAt = 0;
+	private readonly pencilTiming: PencilTimingDiagnostics = {
+		downCount: 0,
+		upCount: 0,
+		cancelCount: 0,
+		lostCaptureCount: 0,
+		recoveredOnDownCount: 0,
+		penLikeDownCount: 0,
+		touchDownCount: 0,
+		otherDownCount: 0,
+		downToUpMs: [],
+		upToDownMs: [],
+		finishStrokeMs: [],
+	};
 
 	constructor(getRuntimeConfig: () => DrawerRuntimeConfig) {
 		this.getRuntimeConfig = getRuntimeConfig;
@@ -302,6 +333,38 @@ export class InkDrawer {
 		return results;
 	}
 
+	getPencilTimingSummary(): string {
+		const downToUp = this.formatTimingSeries(this.pencilTiming.downToUpMs);
+		const upToDown = this.formatTimingSeries(this.pencilTiming.upToDownMs);
+		const finishStroke = this.formatTimingSeries(this.pencilTiming.finishStrokeMs);
+		const captureMode = this.getRuntimeConfig().usePointerCapture ? 'on' : 'off';
+
+		return [
+			`capture=${captureMode}`,
+			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}`,
+			`up->down ${upToDown}`,
+			`down->up ${downToUp}`,
+			`finish ${finishStroke}`,
+		].join(' | ');
+	}
+
+	resetPencilTimingDiagnostics(): void {
+		this.pencilTiming.downCount = 0;
+		this.pencilTiming.upCount = 0;
+		this.pencilTiming.cancelCount = 0;
+		this.pencilTiming.lostCaptureCount = 0;
+		this.pencilTiming.recoveredOnDownCount = 0;
+		this.pencilTiming.penLikeDownCount = 0;
+		this.pencilTiming.touchDownCount = 0;
+		this.pencilTiming.otherDownCount = 0;
+		this.pencilTiming.downToUpMs.length = 0;
+		this.pencilTiming.upToDownMs.length = 0;
+		this.pencilTiming.finishStrokeMs.length = 0;
+		this.lastPointerDownAt = 0;
+		this.lastPointerUpAt = 0;
+	}
+
 	open(session: DrawerSession): void {
 		if (this.session && this.session.key !== session.key) {
 			this.close();
@@ -318,6 +381,7 @@ export class InkDrawer {
 		this.activePointerId = null;
 		this.activeStroke = null;
 		this.hasPenInSession = false;
+		this.lastPenLikeEventAt = 0;
 		this.lastLocalX = null;
 		this.snapNextStrokeToCursor = true;
 		this.pendingSnapAnchorX = null;
@@ -474,10 +538,13 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
-		const incomingIsPenLike = this.isLikelyPenPointer(event);
+		const now = performance.now();
+		const incomingIsPenLike = this.isLikelyPenPointer(event, now);
+		this.trackPointerDown(now, event.pointerType, incomingIsPenLike);
 		if (this.activePointerId !== null) {
-			const activePointerLostCapture = !this.canvasEl.hasPointerCapture(this.activePointerId);
+			const activePointerLostCapture = !this.hasCapturedPointer(this.activePointerId);
 			if (activePointerLostCapture || incomingIsPenLike) {
+				this.pencilTiming.recoveredOnDownCount += 1;
 				this.finishStroke(false);
 			}
 		}
@@ -490,10 +557,11 @@ export class InkDrawer {
 		}
 		if (incomingIsPenLike) {
 			this.hasPenInSession = true;
+			this.lastPenLikeEventAt = now;
 		}
 
 		this.activePointerId = event.pointerId;
-		this.canvasEl.setPointerCapture(event.pointerId);
+		this.setCapturedPointer(event.pointerId);
 		event.preventDefault();
 		this.pendingAdvanceOnRelease = false;
 
@@ -514,6 +582,9 @@ export class InkDrawer {
 		if (!session || this.activePointerId !== event.pointerId) {
 			return;
 		}
+		if (this.isLikelyPenPointer(event)) {
+			this.lastPenLikeEventAt = performance.now();
+		}
 		event.preventDefault();
 
 		if (!this.activeStroke) {
@@ -529,6 +600,7 @@ export class InkDrawer {
 		if (this.activePointerId !== event.pointerId) {
 			return;
 		}
+		this.trackPointerUp(performance.now());
 		this.finishStroke(true);
 	};
 
@@ -536,19 +608,22 @@ export class InkDrawer {
 		if (this.activePointerId !== event.pointerId) {
 			return;
 		}
+		this.trackPointerCancel(performance.now());
 		this.finishStroke(false);
 	};
 
 	private onLostPointerCapture = (event: PointerEvent): void => {
+		this.trackLostPointerCapture();
 		if (this.activePointerId === null) {
 			return;
 		}
 		if (
 			event.pointerId !== this.activePointerId &&
-			this.canvasEl.hasPointerCapture(this.activePointerId)
+			this.hasCapturedPointer(this.activePointerId)
 		) {
 			return;
 		}
+		this.trackPointerCancel(performance.now());
 		this.finishStroke(false);
 	};
 
@@ -557,8 +632,9 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
-		if (this.activePointerId !== null && this.canvasEl.hasPointerCapture(this.activePointerId)) {
-			this.canvasEl.releasePointerCapture(this.activePointerId);
+		const finishStartAt = performance.now();
+		if (this.activePointerId !== null) {
+			this.releaseCapturedPointer(this.activePointerId);
 		}
 
 		let strokePeakLocalX: number | null = null;
@@ -609,6 +685,7 @@ export class InkDrawer {
 		if (applyPendingAdvance && !didAdvanceOnRelease) {
 			this.scheduleIdleAdvance(strokePeakLocalX);
 		}
+		this.pushTimingSample(this.pencilTiming.finishStrokeMs, performance.now() - finishStartAt);
 	}
 
 	private eraseLastStroke(): void {
@@ -1218,17 +1295,132 @@ export class InkDrawer {
 		return this.getStrokeBounds(stroke);
 	}
 
-	private isLikelyPenPointer(event: PointerEvent): boolean {
+	private hasCapturedPointer(pointerId: number): boolean {
+		if (!this.getRuntimeConfig().usePointerCapture) {
+			return false;
+		}
+		return this.canvasEl.hasPointerCapture(pointerId);
+	}
+
+	private setCapturedPointer(pointerId: number): void {
+		if (!this.getRuntimeConfig().usePointerCapture) {
+			return;
+		}
+		try {
+			this.canvasEl.setPointerCapture(pointerId);
+		} catch {
+			/* iOS can reject pointer capture transitions during fast pen input */
+		}
+	}
+
+	private releaseCapturedPointer(pointerId: number): void {
+		if (!this.getRuntimeConfig().usePointerCapture) {
+			return;
+		}
+		if (!this.canvasEl.hasPointerCapture(pointerId)) {
+			return;
+		}
+		try {
+			this.canvasEl.releasePointerCapture(pointerId);
+		} catch {
+			/* ignore capture-release races */
+		}
+	}
+
+	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {
+		this.pencilTiming.downCount += 1;
+		if (pointerType === 'touch') {
+			this.pencilTiming.touchDownCount += 1;
+		} else if (pointerType === 'pen') {
+			this.pencilTiming.penLikeDownCount += 1;
+		} else {
+			this.pencilTiming.otherDownCount += 1;
+		}
+		if (penLike && pointerType !== 'pen') {
+			this.pencilTiming.penLikeDownCount += 1;
+		}
+		if (this.lastPointerUpAt > 0) {
+			this.pushTimingSample(this.pencilTiming.upToDownMs, now - this.lastPointerUpAt);
+		}
+		this.lastPointerDownAt = now;
+	}
+
+	private trackPointerUp(now: number): void {
+		this.pencilTiming.upCount += 1;
+		if (this.lastPointerDownAt > 0) {
+			this.pushTimingSample(this.pencilTiming.downToUpMs, now - this.lastPointerDownAt);
+		}
+		this.lastPointerUpAt = now;
+	}
+
+	private trackPointerCancel(now: number): void {
+		this.pencilTiming.cancelCount += 1;
+		if (this.lastPointerDownAt > 0) {
+			this.pushTimingSample(this.pencilTiming.downToUpMs, now - this.lastPointerDownAt);
+		}
+		this.lastPointerUpAt = now;
+	}
+
+	private trackLostPointerCapture(): void {
+		this.pencilTiming.lostCaptureCount += 1;
+	}
+
+	private pushTimingSample(target: number[], value: number): void {
+		if (!Number.isFinite(value) || value < 0) {
+			return;
+		}
+		target.push(value);
+		if (target.length > 48) {
+			target.splice(0, target.length - 48);
+		}
+	}
+
+	private formatTimingSeries(samples: number[]): string {
+		if (samples.length === 0) {
+			return 'n=0';
+		}
+		const sorted = [...samples].sort((a, b) => a - b);
+		const median = this.quantileSorted(sorted, 0.5);
+		const p90 = this.quantileSorted(sorted, 0.9);
+		const max = sorted[sorted.length - 1] ?? median;
+		return `n=${samples.length}, med=${median.toFixed(1)}ms, p90=${p90.toFixed(1)}ms, max=${max.toFixed(1)}ms`;
+	}
+
+	private quantileSorted(values: number[], q: number): number {
+		const first = values[0] ?? 0;
+		if (values.length <= 1) {
+			return first;
+		}
+		const clampedQ = Math.max(0, Math.min(1, q));
+		const rawIndex = clampedQ * (values.length - 1);
+		const lowerIndex = Math.floor(rawIndex);
+		const upperIndex = Math.ceil(rawIndex);
+		const lower = values[lowerIndex] ?? first;
+		const upper = values[upperIndex] ?? lower;
+		if (upperIndex === lowerIndex) {
+			return lower;
+		}
+		const ratio = rawIndex - lowerIndex;
+		return lower + (upper - lower) * ratio;
+	}
+
+	private isLikelyPenPointer(event: PointerEvent, now = performance.now()): boolean {
 		if (event.pointerType === 'pen') {
+			return true;
+		}
+		if (event.pointerType === 'mouse') {
+			return false;
+		}
+		if (this.hasPenInSession && now - this.lastPenLikeEventAt <= 2000) {
 			return true;
 		}
 		if (event.pointerType !== 'touch') {
 			return false;
 		}
-		if (event.pressure > 0.15) {
+		if (event.pressure > 0.08) {
 			return true;
 		}
-		return event.width <= 3 && event.height <= 3;
+		return event.width <= 6 && event.height <= 6;
 	}
 
 	private pruneLineBreakMarkersIfNoVisibleStrokes(doc: InkDocument): boolean {

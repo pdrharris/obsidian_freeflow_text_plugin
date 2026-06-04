@@ -1,4 +1,4 @@
-import { Notice, Plugin } from 'obsidian';
+import { Notice, Platform, Plugin } from 'obsidian';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import {
@@ -34,6 +34,20 @@ export default class FreeFlowInkPlugin extends Plugin {
 			name: 'Run basic diagnostics',
 			callback: () => {
 				this.runBasicInkDiagnostics();
+			},
+		});
+		this.addCommand({
+			id: 'show-pencil-timing-summary',
+			name: 'Show pencil timing summary',
+			callback: () => {
+				this.showPencilTimingSummary();
+			},
+		});
+		this.addCommand({
+			id: 'reset-pencil-timing-summary',
+			name: 'Reset pencil timing summary',
+			callback: () => {
+				this.resetPencilTimingSummary();
 			},
 		});
 		const registry = new InkBlockRegistry(
@@ -80,6 +94,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			wordGapScale: this.getWordGapScale(),
 			idleAdvanceMs: this.settings.idleAdvanceMs,
 			showWritingLine: this.settings.showWritingLine,
+			usePointerCapture: !this.isIOSLikeDevice(),
 		};
 	}
 
@@ -188,6 +203,28 @@ export default class FreeFlowInkPlugin extends Plugin {
 			.map((result: InkDiagnosticResult) => `${result.name}: ${result.detail}`)
 			.join(' | ');
 		new Notice(`${summary}. ${failureLines}`, 9000);
+	}
+
+	private showPencilTimingSummary(): void {
+		if (!this.drawer) {
+			new Notice('Ink drawer is not ready yet.');
+			return;
+		}
+		const summary = this.drawer.getPencilTimingSummary();
+		new Notice(`Pencil timing: ${summary}`, 12000);
+	}
+
+	private resetPencilTimingSummary(): void {
+		if (!this.drawer) {
+			new Notice('Ink drawer is not ready yet.');
+			return;
+		}
+		this.drawer.resetPencilTimingDiagnostics();
+		new Notice('Pencil timing summary reset.');
+	}
+
+	private isIOSLikeDevice(): boolean {
+		return Platform.isIosApp;
 	}
 }
 
