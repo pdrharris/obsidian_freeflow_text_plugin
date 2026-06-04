@@ -33,6 +33,7 @@ export interface DrawerRuntimeConfig {
 	idleAdvanceMs: number;
 	showWritingLine: boolean;
 	usePointerCapture: boolean;
+	allowAnyNonMousePointer: boolean;
 }
 
 export interface InkDiagnosticResult {
@@ -47,6 +48,7 @@ interface PencilTimingDiagnostics {
 	cancelCount: number;
 	lostCaptureCount: number;
 	recoveredOnDownCount: number;
+	moveStartCount: number;
 	penLikeDownCount: number;
 	touchDownCount: number;
 	otherDownCount: number;
@@ -84,6 +86,7 @@ export class InkDrawer {
 		cancelCount: 0,
 		lostCaptureCount: 0,
 		recoveredOnDownCount: 0,
+		moveStartCount: 0,
 		penLikeDownCount: 0,
 		touchDownCount: 0,
 		otherDownCount: 0,
@@ -342,7 +345,7 @@ export class InkDrawer {
 		return [
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, moveStart=${this.pencilTiming.moveStartCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -355,6 +358,7 @@ export class InkDrawer {
 		this.pencilTiming.cancelCount = 0;
 		this.pencilTiming.lostCaptureCount = 0;
 		this.pencilTiming.recoveredOnDownCount = 0;
+		this.pencilTiming.moveStartCount = 0;
 		this.pencilTiming.penLikeDownCount = 0;
 		this.pencilTiming.touchDownCount = 0;
 		this.pencilTiming.otherDownCount = 0;
@@ -542,6 +546,9 @@ export class InkDrawer {
 		const incomingIsPenLike = this.isLikelyPenPointer(event, now);
 		this.trackPointerDown(now, event.pointerType, incomingIsPenLike);
 		if (this.activePointerId !== null) {
+			if (event.pointerId === this.activePointerId) {
+				return;
+			}
 			const activePointerLostCapture = !this.hasCapturedPointer(this.activePointerId);
 			if (activePointerLostCapture || incomingIsPenLike) {
 				this.pencilTiming.recoveredOnDownCount += 1;
@@ -578,7 +585,34 @@ export class InkDrawer {
 
 	private onPointerMove = (event: PointerEvent): void => {
 		const session = this.session;
-		if (!session || this.activePointerId !== event.pointerId) {
+		if (!session) {
+			return;
+		}
+		if (this.activePointerId === null) {
+			const now = performance.now();
+			const penLike = this.isLikelyPenPointer(event, now);
+			if (!penLike || !this.isPointerInContact(event)) {
+				return;
+			}
+			this.pencilTiming.moveStartCount += 1;
+			this.trackPointerDown(now, event.pointerType, penLike);
+			this.lastPenLikeEventAt = now;
+			this.hasPenInSession = true;
+			this.activePointerId = event.pointerId;
+			this.setCapturedPointer(event.pointerId);
+			this.pendingAdvanceOnRelease = false;
+			this.activeStroke = {
+				id: createStrokeId(),
+				tool: 'pen',
+				color: DEFAULT_PEN_COLOR,
+				width: DEFAULT_PEN_WIDTH,
+				points: [],
+			};
+			this.pushStrokePoints(event);
+			this.requestDraw();
+			return;
+		}
+		if (this.activePointerId !== event.pointerId) {
 			return;
 		}
 		if (this.isLikelyPenPointer(event)) {
@@ -1402,12 +1436,22 @@ export class InkDrawer {
 		return lower + (upper - lower) * ratio;
 	}
 
+	private isPointerInContact(event: PointerEvent): boolean {
+		if (event.pressure > 0.01) {
+			return true;
+		}
+		return event.buttons === 1;
+	}
+
 	private isLikelyPenPointer(event: PointerEvent, now = performance.now()): boolean {
 		if (event.pointerType === 'pen') {
 			return true;
 		}
 		if (event.pointerType === 'mouse') {
 			return false;
+		}
+		if (this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return true;
 		}
 		if (this.hasPenInSession && now - this.lastPenLikeEventAt <= 2000) {
 			return true;

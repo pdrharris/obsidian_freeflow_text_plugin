@@ -89,12 +89,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 	}
 
 	private getDrawerRuntimeConfig(): DrawerRuntimeConfig {
+		const iosLike = this.isIOSLikeDevice();
 		return {
 			wrapWidth: this.getWrapWidthWorld(),
 			wordGapScale: this.getWordGapScale(),
 			idleAdvanceMs: this.settings.idleAdvanceMs,
 			showWritingLine: this.settings.showWritingLine,
-			usePointerCapture: !this.isIOSLikeDevice(),
+			usePointerCapture: !iosLike,
+			allowAnyNonMousePointer: iosLike,
 		};
 	}
 
