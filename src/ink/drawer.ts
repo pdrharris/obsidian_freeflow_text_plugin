@@ -101,6 +101,7 @@ export class InkDrawer {
 	private inferredStartArmedPointerId: number | null = null;
 	private inferredStartArmedAt = 0;
 	private lastGlobalStartSignature = '';
+	private lastPointerDownSignature = '';
 	private readonly pencilTiming: PencilTimingDiagnostics = {
 		downCount: 0,
 		upCount: 0,
@@ -733,11 +734,23 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		const pointerDownSignature = `${event.pointerId}:${event.timeStamp}`;
+		if (pointerDownSignature === this.lastPointerDownSignature) {
+			return;
+		}
+		this.lastPointerDownSignature = pointerDownSignature;
 		this.clearInferredPenStart();
 		if (this.activeTouchId !== null) {
 			return;
 		}
 		const now = performance.now();
+		if (
+			this.activePointerId !== null &&
+			event.pointerId === this.activePointerId &&
+			now - this.lastPointerDownAt <= 24
+		) {
+			return;
+		}
 		const incomingIsPenLike = this.isLikelyPenPointer(event, now);
 		this.trackPointerDown(now, event.pointerType, incomingIsPenLike);
 		if (this.activePointerId !== null) {
