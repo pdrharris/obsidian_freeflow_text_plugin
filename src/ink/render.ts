@@ -9,10 +9,12 @@ export interface InlineRenderMetrics {
 cssHeight: number;
 worldWidth: number;
 worldHeight: number;
+scale: number;
 }
 
 const INLINE_MIN_HEIGHT = 140;
 const INLINE_WRAP_MARGIN_X = 16;
+const INLINE_TARGET_LINE_HEIGHT_PX = 28;
 
 interface StrokeInfo {
 stroke: InkStroke;
@@ -101,26 +103,31 @@ wordGapScale: number,
 renderLineHeightScale: number,
 renderStrokeFillScale: number,
 ): InlineRenderMetrics {
-const contentWorldWidth = Math.max(220, wrapWidth);
 const lineSpacingScale = Math.max(0.1, renderLineHeightScale);
+const viewportLayout = resolveInlineViewportLayout(
+	doc,
+	cssWidth,
+	wrapWidth,
+	lineSpacingScale,
+);
 const layout = layoutInlineStrokes(
 	doc,
-	contentWorldWidth,
+	viewportLayout.worldWidth,
 	wordGapScale,
 	lineSpacingScale,
 	renderStrokeFillScale,
 );
 const contentWorldHeight = Math.max(layout.effectiveLineHeight, layout.maxY + 24);
 const lineCount = Math.max(1, Math.ceil(contentWorldHeight / layout.effectiveLineHeight));
-const uniformScale = cssWidth / contentWorldWidth;
-const scaledHeight = contentWorldHeight * uniformScale;
+const scaledHeight = contentWorldHeight * viewportLayout.scale;
 const minLineHeight = lineCount * Math.max(8, Math.round(28 * lineSpacingScale));
 const cssHeight = Math.max(INLINE_MIN_HEIGHT, Math.ceil(Math.max(scaledHeight, minLineHeight)));
 
 return {
 cssHeight,
-worldWidth: contentWorldWidth,
+worldWidth: viewportLayout.worldWidth,
 worldHeight: contentWorldHeight,
+scale: viewportLayout.scale,
 };
 }
 
@@ -164,16 +171,21 @@ if (doc.strokes.length === 0) {
 	};
 }
 
-const contentWorldWidth = Math.max(220, wrapWidth);
+const lineSpacingScale = Math.max(0.1, renderLineHeightScale);
+const viewportLayout = resolveInlineViewportLayout(
+	doc,
+	cssWidth,
+	wrapWidth,
+	lineSpacingScale,
+);
 const layout = layoutInlineStrokes(
 	doc,
-	contentWorldWidth,
+	viewportLayout.worldWidth,
 	wordGapScale,
-	renderLineHeightScale,
+	lineSpacingScale,
 	renderStrokeFillScale,
 );
-const safeCssWidth = Math.max(1, cssWidth);
-const scale = safeCssWidth / contentWorldWidth;
+const scale = viewportLayout.scale;
 const clickWorldX = clickCssX / scale;
 const clickWorldY = clickCssY / scale;
 
@@ -240,7 +252,7 @@ ctx.clearRect(0, 0, cssWidth, metrics.cssHeight);
 ctx.fillStyle = '#fcfdff';
 ctx.fillRect(0, 0, cssWidth, metrics.cssHeight);
 
-const scale = cssWidth / metrics.worldWidth;
+const scale = metrics.scale;
 if (showWritingLine) {
 ctx.strokeStyle = '#e8ecf5';
 ctx.lineWidth = 1;
@@ -486,6 +498,27 @@ maxX,
 minY,
 maxY,
 };
+}
+
+function resolveInlineViewportLayout(
+	doc: InkDocument,
+	cssWidth: number,
+	wrapWidth: number,
+	lineSpacingScale: number,
+): { worldWidth: number; scale: number } {
+	const sourceLineHeight = Math.max(80, doc.meta.lineHeight);
+	const normalizedLineSpacing = Math.max(0.1, lineSpacingScale);
+	const targetCssLineHeight = Math.max(8, INLINE_TARGET_LINE_HEIGHT_PX * normalizedLineSpacing);
+	const effectiveWorldLineHeight = Math.max(1, sourceLineHeight * normalizedLineSpacing);
+	const stableScale = clamp(targetCssLineHeight / effectiveWorldLineHeight, 0.08, 2.4);
+	const safeCssWidth = Math.max(1, cssWidth);
+	const maxWorldWidthForCanvas = Math.max(80, safeCssWidth / stableScale);
+	const preferredWorldWidth = Math.max(220, wrapWidth);
+	const worldWidth = Math.max(80, Math.min(preferredWorldWidth, maxWorldWidthForCanvas));
+	return {
+		worldWidth,
+		scale: stableScale,
+	};
 }
 
 function buildInsertionBoundaries(
