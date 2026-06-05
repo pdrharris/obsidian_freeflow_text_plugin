@@ -520,16 +520,17 @@ function estimateSourceStrokeHeightRatio(strokeInfos: StrokeInfo[], lineHeight: 
 		.filter((info) => !isLineBreakMarkerStroke(info.stroke))
 		.map((info) => Math.max(1, info.maxY - info.minY) / Math.max(1, lineHeight))
 		.filter((ratio) => Number.isFinite(ratio) && ratio > 0);
-	if (measurableRatios.length === 0) {
+	if (measurableRatios.length < 10) {
 		return INLINE_FALLBACK_SOURCE_HEIGHT_RATIO;
 	}
 	measurableRatios.sort((a, b) => a - b);
-	const p85Index = Math.min(
+	const p90Index = Math.min(
 		measurableRatios.length - 1,
-		Math.max(0, Math.floor((measurableRatios.length - 1) * 0.85)),
+		Math.max(0, Math.floor((measurableRatios.length - 1) * 0.9)),
 	);
-	const sampledRatio = measurableRatios[p85Index] ?? INLINE_FALLBACK_SOURCE_HEIGHT_RATIO;
-	return clamp(sampledRatio, 0.14, 0.75);
+	const sampledRatio = measurableRatios[p90Index] ?? INLINE_FALLBACK_SOURCE_HEIGHT_RATIO;
+	const blendedRatio = sampledRatio * 0.6 + INLINE_FALLBACK_SOURCE_HEIGHT_RATIO * 0.4;
+	return clamp(Math.max(INLINE_FALLBACK_SOURCE_HEIGHT_RATIO, blendedRatio), 0.2, 0.75);
 }
 
 function buildInsertionBoundaries(
@@ -604,8 +605,11 @@ for (let index = 0; index <= doc.strokes.length; index += 1) {
 		const nextAnchor = getNextAnchor(index);
 
 		if (prevAnchor && nextAnchor) {
-			const isSameLine =
-				Math.abs(nextAnchor.centerY - prevAnchor.centerY) <= effectiveLineHeight * 0.6;
+				const isSameVerticalBand =
+					Math.abs(nextAnchor.centerY - prevAnchor.centerY) <= effectiveLineHeight * 0.6;
+				const clearlyWrappedToNextLine =
+					nextAnchor.leftX <= prevAnchor.rightX - Math.max(6, effectiveLineHeight * 0.2);
+				const isSameLine = isSameVerticalBand && !clearlyWrappedToNextLine;
 if (isSameLine) {
 				const desiredX = (prevAnchor.rightX + nextAnchor.leftX) * 0.5;
 				const minX = prevAnchor.rightX + 4;
@@ -621,9 +625,10 @@ if (isSameLine) {
 					linePreference: 'auto',
 				});
 			} else {
+				const prevLinePadding = Math.max(6, effectiveLineHeight * 0.18);
 				boundaries.push({
 					index,
-					x: prevAnchor.rightX + 20,
+					x: prevAnchor.rightX + prevLinePadding,
 					y: prevAnchor.centerY,
 					linePreference: 'prev',
 				});
@@ -648,9 +653,10 @@ continue;
 }
 
 		if (prevAnchor) {
+				const trailingPadding = Math.max(8, effectiveLineHeight * 0.22);
 boundaries.push({
 index,
-				x: prevAnchor.rightX + 24,
+					x: prevAnchor.rightX + trailingPadding,
 				y: prevAnchor.centerY,
 				linePreference: 'prev',
 });
