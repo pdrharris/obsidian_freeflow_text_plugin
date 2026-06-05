@@ -16,6 +16,9 @@ const NEW_LINE_START_PADDING = 24;
 const INFERRED_PEN_START_MOVE_PX = 1.8;
 const INFERRED_PEN_START_MAX_AGE_MS = 220;
 const INFERRED_PEN_START_AFTER_UP_MS = 1200;
+const DOWNLESS_PEN_BUFFER_MAX_AGE_MS = 220;
+const DOWNLESS_PEN_BUFFER_MAX_IDLE_MS = 90;
+const DOWNLESS_PEN_BUFFER_MIN_TRAVEL_PX = 2.5;
 
 export interface DrawerSession {
 	key: string;
@@ -57,6 +60,7 @@ interface PencilTimingDiagnostics {
 	rawStartCount: number;
 	inferredStartCount: number;
 	upOnlyStartCount: number;
+	upBufferedStartCount: number;
 	windowStartCount: number;
 	touchFallbackStartCount: number;
 	upAddedPointCount: number;
@@ -75,6 +79,13 @@ interface PencilTimingDiagnostics {
 	downToUpMs: number[];
 	upToDownMs: number[];
 	finishStrokeMs: number[];
+}
+
+interface DownlessPenMotionSample {
+	clientX: number;
+	clientY: number;
+	pressure: number;
+	time: number;
 }
 
 export class InkDrawer {
@@ -108,6 +119,7 @@ export class InkDrawer {
 	private pendingInferredPenAt = 0;
 	private inferredStartArmedPointerId: number | null = null;
 	private inferredStartArmedAt = 0;
+	private downlessPenBuffer: DownlessPenMotionSample[] = [];
 	private lastPointerDownSignature = '';
 	private readonly pencilTiming: PencilTimingDiagnostics = {
 		downCount: 0,
@@ -121,6 +133,7 @@ export class InkDrawer {
 		rawStartCount: 0,
 		inferredStartCount: 0,
 		upOnlyStartCount: 0,
+		upBufferedStartCount: 0,
 		windowStartCount: 0,
 		touchFallbackStartCount: 0,
 		upAddedPointCount: 0,
@@ -391,7 +404,7 @@ export class InkDrawer {
 		return [
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, rawStart=${this.pencilTiming.rawStartCount}, inferredStart=${this.pencilTiming.inferredStartCount}, upOnlyStart=${this.pencilTiming.upOnlyStartCount}, windowStart=${this.pencilTiming.windowStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
+			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, rawStart=${this.pencilTiming.rawStartCount}, inferredStart=${this.pencilTiming.inferredStartCount}, upOnlyStart=${this.pencilTiming.upOnlyStartCount}, upBufferedStart=${this.pencilTiming.upBufferedStartCount}, windowStart=${this.pencilTiming.windowStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
 			`obs canvasDownPen=${this.pencilTiming.observedCanvasDownPenCount}, canvasMovePen=${this.pencilTiming.observedCanvasMovePenCount}, canvasRawPen=${this.pencilTiming.observedCanvasRawPenCount}, canvasUpPen=${this.pencilTiming.observedCanvasUpPenCount}, docDownPenIn=${this.pencilTiming.observedDocumentDownPenInCanvasCount}, winDownPenIn=${this.pencilTiming.observedWindowDownPenInCanvasCount}, winMovePenIn=${this.pencilTiming.observedWindowMovePenInCanvasCount}, winUpPenIn=${this.pencilTiming.observedWindowUpPenInCanvasCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
@@ -411,6 +424,7 @@ export class InkDrawer {
 		this.pencilTiming.rawStartCount = 0;
 		this.pencilTiming.inferredStartCount = 0;
 		this.pencilTiming.upOnlyStartCount = 0;
+		this.pencilTiming.upBufferedStartCount = 0;
 		this.pencilTiming.windowStartCount = 0;
 		this.pencilTiming.touchFallbackStartCount = 0;
 		this.pencilTiming.upAddedPointCount = 0;
@@ -434,6 +448,7 @@ export class InkDrawer {
 		this.pendingTouchId = null;
 		this.activeTouchId = null;
 		this.clearInferredPenStart();
+		this.clearDownlessPenBuffer();
 	}
 
 	open(session: DrawerSession): void {
@@ -453,6 +468,7 @@ export class InkDrawer {
 		this.pendingTouchId = null;
 		this.activeTouchId = null;
 		this.clearInferredPenStart();
+		this.clearDownlessPenBuffer();
 		this.activeStroke = null;
 		this.hasPenInSession = false;
 		this.lastPenLikeEventAt = 0;
@@ -759,6 +775,7 @@ export class InkDrawer {
 		}
 		this.lastPointerDownSignature = pointerDownSignature;
 		this.clearInferredPenStart();
+		this.clearDownlessPenBuffer();
 		if (this.activeTouchId !== null) {
 			return;
 		}
@@ -843,8 +860,10 @@ export class InkDrawer {
 			const penLike = this.isLikelyPenPointer(event, now);
 			if (!penLike) {
 				this.clearInferredPenStart();
+				this.clearDownlessPenBuffer();
 				return;
 			}
+			this.trackDownlessPenMotion(event, now);
 			const inContact = this.isPointerEventInContact(event);
 			if (!inContact) {
 				this.shouldInferPenStartFromMotion(event, now);
@@ -864,6 +883,7 @@ export class InkDrawer {
 			this.pendingTouchId = null;
 			this.activeTouchId = null;
 			this.clearInferredPenStart();
+			this.clearDownlessPenBuffer();
 			this.activePointerId = event.pointerId;
 			this.setCapturedPointer(event.pointerId);
 			this.pendingAdvanceOnRelease = false;
@@ -903,15 +923,19 @@ export class InkDrawer {
 			const penLike = this.isLikelyPenPointer(event, now);
 			if (!penLike) {
 				this.clearInferredPenStart();
+				this.clearDownlessPenBuffer();
 				return;
 			}
+			const startFromBufferedMotion = this.shouldStartFromDownlessPenBuffer(now);
 			const inContact = this.isPointerEventInContact(event);
 			const startFromInferred = this.isInferredStartArmed(event.pointerId, now);
-			if (!inContact && !startFromInferred) {
+			if (!inContact && !startFromInferred && !startFromBufferedMotion) {
 				return;
 			}
 			if (startFromInferred) {
 				this.pencilTiming.inferredStartCount += 1;
+			} else if (startFromBufferedMotion) {
+				this.pencilTiming.upBufferedStartCount += 1;
 			} else {
 				this.pencilTiming.upOnlyStartCount += 1;
 			}
@@ -930,6 +954,9 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
+			if (startFromBufferedMotion) {
+				this.appendDownlessPenBufferPoints();
+			}
 			this.pushStrokePoints(event);
 			if (this.activeStroke.points.length === 0) {
 				this.appendSamplePoint(
@@ -1111,6 +1138,7 @@ export class InkDrawer {
 		this.activeTouchId = null;
 		this.pendingTouchId = null;
 		this.clearInferredPenStart();
+		this.clearDownlessPenBuffer();
 		this.activeStroke = null;
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
@@ -1781,6 +1809,62 @@ export class InkDrawer {
 		this.pendingInferredPenAt = 0;
 		this.inferredStartArmedPointerId = null;
 		this.inferredStartArmedAt = 0;
+	}
+
+	private clearDownlessPenBuffer(): void {
+		this.downlessPenBuffer.length = 0;
+	}
+
+	private trackDownlessPenMotion(event: PointerEvent, now: number): void {
+		if (event.pointerType !== 'pen') {
+			this.clearDownlessPenBuffer();
+			return;
+		}
+		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
+			this.clearDownlessPenBuffer();
+			return;
+		}
+		this.downlessPenBuffer.push({
+			clientX: event.clientX,
+			clientY: event.clientY,
+			pressure: event.pressure > 0 ? event.pressure : 0.5,
+			time: now,
+		});
+		while (this.downlessPenBuffer.length > 0) {
+			const first = this.downlessPenBuffer[0];
+			if (!first || now - first.time <= DOWNLESS_PEN_BUFFER_MAX_AGE_MS) {
+				break;
+			}
+			this.downlessPenBuffer.shift();
+		}
+	}
+
+	private shouldStartFromDownlessPenBuffer(now: number): boolean {
+		if (this.downlessPenBuffer.length < 2) {
+			return false;
+		}
+		const last = this.downlessPenBuffer[this.downlessPenBuffer.length - 1];
+		if (!last || now - last.time > DOWNLESS_PEN_BUFFER_MAX_IDLE_MS) {
+			return false;
+		}
+		let travel = 0;
+		for (let index = 1; index < this.downlessPenBuffer.length; index += 1) {
+			const previous = this.downlessPenBuffer[index - 1];
+			const current = this.downlessPenBuffer[index];
+			if (!previous || !current) {
+				continue;
+			}
+			const dx = current.clientX - previous.clientX;
+			const dy = current.clientY - previous.clientY;
+			travel += Math.sqrt(dx * dx + dy * dy);
+		}
+		return travel >= DOWNLESS_PEN_BUFFER_MIN_TRAVEL_PX;
+	}
+
+	private appendDownlessPenBufferPoints(): void {
+		for (const sample of this.downlessPenBuffer) {
+			this.appendSamplePoint(sample.clientX, sample.clientY, sample.pressure);
+		}
 	}
 
 	private shouldInferPenStartFromMotion(event: PointerEvent, now: number): boolean {
