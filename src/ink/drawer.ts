@@ -1479,8 +1479,19 @@ export class InkDrawer {
 		if (cursorIndex <= 0) {
 			return;
 		}
-
 		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
+
+		const previousIndex = cursorIndex - 1;
+		const previousStroke = session.doc.strokes[previousIndex];
+		if (previousStroke && isLineBreakMarkerStroke(previousStroke)) {
+			const markerBounds = this.getStrokeBounds(previousStroke);
+			session.doc.strokes.splice(previousIndex, 1);
+			if (markerBounds) {
+				this.collapseLineBreakGap(session.doc, previousIndex, markerBounds.centerY, lineHeight);
+			}
+			this.finishEraseAtIndex(session, previousIndex);
+			return;
+		}
 		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
 		const wordGap = this.getInsertionWordGap(lineHeight);
 
@@ -1597,13 +1608,7 @@ export class InkDrawer {
 			removeIndex < session.doc.strokes.length ? session.doc.strokes[removeIndex] : undefined;
 		const prevPoint = prevStroke?.points[prevStroke.points.length - 1];
 		const nextPoint = nextStroke?.points[0];
-		const anchorPoint =
-			prevPoint && nextPoint
-				? {
-					x: (prevPoint.x + nextPoint.x) * 0.5,
-					y: (prevPoint.y + nextPoint.y) * 0.5,
-				}
-				: prevPoint || nextPoint;
+		const anchorPoint = prevPoint || nextPoint;
 
 		if (!anchorPoint || removedOnlyMarkers) {
 			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
