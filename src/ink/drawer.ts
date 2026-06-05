@@ -37,6 +37,7 @@ export interface DrawerRuntimeConfig {
 	wrapWidth: number;
 	wordGapScale: number;
 	idleAdvanceMs: number;
+	releaseAdvanceDelayMs: number;
 	showWritingLine: boolean;
 	usePointerCapture: boolean;
 	allowAnyNonMousePointer: boolean;
@@ -240,6 +241,7 @@ export class InkDrawer {
 	private lastLocalX: number | null = null;
 	private pendingAdvanceOnRelease = false;
 	private idleAdvanceTimer = 0;
+	private releaseAdvanceTimer = 0;
 	private snapNextStrokeToCursor = false;
 	private pendingSnapAnchorX: number | null = null;
 	private lastPenLikeEventAt = 0;
@@ -349,6 +351,7 @@ export class InkDrawer {
 		this.close();
 		this.detachListeners();
 		this.clearIdleAdvanceTimer();
+		this.clearReleaseAdvanceTimer();
 		this.rootEl.remove();
 	}
 
@@ -627,6 +630,7 @@ export class InkDrawer {
 		this.pendingSnapAnchorX = null;
 		this.pendingAdvanceOnRelease = false;
 		this.clearIdleAdvanceTimer();
+		this.clearReleaseAdvanceTimer();
 		this.updateToolUi();
 
 		this.rootEl.classList.add('is-open');
@@ -647,6 +651,7 @@ export class InkDrawer {
 		}
 
 		this.clearIdleAdvanceTimer();
+		this.clearReleaseAdvanceTimer();
 		this.pendingAdvanceOnRelease = false;
 		this.session.cursorIndex = this.clampCursorIndex(cursorIndex, this.session.doc.strokes.length);
 		this.session.linePreference = linePreference;
@@ -664,6 +669,7 @@ export class InkDrawer {
 			return;
 		}
 		this.clearIdleAdvanceTimer();
+		this.clearReleaseAdvanceTimer();
 		this.finishStroke(false);
 		const closingSession = this.session;
 		this.snapNextStrokeToCursor = false;
@@ -755,6 +761,7 @@ export class InkDrawer {
 
 	private onEraseLastStroke = (): void => {
 		this.clearIdleAdvanceTimer();
+		this.clearReleaseAdvanceTimer();
 		this.eraseLastStroke();
 	};
 
@@ -764,6 +771,7 @@ export class InkDrawer {
 			return;
 		}
 		this.clearIdleAdvanceTimer();
+		this.clearReleaseAdvanceTimer();
 		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
 		const cursorAnchor = this.getCursorAnchorPoint(session);
 		const splitX = cursorAnchor?.x ?? NEW_LINE_START_PADDING;
@@ -821,6 +829,7 @@ export class InkDrawer {
 		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'start');
 		this.pencilTiming.touchFallback.startObservedCount += 1;
 		this.trackTouchMetadataFromEvent(event);
+		this.clearReleaseAdvanceTimer();
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			this.pencilTiming.touchFallback.startBlockedModeOffCount += 1;
 			return;
@@ -982,6 +991,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.clearReleaseAdvanceTimer();
 		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'down', event.pointerType);
 		if (event.pointerType === 'pen') {
 			this.pencilTiming.observedCanvasDownPenCount += 1;
@@ -1418,11 +1428,17 @@ export class InkDrawer {
 		}
 
 		let didAdvanceOnRelease = false;
+		this.clearReleaseAdvanceTimer();
 		if (applyPendingAdvance && this.pendingAdvanceOnRelease) {
 			const drawerWidth =
 				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
 			if (drawerWidth > 0) {
-				this.advanceStep(drawerWidth);
+				const releaseDelay = Math.max(0, this.getRuntimeConfig().releaseAdvanceDelayMs);
+				if (releaseDelay <= 0) {
+					this.advanceStep(drawerWidth);
+				} else {
+					this.scheduleReleaseAdvance(releaseDelay);
+				}
 				didAdvanceOnRelease = true;
 			}
 		}
@@ -1463,18 +1479,113 @@ export class InkDrawer {
 		if (cursorIndex <= 0) {
 			return;
 		}
-		const removeIndex = cursorIndex - 1;
-		const removedStroke = session.doc.strokes[removeIndex];
-		const removedBounds = removedStroke ? this.getStrokeBounds(removedStroke) : null;
-		const removedWasLineBreak = !!removedStroke && isLineBreakMarkerStroke(removedStroke);
 
-		session.doc.strokes.splice(removeIndex, 1);
-		if (removedWasLineBreak && removedBounds) {
-			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-			this.collapseLineBreakGap(session.doc, removeIndex, removedBounds.centerY, lineHeight);
+		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
+		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
+		const wordGap = this.getInsertionWordGap(lineHeight);
+
+		let anchorIndex = cursorIndex - 1;
+		while (anchorIndex >= 0) {
+			const candidate = session.doc.strokes[anchorIndex];
+			if (!candidate) {
+				anchorIndex -= 1;
+				continue;
+			}
+			if (!isLineBreakMarkerStroke(candidate)) {
+				break;
+			}
+			anchorIndex -= 1;
 		}
+
+		if (anchorIndex < 0) {
+			const markerIndex = cursorIndex - 1;
+			const markerStroke = session.doc.strokes[markerIndex];
+			if (!markerStroke || !isLineBreakMarkerStroke(markerStroke)) {
+				return;
+			}
+			const markerBounds = this.getStrokeBounds(markerStroke);
+			session.doc.strokes.splice(markerIndex, 1);
+			if (markerBounds) {
+				this.collapseLineBreakGap(session.doc, markerIndex, markerBounds.centerY, lineHeight);
+			}
+			this.finishEraseAtIndex(session, markerIndex);
+			return;
+		}
+
+		const anchorStroke = session.doc.strokes[anchorIndex];
+		if (!anchorStroke || isLineBreakMarkerStroke(anchorStroke)) {
+			return;
+		}
+		const anchorBounds = this.getStrokeBounds(anchorStroke);
+		if (!anchorBounds) {
+			return;
+		}
+
+		const removeIndexes: number[] = [];
+		let scanIndex = anchorIndex;
+		while (scanIndex >= 0) {
+			const stroke = session.doc.strokes[scanIndex];
+			if (!stroke) {
+				scanIndex -= 1;
+				continue;
+			}
+			if (isLineBreakMarkerStroke(stroke)) {
+				break;
+			}
+			const bounds = this.getStrokeBounds(stroke);
+			if (!bounds) {
+				scanIndex -= 1;
+				continue;
+			}
+			if (Math.abs(bounds.centerY - anchorBounds.centerY) > sameLineTolerance) {
+				break;
+			}
+			removeIndexes.push(scanIndex);
+
+			let previousIndex = scanIndex - 1;
+			while (previousIndex >= 0 && !session.doc.strokes[previousIndex]) {
+				previousIndex -= 1;
+			}
+			if (previousIndex < 0) {
+				break;
+			}
+			const previousStroke = session.doc.strokes[previousIndex];
+			if (!previousStroke || isLineBreakMarkerStroke(previousStroke)) {
+				break;
+			}
+			const previousBounds = this.getStrokeBounds(previousStroke);
+			if (!previousBounds) {
+				scanIndex = previousIndex;
+				continue;
+			}
+			if (Math.abs(previousBounds.centerY - anchorBounds.centerY) > sameLineTolerance) {
+				break;
+			}
+			const gap = bounds.minX - previousBounds.maxX;
+			if (gap > wordGap) {
+				break;
+			}
+			scanIndex = previousIndex;
+		}
+
+		if (removeIndexes.length === 0) {
+			return;
+		}
+
+		const removeStart = Math.min(...removeIndexes);
+		removeIndexes.sort((a, b) => b - a);
+		for (const index of removeIndexes) {
+			session.doc.strokes.splice(index, 1);
+		}
+
+		this.finishEraseAtIndex(session, removeStart);
+	}
+
+	private finishEraseAtIndex(session: DrawerSession, removeIndex: number): void {
 		const removedOnlyMarkers = this.pruneLineBreakMarkersIfNoVisibleStrokes(session.doc);
-		session.cursorIndex = removedOnlyMarkers ? 0 : removeIndex;
+		session.cursorIndex = removedOnlyMarkers
+			? 0
+			: this.clampCursorIndex(removeIndex, session.doc.strokes.length);
 		session.linePreference = 'prev';
 		session.onCursorChanged(session.cursorIndex);
 		session.onLinePreferenceChanged(session.linePreference);
@@ -1482,7 +1593,8 @@ export class InkDrawer {
 		const drawerWidth =
 			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 480;
 		const prevStroke = removeIndex > 0 ? session.doc.strokes[removeIndex - 1] : undefined;
-		const nextStroke = removeIndex < session.doc.strokes.length ? session.doc.strokes[removeIndex] : undefined;
+		const nextStroke =
+			removeIndex < session.doc.strokes.length ? session.doc.strokes[removeIndex] : undefined;
 		const prevPoint = prevStroke?.points[prevStroke.points.length - 1];
 		const nextPoint = nextStroke?.points[0];
 		const anchorPoint =
@@ -1631,12 +1743,37 @@ export class InkDrawer {
 		}, delay);
 	}
 
+	private scheduleReleaseAdvance(delayMs: number): void {
+		this.clearReleaseAdvanceTimer();
+		this.releaseAdvanceTimer = window.setTimeout(() => {
+			this.releaseAdvanceTimer = 0;
+			if (!this.session || this.activePointerId !== null || this.activeTouchId !== null) {
+				return;
+			}
+			const drawerWidth =
+				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
+			if (drawerWidth <= 0) {
+				return;
+			}
+			this.advanceStep(drawerWidth);
+			this.requestDraw();
+		}, delayMs);
+	}
+
 	private clearIdleAdvanceTimer(): void {
 		if (!this.idleAdvanceTimer) {
 			return;
 		}
 		window.clearTimeout(this.idleAdvanceTimer);
 		this.idleAdvanceTimer = 0;
+	}
+
+	private clearReleaseAdvanceTimer(): void {
+		if (!this.releaseAdvanceTimer) {
+			return;
+		}
+		window.clearTimeout(this.releaseAdvanceTimer);
+		this.releaseAdvanceTimer = 0;
 	}
 
 	private requestDraw(): void {

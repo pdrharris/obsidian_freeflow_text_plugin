@@ -7,6 +7,7 @@ export interface FreeFlowInkSettings {
 	renderLineHeightScale: number;
 	drawerHeightScale: number;
 	idleAdvanceMs: number;
+	releaseAdvanceDelayMs: number;
 	showWritingLine: boolean;
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
@@ -19,6 +20,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	renderLineHeightScale: 1,
 	drawerHeightScale: 1,
 	idleAdvanceMs: 2000,
+	releaseAdvanceDelayMs: 260,
 	showWritingLine: true,
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
@@ -130,11 +132,11 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Rendered line height')
 			.setDesc(
-				'Controls vertical handwriting scale and line separation in the rendered block.',
+				'Controls vertical handwriting scale and line separation in the rendered block. Increase this if rendered writing looks too small.',
 			)
 			.addSlider((slider) =>
 				slider
-					.setLimits(10, 130, 1)
+					.setLimits(10, 220, 1)
 					.setValue(renderLineHeightPercent)
 					.setDynamicTooltip()
 					.onChange(async (value) => {
@@ -173,6 +175,9 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		const idleAdvanceValueEl = createDiv();
 		idleAdvanceValueEl.addClass('freeflow-ink-settings-value');
 		idleAdvanceValueEl.setText(`${this.plugin.settings.idleAdvanceMs} ms`);
+		const releaseAdvanceDelayValueEl = createDiv();
+		releaseAdvanceDelayValueEl.addClass('freeflow-ink-settings-value');
+		releaseAdvanceDelayValueEl.setText(`${this.plugin.settings.releaseAdvanceDelayMs} ms`);
 
 		new Setting(containerEl)
 			.setName('Show writing line')
@@ -205,6 +210,24 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 					}),
 			)
 			.controlEl.appendChild(idleAdvanceValueEl);
+
+		new Setting(containerEl)
+			.setName('Edge auto-scroll delay')
+			.setDesc(
+				'Delay after pen lift before right-edge auto-scroll runs. Helpful for dotting i or crossing t before scrolling.',
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(0, 1200, 25)
+					.setValue(this.plugin.settings.releaseAdvanceDelayMs)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.releaseAdvanceDelayMs = value;
+						releaseAdvanceDelayValueEl.setText(`${value} ms`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(releaseAdvanceDelayValueEl);
 
 		new Setting(containerEl).setName('Block size guardrails').setHeading();
 

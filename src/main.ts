@@ -94,6 +94,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			wrapWidth: this.getWrapWidthWorld(),
 			wordGapScale: this.getWordGapScale(),
 			idleAdvanceMs: this.settings.idleAdvanceMs,
+			releaseAdvanceDelayMs: this.settings.releaseAdvanceDelayMs,
 			showWritingLine: this.settings.showWritingLine,
 			usePointerCapture: !iosLike,
 			allowAnyNonMousePointer: iosLike,
@@ -137,7 +138,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 	}
 
 	getRenderLineHeightScale(): number {
-		return clamp(this.settings.renderLineHeightScale, 0.1, 1.3);
+		return clamp(this.settings.renderLineHeightScale, 0.1, 2.2);
 	}
 
 	private getWrapWidthWorld(): number {
@@ -180,6 +181,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.settings.softBlockLimitKb = clamp(Math.round(this.settings.softBlockLimitKb), 200, 12000);
 		this.settings.hardBlockLimitKb = clamp(Math.round(this.settings.hardBlockLimitKb), 512, 16000);
 		this.settings.wordGapScale = clamp(this.settings.wordGapScale, 0.8, 2.5);
+		this.settings.renderLineHeightScale = clamp(this.settings.renderLineHeightScale, 0.1, 2.2);
+		this.settings.drawerHeightScale = clamp(this.settings.drawerHeightScale, 0.3, 1.5);
+		this.settings.idleAdvanceMs = clamp(Math.round(this.settings.idleAdvanceMs), 500, 5000);
+		this.settings.releaseAdvanceDelayMs = clamp(
+			Math.round(this.settings.releaseAdvanceDelayMs),
+			0,
+			1200,
+		);
 		if (this.settings.hardBlockLimitKb <= this.settings.softBlockLimitKb) {
 			this.settings.hardBlockLimitKb = Math.min(16000, this.settings.softBlockLimitKb + 256);
 		}
