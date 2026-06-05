@@ -15,6 +15,7 @@ scale: number;
 const INLINE_MIN_HEIGHT = 140;
 const INLINE_WRAP_MARGIN_X = 16;
 const INLINE_TARGET_LINE_HEIGHT_PX = 28;
+const INLINE_FALLBACK_SOURCE_HEIGHT_RATIO = 0.28;
 
 interface StrokeInfo {
 stroke: InkStroke;
@@ -386,10 +387,11 @@ renderStrokeFillScale: number,
 const lineHeight = Math.max(80, doc.meta.lineHeight);
 const lineSpacingScale = Math.max(0.1, renderLineHeightScale);
 const strokeFillScale = Math.max(0.4, Math.min(1.6, renderStrokeFillScale));
-const glyphScale = lineSpacingScale * strokeFillScale;
 const strokeInfos = doc.strokes
 .map((stroke, index) => toStrokeInfo(stroke, index, lineHeight))
 .filter((item): item is StrokeInfo => item !== null);
+const sourceStrokeHeightRatio = estimateSourceStrokeHeightRatio(strokeInfos, lineHeight);
+const glyphScale = (lineSpacingScale * strokeFillScale) / sourceStrokeHeightRatio;
 
 const effectiveLineHeight = Math.max(8, lineHeight * lineSpacingScale);
 const baselineOffset = effectiveLineHeight * INK_BASELINE_RATIO_FROM_TOP;
@@ -519,6 +521,23 @@ function resolveInlineViewportLayout(
 		worldWidth,
 		scale: stableScale,
 	};
+}
+
+function estimateSourceStrokeHeightRatio(strokeInfos: StrokeInfo[], lineHeight: number): number {
+	const measurableRatios = strokeInfos
+		.filter((info) => !isLineBreakMarkerStroke(info.stroke))
+		.map((info) => Math.max(1, info.maxY - info.minY) / Math.max(1, lineHeight))
+		.filter((ratio) => Number.isFinite(ratio) && ratio > 0);
+	if (measurableRatios.length === 0) {
+		return INLINE_FALLBACK_SOURCE_HEIGHT_RATIO;
+	}
+	measurableRatios.sort((a, b) => a - b);
+	const p85Index = Math.min(
+		measurableRatios.length - 1,
+		Math.max(0, Math.floor((measurableRatios.length - 1) * 0.85)),
+	);
+	const sampledRatio = measurableRatios[p85Index] ?? INLINE_FALLBACK_SOURCE_HEIGHT_RATIO;
+	return clamp(sampledRatio, 0.14, 0.75);
 }
 
 function buildInsertionBoundaries(
