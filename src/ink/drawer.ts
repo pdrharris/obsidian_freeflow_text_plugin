@@ -537,6 +537,77 @@ export class InkDrawer {
 			detail: `pruned=${markerPruned ? 'yes' : 'no'}, remaining=${markerDoc.strokes.length}`,
 		});
 
+		const eraseAfterMarkerDoc: InkDocument = {
+			version: 1,
+			meta: { lineHeight },
+			strokes: [
+				makeStroke('erase-after-a', 38, 74, y1),
+				makeStroke('erase-after-b', 96, 132, y1),
+				this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
+			],
+		};
+		const eraseAfterSession = createSession(eraseAfterMarkerDoc);
+		eraseAfterSession.cursorIndex = eraseAfterMarkerDoc.strokes.length;
+		eraseAfterSession.linePreference = 'next';
+		eraseAfterSession.viewport = {
+			viewportX: 0,
+			lineOffsetY: y2,
+		};
+		this.session = eraseAfterSession;
+		this.activePointerId = null;
+		this.eraseLastStroke();
+		const eraseAfterIds = eraseAfterMarkerDoc.strokes.map((stroke) => stroke.id);
+		const eraseAfterMarkerRemaining = eraseAfterIds.some((id) =>
+			id.startsWith(INK_LINE_BREAK_MARKER_PREFIX),
+		);
+		results.push({
+			name: 'Erase newline marker at cursor-1 boundary',
+			pass:
+				eraseAfterMarkerDoc.strokes.length === 2 &&
+				eraseAfterSession.cursorIndex === 2 &&
+				String(eraseAfterSession.linePreference) === 'prev' &&
+				eraseAfterSession.viewport.lineOffsetY === y1 &&
+				!eraseAfterMarkerRemaining,
+			detail: `count=${eraseAfterMarkerDoc.strokes.length}, cursor=${eraseAfterSession.cursorIndex}, linePref=${eraseAfterSession.linePreference}, lineOffsetY=${eraseAfterSession.viewport.lineOffsetY}, markerRemaining=${eraseAfterMarkerRemaining ? 'yes' : 'no'}`,
+		});
+
+		const eraseAtCursorDoc: InkDocument = {
+			version: 1,
+			meta: { lineHeight },
+			strokes: [
+				makeStroke('erase-cursor-a', 42, 76, y1),
+				makeStroke('erase-cursor-b', 98, 136, y1),
+				this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
+			],
+		};
+		const eraseAtCursorSession = createSession(eraseAtCursorDoc);
+		eraseAtCursorSession.cursorIndex = 2;
+		eraseAtCursorSession.linePreference = 'prev';
+		eraseAtCursorSession.viewport = {
+			viewportX: 0,
+			lineOffsetY: y1,
+		};
+		this.session = eraseAtCursorSession;
+		this.activePointerId = null;
+		this.eraseLastStroke();
+		const eraseAtCursorIds = eraseAtCursorDoc.strokes.map((stroke) => stroke.id);
+		const eraseAtCursorMarkerRemaining = eraseAtCursorIds.some((id) =>
+			id.startsWith(INK_LINE_BREAK_MARKER_PREFIX),
+		);
+		results.push({
+			name: 'Erase newline marker at cursor boundary',
+			pass:
+				eraseAtCursorDoc.strokes.length === 2 &&
+				eraseAtCursorSession.cursorIndex === 2 &&
+				String(eraseAtCursorSession.linePreference) === 'prev' &&
+				eraseAtCursorSession.viewport.lineOffsetY === y1 &&
+				!eraseAtCursorMarkerRemaining,
+			detail: `count=${eraseAtCursorDoc.strokes.length}, cursor=${eraseAtCursorSession.cursorIndex}, linePref=${eraseAtCursorSession.linePreference}, lineOffsetY=${eraseAtCursorSession.viewport.lineOffsetY}, markerRemaining=${eraseAtCursorMarkerRemaining ? 'yes' : 'no'}`,
+		});
+
+		this.session = null;
+		this.activePointerId = null;
+
 		return results;
 	}
 

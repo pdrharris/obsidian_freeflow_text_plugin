@@ -186,7 +186,6 @@ export class InkBlockRegistry {
 			renderInline();
 			if (isActiveKey(blockKey)) {
 				pendingInlineRefreshWhileActive = true;
-				return;
 			}
 			scheduleSave();
 		};
