@@ -19,6 +19,7 @@ const INFERRED_PEN_START_AFTER_UP_MS = 1200;
 const DOWNLESS_PEN_BUFFER_MAX_AGE_MS = 220;
 const DOWNLESS_PEN_BUFFER_MAX_IDLE_MS = 90;
 const DOWNLESS_PEN_BUFFER_MIN_TRAVEL_PX = 2.5;
+const BACKDROP_CLOSE_GUARD_MS = 420;
 
 export interface DrawerSession {
 	key: string;
@@ -240,6 +241,7 @@ export class InkDrawer {
 	private redrawQueued = false;
 	private lastLocalX: number | null = null;
 	private pendingAdvanceOnRelease = false;
+	private lastInsertedLineBreakStrokeId: string | null = null;
 	private idleAdvanceTimer = 0;
 	private releaseAdvanceTimer = 0;
 	private snapNextStrokeToCursor = false;
@@ -699,6 +701,7 @@ export class InkDrawer {
 		this.lastLocalX = null;
 		this.snapNextStrokeToCursor = true;
 		this.pendingSnapAnchorX = null;
+		this.lastInsertedLineBreakStrokeId = null;
 		this.pendingAdvanceOnRelease = false;
 		this.clearIdleAdvanceTimer();
 		this.clearReleaseAdvanceTimer();
@@ -745,6 +748,7 @@ export class InkDrawer {
 		const closingSession = this.session;
 		this.snapNextStrokeToCursor = false;
 		this.pendingSnapAnchorX = null;
+		this.lastInsertedLineBreakStrokeId = null;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
 		closingSession.onClose();
@@ -825,9 +829,22 @@ export class InkDrawer {
 	};
 
 	private onBackdropClick = (event: MouseEvent): void => {
-		if (event.target === this.rootEl) {
-			this.close();
+		if (event.target !== this.rootEl) {
+			return;
 		}
+		if (this.activePointerId !== null || this.activeTouchId !== null || this.activeStroke) {
+			return;
+		}
+		const now = performance.now();
+		const recentInteractionAt = Math.max(
+			this.lastPenLikeEventAt,
+			this.lastPointerDownAt,
+			this.lastPointerUpAt,
+		);
+		if (recentInteractionAt > 0 && now - recentInteractionAt < BACKDROP_CLOSE_GUARD_MS) {
+			return;
+		}
+		this.close();
 	};
 
 	private onEraseLastStroke = (): void => {
@@ -870,11 +887,13 @@ export class InkDrawer {
 			splitX,
 			lineHeight,
 		);
+		const markerStroke = this.createLineBreakMarkerStroke(nextLineStartX, targetLineStart);
 		session.doc.strokes.splice(
 			insertionIndex,
 			0,
-			this.createLineBreakMarkerStroke(nextLineStartX, targetLineStart),
+			markerStroke,
 		);
+		this.lastInsertedLineBreakStrokeId = markerStroke.id;
 		session.cursorIndex = insertionIndex + 1;
 		session.linePreference = 'next';
 		session.viewport = {
@@ -1490,6 +1509,7 @@ export class InkDrawer {
 				strokePeakLocalX = activeBounds.maxX - session.viewport.viewportX;
 			}
 			session.doc.strokes.splice(insertionIndex, 0, this.activeStroke);
+			this.lastInsertedLineBreakStrokeId = null;
 			this.shiftFollowingStrokesForInsertion(session.doc, insertionIndex, insertionAnchorX);
 			session.cursorIndex = insertionIndex + 1;
 			session.linePreference = 'prev';
@@ -1552,26 +1572,33 @@ export class InkDrawer {
 		}
 		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
 
+		if (this.lastInsertedLineBreakStrokeId) {
+			const trackedMarkerIndex = session.doc.strokes.findIndex(
+				(stroke) => stroke.id === this.lastInsertedLineBreakStrokeId,
+			);
+			if (trackedMarkerIndex >= 0 && Math.abs(trackedMarkerIndex - cursorIndex) <= 1) {
+				if (this.removeLineBreakMarkerAt(session, trackedMarkerIndex, lineHeight)) {
+					this.lastInsertedLineBreakStrokeId = null;
+					return;
+				}
+			}
+			if (trackedMarkerIndex < 0) {
+				this.lastInsertedLineBreakStrokeId = null;
+			}
+		}
+
 		const previousIndex = cursorIndex - 1;
 		const previousStroke = session.doc.strokes[previousIndex];
 		if (previousStroke && isLineBreakMarkerStroke(previousStroke)) {
-			const markerBounds = this.getStrokeBounds(previousStroke);
-			session.doc.strokes.splice(previousIndex, 1);
-			if (markerBounds) {
-				this.collapseLineBreakGap(session.doc, previousIndex, markerBounds.centerY, lineHeight);
-			}
-			this.finishEraseAtIndex(session, previousIndex);
+			this.removeLineBreakMarkerAt(session, previousIndex, lineHeight);
+			this.lastInsertedLineBreakStrokeId = null;
 			return;
 		}
 
 		const currentStroke = session.doc.strokes[cursorIndex];
 		if (currentStroke && isLineBreakMarkerStroke(currentStroke)) {
-			const markerBounds = this.getStrokeBounds(currentStroke);
-			session.doc.strokes.splice(cursorIndex, 1);
-			if (markerBounds) {
-				this.collapseLineBreakGap(session.doc, cursorIndex, markerBounds.centerY, lineHeight);
-			}
-			this.finishEraseAtIndex(session, cursorIndex);
+			this.removeLineBreakMarkerAt(session, cursorIndex, lineHeight);
+			this.lastInsertedLineBreakStrokeId = null;
 			return;
 		}
 		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
@@ -1672,6 +1699,24 @@ export class InkDrawer {
 		}
 
 		this.finishEraseAtIndex(session, removeStart);
+	}
+
+	private removeLineBreakMarkerAt(
+		session: DrawerSession,
+		markerIndex: number,
+		lineHeight: number,
+	): boolean {
+		const markerStroke = session.doc.strokes[markerIndex];
+		if (!markerStroke || !isLineBreakMarkerStroke(markerStroke)) {
+			return false;
+		}
+		const markerBounds = this.getStrokeBounds(markerStroke);
+		session.doc.strokes.splice(markerIndex, 1);
+		if (markerBounds) {
+			this.collapseLineBreakGap(session.doc, markerIndex, markerBounds.centerY, lineHeight);
+		}
+		this.finishEraseAtIndex(session, markerIndex);
+		return true;
 	}
 
 	private finishEraseAtIndex(session: DrawerSession, removeIndex: number): void {
@@ -1790,6 +1835,7 @@ export class InkDrawer {
 			lineOffsetY: session.viewport.lineOffsetY,
 		};
 		session.onViewportChanged(session.viewport);
+		this.requestDraw();
 	}
 
 	private scheduleIdleAdvance(strokePeakLocalX: number | null): void {
@@ -1843,7 +1889,6 @@ export class InkDrawer {
 				return;
 			}
 			this.advanceStep(drawerWidth);
-			this.requestDraw();
 		}, delayMs);
 	}
 
