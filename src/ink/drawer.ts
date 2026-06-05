@@ -82,6 +82,8 @@ interface PencilTimingDiagnostics {
 	observedCanvasTouch: TouchStageObservation;
 	observedDocumentTouchInCanvas: TouchStageObservation;
 	observedWindowTouchInCanvas: TouchStageObservation;
+	touchFallback: TouchFallbackObservation;
+	touchMetadata: TouchMetadataObservation;
 	downToUpMs: number[];
 	upToDownMs: number[];
 	finishStrokeMs: number[];
@@ -106,6 +108,43 @@ interface TouchStageObservation {
 	move: number;
 	end: number;
 	cancel: number;
+}
+
+interface TouchFallbackObservation {
+	startObservedCount: number;
+	startBlockedModeOffCount: number;
+	startBlockedActivePointerCount: number;
+	startBlockedActiveTouchCount: number;
+	startMissingChangedTouchCount: number;
+	startPendingSetCount: number;
+	moveObservedCount: number;
+	moveBlockedModeOffCount: number;
+	moveBlockedActivePointerCount: number;
+	moveBlockedNoPendingCount: number;
+	moveBlockedPendingNotFoundCount: number;
+	moveActivatedCount: number;
+	moveContinueCount: number;
+	moveContinueMissingTouchCount: number;
+	moveContinueMissingStrokeCount: number;
+	endObservedCount: number;
+	endFinalizeWithActiveCount: number;
+	endPendingClearedCount: number;
+	cancelObservedCount: number;
+	cancelFinalizeWithActiveCount: number;
+	cancelPendingClearedCount: number;
+}
+
+interface TouchMetadataObservation {
+	sampledCount: number;
+	typeStylusCount: number;
+	typeDirectCount: number;
+	typeUnknownCount: number;
+	stylusLikeHeuristicCount: number;
+	directLikeHeuristicCount: number;
+	forcePositiveCount: number;
+	smallRadiusCount: number;
+	largeRadiusCount: number;
+	maxForceSeen: number;
 }
 
 interface DownlessPenMotionSample {
@@ -139,6 +178,47 @@ function createTouchStageObservation(): TouchStageObservation {
 		move: 0,
 		end: 0,
 		cancel: 0,
+	};
+}
+
+function createTouchFallbackObservation(): TouchFallbackObservation {
+	return {
+		startObservedCount: 0,
+		startBlockedModeOffCount: 0,
+		startBlockedActivePointerCount: 0,
+		startBlockedActiveTouchCount: 0,
+		startMissingChangedTouchCount: 0,
+		startPendingSetCount: 0,
+		moveObservedCount: 0,
+		moveBlockedModeOffCount: 0,
+		moveBlockedActivePointerCount: 0,
+		moveBlockedNoPendingCount: 0,
+		moveBlockedPendingNotFoundCount: 0,
+		moveActivatedCount: 0,
+		moveContinueCount: 0,
+		moveContinueMissingTouchCount: 0,
+		moveContinueMissingStrokeCount: 0,
+		endObservedCount: 0,
+		endFinalizeWithActiveCount: 0,
+		endPendingClearedCount: 0,
+		cancelObservedCount: 0,
+		cancelFinalizeWithActiveCount: 0,
+		cancelPendingClearedCount: 0,
+	};
+}
+
+function createTouchMetadataObservation(): TouchMetadataObservation {
+	return {
+		sampledCount: 0,
+		typeStylusCount: 0,
+		typeDirectCount: 0,
+		typeUnknownCount: 0,
+		stylusLikeHeuristicCount: 0,
+		directLikeHeuristicCount: 0,
+		forcePositiveCount: 0,
+		smallRadiusCount: 0,
+		largeRadiusCount: 0,
+		maxForceSeen: 0,
 	};
 }
 
@@ -209,6 +289,8 @@ export class InkDrawer {
 		observedCanvasTouch: createTouchStageObservation(),
 		observedDocumentTouchInCanvas: createTouchStageObservation(),
 		observedWindowTouchInCanvas: createTouchStageObservation(),
+		touchFallback: createTouchFallbackObservation(),
+		touchMetadata: createTouchMetadataObservation(),
 		downToUpMs: [],
 		upToDownMs: [],
 		finishStrokeMs: [],
@@ -468,6 +550,8 @@ export class InkDrawer {
 			`obs canvasDownPen=${this.pencilTiming.observedCanvasDownPenCount}, canvasMovePen=${this.pencilTiming.observedCanvasMovePenCount}, canvasRawPen=${this.pencilTiming.observedCanvasRawPenCount}, canvasUpPen=${this.pencilTiming.observedCanvasUpPenCount}, docDownPenIn=${this.pencilTiming.observedDocumentDownPenInCanvasCount}, winDownPenIn=${this.pencilTiming.observedWindowDownPenInCanvasCount}, winMovePenIn=${this.pencilTiming.observedWindowMovePenInCanvasCount}, winUpPenIn=${this.pencilTiming.observedWindowUpPenInCanvasCount}`,
 			`obsPtr canvas(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedCanvasPointer)}), docIn(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedDocumentPointerInCanvas)}), winIn(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedWindowPointerInCanvas)})`,
 			`obsTouch canvas(${this.formatTouchStageObservation(this.pencilTiming.observedCanvasTouch)}), docIn(${this.formatTouchStageObservation(this.pencilTiming.observedDocumentTouchInCanvas)}), winIn(${this.formatTouchStageObservation(this.pencilTiming.observedWindowTouchInCanvas)})`,
+			`touchDiag ${this.formatTouchFallbackObservation(this.pencilTiming.touchFallback)}`,
+			`touchMeta ${this.formatTouchMetadataObservation(this.pencilTiming.touchMetadata)}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -508,6 +592,8 @@ export class InkDrawer {
 		this.resetTouchStageObservation(this.pencilTiming.observedCanvasTouch);
 		this.resetTouchStageObservation(this.pencilTiming.observedDocumentTouchInCanvas);
 		this.resetTouchStageObservation(this.pencilTiming.observedWindowTouchInCanvas);
+		this.resetTouchFallbackObservation(this.pencilTiming.touchFallback);
+		this.resetTouchMetadataObservation(this.pencilTiming.touchMetadata);
 		this.pencilTiming.downToUpMs.length = 0;
 		this.pencilTiming.upToDownMs.length = 0;
 		this.pencilTiming.finishStrokeMs.length = 0;
@@ -737,37 +823,54 @@ export class InkDrawer {
 
 	private onTouchStart = (event: TouchEvent): void => {
 		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'start');
+		this.pencilTiming.touchFallback.startObservedCount += 1;
+		this.trackTouchMetadataFromEvent(event);
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			this.pencilTiming.touchFallback.startBlockedModeOffCount += 1;
 			return;
 		}
-		if (this.activePointerId !== null || this.activeTouchId !== null) {
+		if (this.activePointerId !== null) {
+			this.pencilTiming.touchFallback.startBlockedActivePointerCount += 1;
+			return;
+		}
+		if (this.activeTouchId !== null) {
+			this.pencilTiming.touchFallback.startBlockedActiveTouchCount += 1;
 			return;
 		}
 		const touch = event.changedTouches[0];
 		if (!touch) {
+			this.pencilTiming.touchFallback.startMissingChangedTouchCount += 1;
 			return;
 		}
 		this.clearInferredPenStart();
 		this.pendingTouchId = touch.identifier;
+		this.pencilTiming.touchFallback.startPendingSetCount += 1;
 	};
 
 	private onTouchMove = (event: TouchEvent): void => {
 		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'move');
+		this.pencilTiming.touchFallback.moveObservedCount += 1;
+		this.trackTouchMetadataFromEvent(event);
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			this.pencilTiming.touchFallback.moveBlockedModeOffCount += 1;
 			return;
 		}
 		if (this.activePointerId !== null) {
+			this.pencilTiming.touchFallback.moveBlockedActivePointerCount += 1;
 			return;
 		}
 		const now = performance.now();
 		if (this.activeTouchId === null) {
 			if (this.pendingTouchId === null) {
+				this.pencilTiming.touchFallback.moveBlockedNoPendingCount += 1;
 				return;
 			}
 			const touch = this.findTouchById(event.changedTouches, this.pendingTouchId);
 			if (!touch) {
+				this.pencilTiming.touchFallback.moveBlockedPendingNotFoundCount += 1;
 				return;
 			}
+			this.pencilTiming.touchFallback.moveActivatedCount += 1;
 			this.activeTouchId = touch.identifier;
 			this.pendingTouchId = null;
 			this.clearInferredPenStart();
@@ -789,8 +892,15 @@ export class InkDrawer {
 			return;
 		}
 
+		this.pencilTiming.touchFallback.moveContinueCount += 1;
+
 		const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
-		if (!touch || !this.activeStroke) {
+		if (!touch) {
+			this.pencilTiming.touchFallback.moveContinueMissingTouchCount += 1;
+			return;
+		}
+		if (!this.activeStroke) {
+			this.pencilTiming.touchFallback.moveContinueMissingStrokeCount += 1;
 			return;
 		}
 		this.appendTouchPoint(touch, 0.5);
@@ -800,10 +910,13 @@ export class InkDrawer {
 
 	private onTouchEnd = (event: TouchEvent): void => {
 		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'end');
+		this.pencilTiming.touchFallback.endObservedCount += 1;
+		this.trackTouchMetadataFromEvent(event);
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
 		if (this.activeTouchId !== null) {
+			this.pencilTiming.touchFallback.endFinalizeWithActiveCount += 1;
 			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
 			if (touch && this.activeStroke) {
 				this.appendTouchPoint(touch, 0.5);
@@ -820,16 +933,20 @@ export class InkDrawer {
 			const pendingTouch = this.findTouchById(event.changedTouches, this.pendingTouchId);
 			if (pendingTouch) {
 				this.pendingTouchId = null;
+				this.pencilTiming.touchFallback.endPendingClearedCount += 1;
 			}
 		}
 	};
 
 	private onTouchCancel = (event: TouchEvent): void => {
 		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'cancel');
+		this.pencilTiming.touchFallback.cancelObservedCount += 1;
+		this.trackTouchMetadataFromEvent(event);
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
 		if (this.activeTouchId !== null) {
+			this.pencilTiming.touchFallback.cancelFinalizeWithActiveCount += 1;
 			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
 			if (touch && this.activeStroke) {
 				this.appendTouchPoint(touch, 0.5);
@@ -845,6 +962,7 @@ export class InkDrawer {
 			const pendingTouch = this.findTouchById(event.changedTouches, this.pendingTouchId);
 			if (pendingTouch) {
 				this.pendingTouchId = null;
+				this.pencilTiming.touchFallback.cancelPendingClearedCount += 1;
 			}
 		}
 	};
@@ -2140,6 +2258,68 @@ export class InkDrawer {
 		target[stage] += 1;
 	}
 
+	private trackTouchMetadataFromEvent(event: TouchEvent): void {
+		for (let index = 0; index < event.changedTouches.length; index += 1) {
+			const touch = event.changedTouches.item(index);
+			if (!touch) {
+				continue;
+			}
+			this.trackTouchMetadataSample(touch);
+		}
+	}
+
+	private trackTouchMetadataSample(touch: Touch): void {
+		const metadata = this.pencilTiming.touchMetadata;
+		metadata.sampledCount += 1;
+
+		const touchType = this.getTouchType(touch);
+		if (touchType === 'stylus') {
+			metadata.typeStylusCount += 1;
+		} else if (touchType === 'direct') {
+			metadata.typeDirectCount += 1;
+		} else {
+			metadata.typeUnknownCount += 1;
+		}
+
+		const force = Number.isFinite(touch.force) ? touch.force : 0;
+		if (force > 0.01) {
+			metadata.forcePositiveCount += 1;
+		}
+		if (force > metadata.maxForceSeen) {
+			metadata.maxForceSeen = force;
+		}
+
+		const radiusX = Number.isFinite(touch.radiusX) ? touch.radiusX : 0;
+		const radiusY = Number.isFinite(touch.radiusY) ? touch.radiusY : 0;
+		const smallRadius = radiusX > 0 && radiusY > 0 && radiusX <= 6 && radiusY <= 6;
+		const largeRadius = radiusX >= 12 || radiusY >= 12;
+		if (smallRadius) {
+			metadata.smallRadiusCount += 1;
+		}
+		if (largeRadius) {
+			metadata.largeRadiusCount += 1;
+		}
+
+		if (touchType === 'stylus' || (smallRadius && force > 0.01)) {
+			metadata.stylusLikeHeuristicCount += 1;
+		}
+		if (touchType === 'direct' || (largeRadius && force <= 0.08)) {
+			metadata.directLikeHeuristicCount += 1;
+		}
+	}
+
+	private getTouchType(touch: Touch): string {
+		const candidate = (touch as unknown as { touchType?: string }).touchType;
+		if (typeof candidate !== 'string') {
+			return 'unknown';
+		}
+		const normalized = candidate.toLowerCase();
+		if (normalized === 'stylus' || normalized === 'direct' || normalized === 'indirect') {
+			return normalized;
+		}
+		return 'unknown';
+	}
+
 	private resetPointerTypeObservation(target: PointerTypeObservation): void {
 		target.total = 0;
 		target.pen = 0;
@@ -2161,6 +2341,43 @@ export class InkDrawer {
 		target.cancel = 0;
 	}
 
+	private resetTouchFallbackObservation(target: TouchFallbackObservation): void {
+		target.startObservedCount = 0;
+		target.startBlockedModeOffCount = 0;
+		target.startBlockedActivePointerCount = 0;
+		target.startBlockedActiveTouchCount = 0;
+		target.startMissingChangedTouchCount = 0;
+		target.startPendingSetCount = 0;
+		target.moveObservedCount = 0;
+		target.moveBlockedModeOffCount = 0;
+		target.moveBlockedActivePointerCount = 0;
+		target.moveBlockedNoPendingCount = 0;
+		target.moveBlockedPendingNotFoundCount = 0;
+		target.moveActivatedCount = 0;
+		target.moveContinueCount = 0;
+		target.moveContinueMissingTouchCount = 0;
+		target.moveContinueMissingStrokeCount = 0;
+		target.endObservedCount = 0;
+		target.endFinalizeWithActiveCount = 0;
+		target.endPendingClearedCount = 0;
+		target.cancelObservedCount = 0;
+		target.cancelFinalizeWithActiveCount = 0;
+		target.cancelPendingClearedCount = 0;
+	}
+
+	private resetTouchMetadataObservation(target: TouchMetadataObservation): void {
+		target.sampledCount = 0;
+		target.typeStylusCount = 0;
+		target.typeDirectCount = 0;
+		target.typeUnknownCount = 0;
+		target.stylusLikeHeuristicCount = 0;
+		target.directLikeHeuristicCount = 0;
+		target.forcePositiveCount = 0;
+		target.smallRadiusCount = 0;
+		target.largeRadiusCount = 0;
+		target.maxForceSeen = 0;
+	}
+
 	private formatPointerTypeObservation(target: PointerTypeObservation): string {
 		return `${target.total}/${target.pen}/${target.touch}/${target.mouse}/${target.other}`;
 	}
@@ -2171,6 +2388,14 @@ export class InkDrawer {
 
 	private formatTouchStageObservation(target: TouchStageObservation): string {
 		return `s${target.start},m${target.move},e${target.end},c${target.cancel}`;
+	}
+
+	private formatTouchFallbackObservation(target: TouchFallbackObservation): string {
+		return `start(obs=${target.startObservedCount}, setPending=${target.startPendingSetCount}, blockModeOff=${target.startBlockedModeOffCount}, blockActivePtr=${target.startBlockedActivePointerCount}, blockActiveTouch=${target.startBlockedActiveTouchCount}, missChanged=${target.startMissingChangedTouchCount}), move(obs=${target.moveObservedCount}, activated=${target.moveActivatedCount}, blockModeOff=${target.moveBlockedModeOffCount}, blockActivePtr=${target.moveBlockedActivePointerCount}, blockNoPending=${target.moveBlockedNoPendingCount}, blockPendingMiss=${target.moveBlockedPendingNotFoundCount}, cont=${target.moveContinueCount}, contMissTouch=${target.moveContinueMissingTouchCount}, contMissStroke=${target.moveContinueMissingStrokeCount}), end(obs=${target.endObservedCount}, finalize=${target.endFinalizeWithActiveCount}, clearPending=${target.endPendingClearedCount}), cancel(obs=${target.cancelObservedCount}, finalize=${target.cancelFinalizeWithActiveCount}, clearPending=${target.cancelPendingClearedCount})`;
+	}
+
+	private formatTouchMetadataObservation(target: TouchMetadataObservation): string {
+		return `sampled=${target.sampledCount}, type(stylus=${target.typeStylusCount},direct=${target.typeDirectCount},unknown=${target.typeUnknownCount}), heur(stylusLike=${target.stylusLikeHeuristicCount},directLike=${target.directLikeHeuristicCount}), force>0=${target.forcePositiveCount}, radiusSmall=${target.smallRadiusCount}, radiusLarge=${target.largeRadiusCount}, maxForce=${target.maxForceSeen.toFixed(2)}`;
 	}
 
 	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {
