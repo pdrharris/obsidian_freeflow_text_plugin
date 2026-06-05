@@ -183,11 +183,11 @@ export class InkBlockRegistry {
 
 		const onDocumentChanged = (): void => {
 			cursorIndex = clampInsertionIndex(cursorIndex, documentModel.strokes.length);
+			renderInline();
 			if (isActiveKey(blockKey)) {
 				pendingInlineRefreshWhileActive = true;
 				return;
 			}
-			renderInline();
 			scheduleSave();
 		};
 

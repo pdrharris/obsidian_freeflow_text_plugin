@@ -1492,6 +1492,17 @@ export class InkDrawer {
 			this.finishEraseAtIndex(session, previousIndex);
 			return;
 		}
+
+		const currentStroke = session.doc.strokes[cursorIndex];
+		if (currentStroke && isLineBreakMarkerStroke(currentStroke)) {
+			const markerBounds = this.getStrokeBounds(currentStroke);
+			session.doc.strokes.splice(cursorIndex, 1);
+			if (markerBounds) {
+				this.collapseLineBreakGap(session.doc, cursorIndex, markerBounds.centerY, lineHeight);
+			}
+			this.finishEraseAtIndex(session, cursorIndex);
+			return;
+		}
 		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
 		const wordGap = this.getInsertionWordGap(lineHeight);
 
