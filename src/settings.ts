@@ -5,6 +5,7 @@ export interface FreeFlowInkSettings {
 	lineWidthScale: number;
 	wordGapScale: number;
 	renderLineHeightScale: number;
+	renderStrokeFillScale: number;
 	drawerHeightScale: number;
 	idleAdvanceMs: number;
 	releaseAdvanceDelayMs: number;
@@ -18,6 +19,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	lineWidthScale: 1,
 	wordGapScale: 1.35,
 	renderLineHeightScale: 1,
+	renderStrokeFillScale: 1,
 	drawerHeightScale: 1,
 	idleAdvanceMs: 2000,
 	releaseAdvanceDelayMs: 260,
@@ -54,13 +56,15 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		const renderAdaptivePreview = (): void => {
 			const metrics = this.plugin.getAdaptiveMetrics();
 			const screenProfile = metrics.isPhoneLike ? 'Phone profile' : 'Large-screen profile';
-			const renderLineHeightPercent = Math.round(metrics.renderLineHeightScale * 100);
+			const renderLineSpacingPercent = Math.round(metrics.renderLineHeightScale * 100);
+			const renderStrokeFillPercent = Math.round(metrics.renderStrokeFillScale * 100);
 			const writingLineMode = this.plugin.settings.showWritingLine ? 'On' : 'Off';
 			previewValueEl.setText(
 				`${screenProfile}\n` +
 					`Viewport: ${metrics.viewportWidth}px x ${metrics.viewportHeight}px\n` +
 					`Line width: ${metrics.lineWidthBasePx}px base -> ${metrics.lineWidthPx}px active\n` +
-					`Rendered line height: ${renderLineHeightPercent}%\n` +
+					`Rendered line spacing: ${renderLineSpacingPercent}%\n` +
+					`Rendered stroke fill: ${renderStrokeFillPercent}%\n` +
 					`Writing line guide: ${writingLineMode}\n` +
 					`Drawer height: ${metrics.drawerHeightBasePx}px base -> ${metrics.drawerHeightPx}px active`,
 			);
@@ -122,31 +126,57 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			)
 			.controlEl.appendChild(wordGapValueEl);
 
-		const renderLineHeightValueEl = createDiv();
-		renderLineHeightValueEl.addClass('freeflow-ink-settings-value');
-		const renderLineHeightPercent = Math.round(
+		const renderLineSpacingValueEl = createDiv();
+		renderLineSpacingValueEl.addClass('freeflow-ink-settings-value');
+		const renderLineSpacingPercent = Math.round(
 			this.plugin.settings.renderLineHeightScale * 100,
 		);
-		renderLineHeightValueEl.setText(`${renderLineHeightPercent}%`);
+		renderLineSpacingValueEl.setText(`${renderLineSpacingPercent}%`);
 
 		new Setting(containerEl)
-			.setName('Rendered line height')
+			.setName('Rendered line spacing')
 			.setDesc(
-				'Controls vertical handwriting scale and line separation in the rendered block. Increase this if rendered writing looks too small.',
+				'Controls spacing between rendered handwriting lines.',
 			)
 			.addSlider((slider) =>
 				slider
 					.setLimits(10, 220, 1)
-					.setValue(renderLineHeightPercent)
+					.setValue(renderLineSpacingPercent)
 					.setDynamicTooltip()
 					.onChange(async (value) => {
 						this.plugin.settings.renderLineHeightScale = value / 100;
-						renderLineHeightValueEl.setText(`${value}%`);
+						renderLineSpacingValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
 						renderAdaptivePreview();
 					}),
 			)
-			.controlEl.appendChild(renderLineHeightValueEl);
+			.controlEl.appendChild(renderLineSpacingValueEl);
+
+		const renderStrokeFillValueEl = createDiv();
+		renderStrokeFillValueEl.addClass('freeflow-ink-settings-value');
+		const renderStrokeFillPercent = Math.round(
+			this.plugin.settings.renderStrokeFillScale * 100,
+		);
+		renderStrokeFillValueEl.setText(`${renderStrokeFillPercent}%`);
+
+		new Setting(containerEl)
+			.setName('Rendered stroke fill')
+			.setDesc(
+				'Controls how much of each rendered line the handwriting fills (for example 80% or 110%).',
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(40, 160, 1)
+					.setValue(renderStrokeFillPercent)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.renderStrokeFillScale = value / 100;
+						renderStrokeFillValueEl.setText(`${value}%`);
+						await this.plugin.saveSettings();
+						renderAdaptivePreview();
+					}),
+			)
+			.controlEl.appendChild(renderStrokeFillValueEl);
 
 		const drawerHeightValueEl = createDiv();
 		drawerHeightValueEl.addClass('freeflow-ink-settings-value');

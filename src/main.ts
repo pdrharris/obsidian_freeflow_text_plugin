@@ -14,6 +14,7 @@ export interface FreeFlowInkAdaptiveMetrics {
 	lineWidthBasePx: number;
 	lineWidthPx: number;
 	renderLineHeightScale: number;
+	renderStrokeFillScale: number;
 	drawerHeightBasePx: number;
 	drawerHeightPx: number;
 }
@@ -56,6 +57,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.getWrapWidthWorld(),
 			() => this.getWordGapScale(),
 			() => this.getRenderLineHeightScale(),
+			() => this.getRenderStrokeFillScale(),
 			() => this.settings.showWritingLine,
 			() => this.getSoftBlockLimitBytes(),
 			() => this.getHardBlockLimitBytes(),
@@ -132,6 +134,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			lineWidthBasePx,
 			lineWidthPx,
 			renderLineHeightScale: this.getRenderLineHeightScale(),
+			renderStrokeFillScale: this.getRenderStrokeFillScale(),
 			drawerHeightBasePx,
 			drawerHeightPx,
 		};
@@ -139,6 +142,10 @@ export default class FreeFlowInkPlugin extends Plugin {
 
 	getRenderLineHeightScale(): number {
 		return clamp(this.settings.renderLineHeightScale, 0.1, 2.2);
+	}
+
+	getRenderStrokeFillScale(): number {
+		return clamp(this.settings.renderStrokeFillScale, 0.4, 1.6);
 	}
 
 	private getWrapWidthWorld(): number {
@@ -182,6 +189,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.settings.hardBlockLimitKb = clamp(Math.round(this.settings.hardBlockLimitKb), 512, 16000);
 		this.settings.wordGapScale = clamp(this.settings.wordGapScale, 0.8, 2.5);
 		this.settings.renderLineHeightScale = clamp(this.settings.renderLineHeightScale, 0.1, 2.2);
+		this.settings.renderStrokeFillScale = clamp(this.settings.renderStrokeFillScale, 0.4, 1.6);
 		this.settings.drawerHeightScale = clamp(this.settings.drawerHeightScale, 0.3, 1.5);
 		this.settings.idleAdvanceMs = clamp(Math.round(this.settings.idleAdvanceMs), 500, 5000);
 		this.settings.releaseAdvanceDelayMs = clamp(

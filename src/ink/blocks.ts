@@ -31,6 +31,7 @@ export class InkBlockRegistry {
 	private readonly getWrapWidthWorld: () => number;
 	private readonly getWordGapScale: () => number;
 	private readonly getRenderLineHeightScale: () => number;
+	private readonly getRenderStrokeFillScale: () => number;
 	private readonly getShowWritingLine: () => boolean;
 	private readonly getSoftBlockLimitBytes: () => number;
 	private readonly getHardBlockLimitBytes: () => number;
@@ -43,6 +44,7 @@ export class InkBlockRegistry {
 		getWrapWidthWorld: () => number,
 		getWordGapScale: () => number,
 		getRenderLineHeightScale: () => number,
+		getRenderStrokeFillScale: () => number,
 		getShowWritingLine: () => boolean,
 		getSoftBlockLimitBytes: () => number,
 		getHardBlockLimitBytes: () => number,
@@ -53,6 +55,7 @@ export class InkBlockRegistry {
 		this.getWrapWidthWorld = getWrapWidthWorld;
 		this.getWordGapScale = getWordGapScale;
 		this.getRenderLineHeightScale = getRenderLineHeightScale;
+		this.getRenderStrokeFillScale = getRenderStrokeFillScale;
 		this.getShowWritingLine = getShowWritingLine;
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
 		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
@@ -125,6 +128,7 @@ export class InkBlockRegistry {
 				this.getWrapWidthWorld(),
 				this.getWordGapScale(),
 				this.getRenderLineHeightScale(),
+				this.getRenderStrokeFillScale(),
 				this.getShowWritingLine(),
 				showInlineCaret ? cursorIndex : null,
 				cursorLinePreference,
@@ -259,6 +263,7 @@ export class InkBlockRegistry {
 				this.getWrapWidthWorld(),
 				this.getWordGapScale(),
 				this.getRenderLineHeightScale(),
+				this.getRenderStrokeFillScale(),
 				rect.width,
 				clickX,
 				clickY,
