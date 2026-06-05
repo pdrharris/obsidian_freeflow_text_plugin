@@ -100,7 +100,6 @@ export class InkDrawer {
 	private pendingInferredPenAt = 0;
 	private inferredStartArmedPointerId: number | null = null;
 	private inferredStartArmedAt = 0;
-	private lastGlobalStartSignature = '';
 	private lastPointerDownSignature = '';
 	private readonly pencilTiming: PencilTimingDiagnostics = {
 		downCount: 0,
@@ -494,10 +493,6 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('touchmove', this.onTouchMove, { passive: false });
 		this.canvasEl.addEventListener('touchend', this.onTouchEnd, { passive: false });
 		this.canvasEl.addEventListener('touchcancel', this.onTouchCancel, { passive: false });
-		activeDocument.addEventListener('pointerdown', this.onDocumentPointerDownCapture, true);
-		activeDocument.addEventListener('pointerrawupdate', this.onDocumentPointerRawUpdateCapture, true);
-		window.addEventListener('pointerdown', this.onWindowPointerDown);
-		window.addEventListener('pointerrawupdate', this.onWindowPointerRawUpdate);
 		window.addEventListener('pointermove', this.onWindowPointerMove);
 		window.addEventListener('pointerup', this.onWindowPointerUp);
 		window.addEventListener('pointercancel', this.onWindowPointerCancel);
@@ -523,14 +518,6 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('touchmove', this.onTouchMove);
 		this.canvasEl.removeEventListener('touchend', this.onTouchEnd);
 		this.canvasEl.removeEventListener('touchcancel', this.onTouchCancel);
-		activeDocument.removeEventListener('pointerdown', this.onDocumentPointerDownCapture, true);
-		activeDocument.removeEventListener(
-			'pointerrawupdate',
-			this.onDocumentPointerRawUpdateCapture,
-			true,
-		);
-		window.removeEventListener('pointerdown', this.onWindowPointerDown);
-		window.removeEventListener('pointerrawupdate', this.onWindowPointerRawUpdate);
 		window.removeEventListener('pointermove', this.onWindowPointerMove);
 		window.removeEventListener('pointerup', this.onWindowPointerUp);
 		window.removeEventListener('pointercancel', this.onWindowPointerCancel);
@@ -966,44 +953,8 @@ export class InkDrawer {
 		this.onPointerUp(event);
 	};
 
-	private onDocumentPointerDownCapture = (event: PointerEvent): void => {
-		this.handleGlobalPointerStartFallback(event, 'down');
-	};
-
-	private onDocumentPointerRawUpdateCapture = (event: Event): void => {
-		if (!(event instanceof PointerEvent)) {
-			return;
-		}
-		this.handleGlobalPointerStartFallback(event, 'raw');
-	};
-
-	private onWindowPointerDown = (event: PointerEvent): void => {
-		this.handleGlobalPointerStartFallback(event, 'down');
-	};
-
-	private onWindowPointerRawUpdate = (event: Event): void => {
-		if (!(event instanceof PointerEvent)) {
-			return;
-		}
-		this.handleGlobalPointerStartFallback(event, 'raw');
-	};
-
 	private onWindowPointerMove = (event: PointerEvent): void => {
-		if (!this.session) {
-			return;
-		}
 		if (this.activePointerId === null) {
-			if (this.activeTouchId !== null) {
-				return;
-			}
-			if (!this.isWindowStartFallbackCandidate(event)) {
-				return;
-			}
-			const hadActivePointer = false;
-			this.handlePointerMotion(event, 'move');
-			if (!hadActivePointer && this.activePointerId !== null) {
-				this.pencilTiming.windowStartCount += 1;
-			}
 			return;
 		}
 		this.handlePointerMotion(event, 'move');
@@ -1809,56 +1760,6 @@ export class InkDrawer {
 		}
 		this.trackPointerCancel(performance.now());
 		this.finishStroke(false);
-	}
-
-	private isWindowStartFallbackCandidate(event: PointerEvent): boolean {
-		if (event.pointerType === 'mouse') {
-			return false;
-		}
-		return this.isPointInsideCanvas(event.clientX, event.clientY);
-	}
-
-	private isPointInsideCanvas(clientX: number, clientY: number): boolean {
-		const rect = this.canvasEl.getBoundingClientRect();
-		return (
-			clientX >= rect.left &&
-			clientX <= rect.right &&
-			clientY >= rect.top &&
-			clientY <= rect.bottom
-		);
-	}
-
-	private handleGlobalPointerStartFallback(event: PointerEvent, source: 'down' | 'raw'): void {
-		if (!this.session) {
-			return;
-		}
-		if (this.activePointerId !== null || this.activeTouchId !== null) {
-			return;
-		}
-		if (!this.isWindowStartFallbackCandidate(event)) {
-			return;
-		}
-		if (!this.shouldHandleGlobalStartEvent(event, source)) {
-			return;
-		}
-		const hadActivePointer = false;
-		if (source === 'down') {
-			this.onPointerDown(event);
-		} else {
-			this.handlePointerMotion(event, 'raw');
-		}
-		if (!hadActivePointer && this.activePointerId !== null) {
-			this.pencilTiming.windowStartCount += 1;
-		}
-	}
-
-	private shouldHandleGlobalStartEvent(event: PointerEvent, source: 'down' | 'raw'): boolean {
-		const signature = `${source}:${event.pointerId}:${event.timeStamp}`;
-		if (signature === this.lastGlobalStartSignature) {
-			return false;
-		}
-		this.lastGlobalStartSignature = signature;
-		return true;
 	}
 
 	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {
