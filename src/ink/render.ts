@@ -10,6 +10,7 @@ cssHeight: number;
 worldWidth: number;
 worldHeight: number;
 scale: number;
+lineWorldScale: number;
 }
 
 const INLINE_MIN_HEIGHT = 140;
@@ -105,23 +106,19 @@ renderLineHeightScale: number,
 renderStrokeFillScale: number,
 ): InlineRenderMetrics {
 const lineSpacingScale = Math.max(0.1, renderLineHeightScale);
-const viewportLayout = resolveInlineViewportLayout(
-	doc,
-	cssWidth,
-	wrapWidth,
-	lineSpacingScale,
-);
+const viewportLayout = resolveInlineViewportLayout(doc, cssWidth, wrapWidth, lineSpacingScale);
 const layout = layoutInlineStrokes(
 	doc,
 	viewportLayout.worldWidth,
 	wordGapScale,
-	lineSpacingScale,
+	viewportLayout.lineWorldScale,
 	renderStrokeFillScale,
 );
 const contentWorldHeight = Math.max(layout.effectiveLineHeight, layout.maxY + 24);
 const lineCount = Math.max(1, Math.ceil(contentWorldHeight / layout.effectiveLineHeight));
 const scaledHeight = contentWorldHeight * viewportLayout.scale;
-const minLineHeight = lineCount * Math.max(8, Math.round(28 * lineSpacingScale));
+const minLineHeight =
+	lineCount * Math.max(8, Math.round(INLINE_TARGET_LINE_HEIGHT_PX * lineSpacingScale));
 const cssHeight = Math.max(INLINE_MIN_HEIGHT, Math.ceil(Math.max(scaledHeight, minLineHeight)));
 
 return {
@@ -129,6 +126,7 @@ cssHeight,
 worldWidth: viewportLayout.worldWidth,
 worldHeight: contentWorldHeight,
 scale: viewportLayout.scale,
+	lineWorldScale: viewportLayout.lineWorldScale,
 };
 }
 
@@ -173,17 +171,12 @@ if (doc.strokes.length === 0) {
 }
 
 const lineSpacingScale = Math.max(0.1, renderLineHeightScale);
-const viewportLayout = resolveInlineViewportLayout(
-	doc,
-	cssWidth,
-	wrapWidth,
-	lineSpacingScale,
-);
+const viewportLayout = resolveInlineViewportLayout(doc, cssWidth, wrapWidth, lineSpacingScale);
 const layout = layoutInlineStrokes(
 	doc,
 	viewportLayout.worldWidth,
 	wordGapScale,
-	lineSpacingScale,
+	viewportLayout.lineWorldScale,
 	renderStrokeFillScale,
 );
 const scale = viewportLayout.scale;
@@ -237,7 +230,7 @@ const layout = layoutInlineStrokes(
 	doc,
 	metrics.worldWidth,
 	wordGapScale,
-	renderLineHeightScale,
+	metrics.lineWorldScale,
 	renderStrokeFillScale,
 );
 resizeCanvasForDpr(canvas, cssWidth, metrics.cssHeight);
@@ -381,19 +374,19 @@ function layoutInlineStrokes(
 doc: InkDocument,
 wrapWidth: number,
 wordGapScale: number,
-renderLineHeightScale: number,
+lineWorldScale: number,
 renderStrokeFillScale: number,
 ): InlineLayout {
 const lineHeight = Math.max(80, doc.meta.lineHeight);
-const lineSpacingScale = Math.max(0.1, renderLineHeightScale);
+const normalizedLineWorldScale = Math.max(0.02, lineWorldScale);
 const strokeFillScale = Math.max(0.4, Math.min(1.6, renderStrokeFillScale));
 const strokeInfos = doc.strokes
 .map((stroke, index) => toStrokeInfo(stroke, index, lineHeight))
 .filter((item): item is StrokeInfo => item !== null);
 const sourceStrokeHeightRatio = estimateSourceStrokeHeightRatio(strokeInfos, lineHeight);
-const glyphScale = (lineSpacingScale * strokeFillScale) / sourceStrokeHeightRatio;
+const glyphScale = (normalizedLineWorldScale * strokeFillScale) / sourceStrokeHeightRatio;
 
-const effectiveLineHeight = Math.max(8, lineHeight * lineSpacingScale);
+const effectiveLineHeight = Math.max(8, lineHeight * normalizedLineWorldScale);
 const baselineOffset = effectiveLineHeight * INK_BASELINE_RATIO_FROM_TOP;
 
 const rows = new Map<number, StrokeInfo[]>();
@@ -507,19 +500,18 @@ function resolveInlineViewportLayout(
 	cssWidth: number,
 	wrapWidth: number,
 	lineSpacingScale: number,
-): { worldWidth: number; scale: number } {
+): { worldWidth: number; scale: number; lineWorldScale: number } {
 	const sourceLineHeight = Math.max(80, doc.meta.lineHeight);
 	const normalizedLineSpacing = Math.max(0.1, lineSpacingScale);
 	const targetCssLineHeight = Math.max(8, INLINE_TARGET_LINE_HEIGHT_PX * normalizedLineSpacing);
-	const effectiveWorldLineHeight = Math.max(1, sourceLineHeight * normalizedLineSpacing);
-	const stableScale = clamp(targetCssLineHeight / effectiveWorldLineHeight, 0.08, 2.4);
+	const worldWidth = Math.max(220, wrapWidth);
 	const safeCssWidth = Math.max(1, cssWidth);
-	const maxWorldWidthForCanvas = Math.max(80, safeCssWidth / stableScale);
-	const preferredWorldWidth = Math.max(220, wrapWidth);
-	const worldWidth = Math.max(80, Math.min(preferredWorldWidth, maxWorldWidthForCanvas));
+	const scale = safeCssWidth / worldWidth;
+	const lineWorldScale = clamp(targetCssLineHeight / Math.max(1, sourceLineHeight * scale), 0.02, 6);
 	return {
 		worldWidth,
-		scale: stableScale,
+		scale,
+		lineWorldScale,
 	};
 }
 
