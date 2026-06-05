@@ -76,9 +76,36 @@ interface PencilTimingDiagnostics {
 	observedWindowDownPenInCanvasCount: number;
 	observedWindowMovePenInCanvasCount: number;
 	observedWindowUpPenInCanvasCount: number;
+	observedCanvasPointer: PointerStageObservation;
+	observedDocumentPointerInCanvas: PointerStageObservation;
+	observedWindowPointerInCanvas: PointerStageObservation;
+	observedCanvasTouch: TouchStageObservation;
+	observedDocumentTouchInCanvas: TouchStageObservation;
+	observedWindowTouchInCanvas: TouchStageObservation;
 	downToUpMs: number[];
 	upToDownMs: number[];
 	finishStrokeMs: number[];
+}
+
+interface PointerTypeObservation {
+	total: number;
+	pen: number;
+	touch: number;
+	mouse: number;
+	other: number;
+}
+
+interface PointerStageObservation {
+	down: PointerTypeObservation;
+	move: PointerTypeObservation;
+	up: PointerTypeObservation;
+}
+
+interface TouchStageObservation {
+	start: number;
+	move: number;
+	end: number;
+	cancel: number;
 }
 
 interface DownlessPenMotionSample {
@@ -86,6 +113,33 @@ interface DownlessPenMotionSample {
 	clientY: number;
 	pressure: number;
 	time: number;
+}
+
+function createPointerTypeObservation(): PointerTypeObservation {
+	return {
+		total: 0,
+		pen: 0,
+		touch: 0,
+		mouse: 0,
+		other: 0,
+	};
+}
+
+function createPointerStageObservation(): PointerStageObservation {
+	return {
+		down: createPointerTypeObservation(),
+		move: createPointerTypeObservation(),
+		up: createPointerTypeObservation(),
+	};
+}
+
+function createTouchStageObservation(): TouchStageObservation {
+	return {
+		start: 0,
+		move: 0,
+		end: 0,
+		cancel: 0,
+	};
 }
 
 export class InkDrawer {
@@ -149,6 +203,12 @@ export class InkDrawer {
 		observedWindowDownPenInCanvasCount: 0,
 		observedWindowMovePenInCanvasCount: 0,
 		observedWindowUpPenInCanvasCount: 0,
+		observedCanvasPointer: createPointerStageObservation(),
+		observedDocumentPointerInCanvas: createPointerStageObservation(),
+		observedWindowPointerInCanvas: createPointerStageObservation(),
+		observedCanvasTouch: createTouchStageObservation(),
+		observedDocumentTouchInCanvas: createTouchStageObservation(),
+		observedWindowTouchInCanvas: createTouchStageObservation(),
 		downToUpMs: [],
 		upToDownMs: [],
 		finishStrokeMs: [],
@@ -406,6 +466,8 @@ export class InkDrawer {
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
 			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, rawStart=${this.pencilTiming.rawStartCount}, inferredStart=${this.pencilTiming.inferredStartCount}, upOnlyStart=${this.pencilTiming.upOnlyStartCount}, upBufferedStart=${this.pencilTiming.upBufferedStartCount}, windowStart=${this.pencilTiming.windowStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
 			`obs canvasDownPen=${this.pencilTiming.observedCanvasDownPenCount}, canvasMovePen=${this.pencilTiming.observedCanvasMovePenCount}, canvasRawPen=${this.pencilTiming.observedCanvasRawPenCount}, canvasUpPen=${this.pencilTiming.observedCanvasUpPenCount}, docDownPenIn=${this.pencilTiming.observedDocumentDownPenInCanvasCount}, winDownPenIn=${this.pencilTiming.observedWindowDownPenInCanvasCount}, winMovePenIn=${this.pencilTiming.observedWindowMovePenInCanvasCount}, winUpPenIn=${this.pencilTiming.observedWindowUpPenInCanvasCount}`,
+			`obsPtr canvas(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedCanvasPointer)}), docIn(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedDocumentPointerInCanvas)}), winIn(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedWindowPointerInCanvas)})`,
+			`obsTouch canvas(${this.formatTouchStageObservation(this.pencilTiming.observedCanvasTouch)}), docIn(${this.formatTouchStageObservation(this.pencilTiming.observedDocumentTouchInCanvas)}), winIn(${this.formatTouchStageObservation(this.pencilTiming.observedWindowTouchInCanvas)})`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -440,6 +502,12 @@ export class InkDrawer {
 		this.pencilTiming.observedWindowDownPenInCanvasCount = 0;
 		this.pencilTiming.observedWindowMovePenInCanvasCount = 0;
 		this.pencilTiming.observedWindowUpPenInCanvasCount = 0;
+		this.resetPointerStageObservation(this.pencilTiming.observedCanvasPointer);
+		this.resetPointerStageObservation(this.pencilTiming.observedDocumentPointerInCanvas);
+		this.resetPointerStageObservation(this.pencilTiming.observedWindowPointerInCanvas);
+		this.resetTouchStageObservation(this.pencilTiming.observedCanvasTouch);
+		this.resetTouchStageObservation(this.pencilTiming.observedDocumentTouchInCanvas);
+		this.resetTouchStageObservation(this.pencilTiming.observedWindowTouchInCanvas);
 		this.pencilTiming.downToUpMs.length = 0;
 		this.pencilTiming.upToDownMs.length = 0;
 		this.pencilTiming.finishStrokeMs.length = 0;
@@ -535,10 +603,18 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('touchend', this.onTouchEnd, { passive: false });
 		this.canvasEl.addEventListener('touchcancel', this.onTouchCancel, { passive: false });
 		activeDocument.addEventListener('pointerdown', this.onDocumentPointerDownObserved, true);
+		activeDocument.addEventListener('pointermove', this.onDocumentPointerMoveObserved, true);
+		activeDocument.addEventListener('pointerup', this.onDocumentPointerUpObserved, true);
+		activeDocument.addEventListener('touchstart', this.onDocumentTouchStartObserved, true);
+		activeDocument.addEventListener('touchmove', this.onDocumentTouchMoveObserved, true);
+		activeDocument.addEventListener('touchend', this.onDocumentTouchEndObserved, true);
+		activeDocument.addEventListener('touchcancel', this.onDocumentTouchCancelObserved, true);
 		window.addEventListener('pointerdown', this.onWindowPointerDownObserved, true);
 		window.addEventListener('pointermove', this.onWindowPointerMove);
 		window.addEventListener('pointerup', this.onWindowPointerUp);
 		window.addEventListener('pointercancel', this.onWindowPointerCancel);
+		window.addEventListener('touchstart', this.onWindowTouchStartObserved, true);
+		window.addEventListener('touchmove', this.onWindowTouchMoveObserved, true);
 		window.addEventListener('touchend', this.onWindowTouchEnd, { passive: false });
 		window.addEventListener('touchcancel', this.onWindowTouchCancel, { passive: false });
 		window.addEventListener('blur', this.onWindowBlur);
@@ -562,10 +638,18 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('touchend', this.onTouchEnd);
 		this.canvasEl.removeEventListener('touchcancel', this.onTouchCancel);
 		activeDocument.removeEventListener('pointerdown', this.onDocumentPointerDownObserved, true);
+		activeDocument.removeEventListener('pointermove', this.onDocumentPointerMoveObserved, true);
+		activeDocument.removeEventListener('pointerup', this.onDocumentPointerUpObserved, true);
+		activeDocument.removeEventListener('touchstart', this.onDocumentTouchStartObserved, true);
+		activeDocument.removeEventListener('touchmove', this.onDocumentTouchMoveObserved, true);
+		activeDocument.removeEventListener('touchend', this.onDocumentTouchEndObserved, true);
+		activeDocument.removeEventListener('touchcancel', this.onDocumentTouchCancelObserved, true);
 		window.removeEventListener('pointerdown', this.onWindowPointerDownObserved, true);
 		window.removeEventListener('pointermove', this.onWindowPointerMove);
 		window.removeEventListener('pointerup', this.onWindowPointerUp);
 		window.removeEventListener('pointercancel', this.onWindowPointerCancel);
+		window.removeEventListener('touchstart', this.onWindowTouchStartObserved, true);
+		window.removeEventListener('touchmove', this.onWindowTouchMoveObserved, true);
 		window.removeEventListener('touchend', this.onWindowTouchEnd);
 		window.removeEventListener('touchcancel', this.onWindowTouchCancel);
 		window.removeEventListener('blur', this.onWindowBlur);
@@ -652,6 +736,7 @@ export class InkDrawer {
 	};
 
 	private onTouchStart = (event: TouchEvent): void => {
+		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'start');
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
@@ -667,6 +752,7 @@ export class InkDrawer {
 	};
 
 	private onTouchMove = (event: TouchEvent): void => {
+		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'move');
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
@@ -713,6 +799,7 @@ export class InkDrawer {
 	};
 
 	private onTouchEnd = (event: TouchEvent): void => {
+		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'end');
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
@@ -738,6 +825,7 @@ export class InkDrawer {
 	};
 
 	private onTouchCancel = (event: TouchEvent): void => {
+		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'cancel');
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
@@ -766,6 +854,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'down', event.pointerType);
 		if (event.pointerType === 'pen') {
 			this.pencilTiming.observedCanvasDownPenCount += 1;
 		}
@@ -834,6 +923,7 @@ export class InkDrawer {
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
+		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'move', event.pointerType);
 		if (event.pointerType === 'pen') {
 			this.pencilTiming.observedCanvasMovePenCount += 1;
 		}
@@ -915,6 +1005,7 @@ export class InkDrawer {
 	}
 
 	private onPointerUp = (event: PointerEvent): void => {
+		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'up', event.pointerType);
 		if (event.pointerType === 'pen') {
 			this.pencilTiming.observedCanvasUpPenCount += 1;
 		}
@@ -1018,41 +1109,67 @@ export class InkDrawer {
 	};
 
 	private onWindowPointerUp = (event: PointerEvent): void => {
-		if (event.pointerType === 'pen' && this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			this.pencilTiming.observedWindowUpPenInCanvasCount += 1;
+		if (this.isPointInsideCanvas(event.clientX, event.clientY)) {
+			this.trackPointerObservation(this.pencilTiming.observedWindowPointerInCanvas, 'up', event.pointerType);
+			if (event.pointerType === 'pen') {
+				this.pencilTiming.observedWindowUpPenInCanvasCount += 1;
+			}
 		}
 		this.onPointerUp(event);
 	};
 
 	private onDocumentPointerDownObserved = (event: PointerEvent): void => {
-		if (event.pointerType !== 'pen') {
-			return;
-		}
 		if (!this.session) {
 			return;
 		}
 		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
 			return;
 		}
-		this.pencilTiming.observedDocumentDownPenInCanvasCount += 1;
+		this.trackPointerObservation(this.pencilTiming.observedDocumentPointerInCanvas, 'down', event.pointerType);
+		if (event.pointerType === 'pen') {
+			this.pencilTiming.observedDocumentDownPenInCanvasCount += 1;
+		}
+	};
+
+	private onDocumentPointerMoveObserved = (event: PointerEvent): void => {
+		if (!this.session) {
+			return;
+		}
+		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
+			return;
+		}
+		this.trackPointerObservation(this.pencilTiming.observedDocumentPointerInCanvas, 'move', event.pointerType);
+	};
+
+	private onDocumentPointerUpObserved = (event: PointerEvent): void => {
+		if (!this.session) {
+			return;
+		}
+		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
+			return;
+		}
+		this.trackPointerObservation(this.pencilTiming.observedDocumentPointerInCanvas, 'up', event.pointerType);
 	};
 
 	private onWindowPointerDownObserved = (event: PointerEvent): void => {
-		if (event.pointerType !== 'pen') {
-			return;
-		}
 		if (!this.session) {
 			return;
 		}
 		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
 			return;
 		}
-		this.pencilTiming.observedWindowDownPenInCanvasCount += 1;
+		this.trackPointerObservation(this.pencilTiming.observedWindowPointerInCanvas, 'down', event.pointerType);
+		if (event.pointerType === 'pen') {
+			this.pencilTiming.observedWindowDownPenInCanvasCount += 1;
+		}
 	};
 
 	private onWindowPointerMove = (event: PointerEvent): void => {
-		if (event.pointerType === 'pen' && this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			this.pencilTiming.observedWindowMovePenInCanvasCount += 1;
+		if (this.isPointInsideCanvas(event.clientX, event.clientY)) {
+			this.trackPointerObservation(this.pencilTiming.observedWindowPointerInCanvas, 'move', event.pointerType);
+			if (event.pointerType === 'pen') {
+				this.pencilTiming.observedWindowMovePenInCanvasCount += 1;
+			}
 		}
 		if (this.activePointerId === null) {
 			return;
@@ -1065,11 +1182,59 @@ export class InkDrawer {
 	};
 
 	private onWindowTouchEnd = (event: TouchEvent): void => {
+		if (this.session && this.isTouchEventInsideCanvas(event)) {
+			this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'end');
+		}
 		this.onTouchEnd(event);
 	};
 
 	private onWindowTouchCancel = (event: TouchEvent): void => {
+		if (this.session && this.isTouchEventInsideCanvas(event)) {
+			this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'cancel');
+		}
 		this.onTouchCancel(event);
+	};
+
+	private onDocumentTouchStartObserved = (event: TouchEvent): void => {
+		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
+			return;
+		}
+		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'start');
+	};
+
+	private onDocumentTouchMoveObserved = (event: TouchEvent): void => {
+		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
+			return;
+		}
+		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'move');
+	};
+
+	private onDocumentTouchEndObserved = (event: TouchEvent): void => {
+		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
+			return;
+		}
+		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'end');
+	};
+
+	private onDocumentTouchCancelObserved = (event: TouchEvent): void => {
+		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
+			return;
+		}
+		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'cancel');
+	};
+
+	private onWindowTouchStartObserved = (event: TouchEvent): void => {
+		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
+			return;
+		}
+		this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'start');
+	};
+
+	private onWindowTouchMoveObserved = (event: TouchEvent): void => {
+		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
+			return;
+		}
+		this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'move');
 	};
 
 	private onWindowBlur = (): void => {
@@ -1927,6 +2092,85 @@ export class InkDrawer {
 			clientY >= rect.top &&
 			clientY <= rect.bottom
 		);
+	}
+
+	private isTouchListInsideCanvas(touches: TouchList): boolean {
+		for (let index = 0; index < touches.length; index += 1) {
+			const touch = touches.item(index);
+			if (!touch) {
+				continue;
+			}
+			if (this.isPointInsideCanvas(touch.clientX, touch.clientY)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private isTouchEventInsideCanvas(event: TouchEvent): boolean {
+		if (this.isTouchListInsideCanvas(event.changedTouches)) {
+			return true;
+		}
+		return this.isTouchListInsideCanvas(event.touches);
+	}
+
+	private trackPointerObservation(
+		target: PointerStageObservation,
+		stage: 'down' | 'move' | 'up',
+		pointerType: string,
+	): void {
+		const bucket = target[stage];
+		bucket.total += 1;
+		if (pointerType === 'pen') {
+			bucket.pen += 1;
+			return;
+		}
+		if (pointerType === 'touch') {
+			bucket.touch += 1;
+			return;
+		}
+		if (pointerType === 'mouse') {
+			bucket.mouse += 1;
+			return;
+		}
+		bucket.other += 1;
+	}
+
+	private trackTouchObservation(target: TouchStageObservation, stage: 'start' | 'move' | 'end' | 'cancel'): void {
+		target[stage] += 1;
+	}
+
+	private resetPointerTypeObservation(target: PointerTypeObservation): void {
+		target.total = 0;
+		target.pen = 0;
+		target.touch = 0;
+		target.mouse = 0;
+		target.other = 0;
+	}
+
+	private resetPointerStageObservation(target: PointerStageObservation): void {
+		this.resetPointerTypeObservation(target.down);
+		this.resetPointerTypeObservation(target.move);
+		this.resetPointerTypeObservation(target.up);
+	}
+
+	private resetTouchStageObservation(target: TouchStageObservation): void {
+		target.start = 0;
+		target.move = 0;
+		target.end = 0;
+		target.cancel = 0;
+	}
+
+	private formatPointerTypeObservation(target: PointerTypeObservation): string {
+		return `${target.total}/${target.pen}/${target.touch}/${target.mouse}/${target.other}`;
+	}
+
+	private formatPointerStageObservation(target: PointerStageObservation): string {
+		return `${this.formatPointerTypeObservation(target.down)}/${this.formatPointerTypeObservation(target.move)}/${this.formatPointerTypeObservation(target.up)}`;
+	}
+
+	private formatTouchStageObservation(target: TouchStageObservation): string {
+		return `s${target.start},m${target.move},e${target.end},c${target.cancel}`;
 	}
 
 	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {
