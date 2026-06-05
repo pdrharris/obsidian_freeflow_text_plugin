@@ -547,11 +547,7 @@ export class InkDrawer {
 			`capture=${captureMode}`,
 			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
 			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, rawStart=${this.pencilTiming.rawStartCount}, inferredStart=${this.pencilTiming.inferredStartCount}, upOnlyStart=${this.pencilTiming.upOnlyStartCount}, upBufferedStart=${this.pencilTiming.upBufferedStartCount}, windowStart=${this.pencilTiming.windowStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
-			`obs canvasDownPen=${this.pencilTiming.observedCanvasDownPenCount}, canvasMovePen=${this.pencilTiming.observedCanvasMovePenCount}, canvasRawPen=${this.pencilTiming.observedCanvasRawPenCount}, canvasUpPen=${this.pencilTiming.observedCanvasUpPenCount}, docDownPenIn=${this.pencilTiming.observedDocumentDownPenInCanvasCount}, winDownPenIn=${this.pencilTiming.observedWindowDownPenInCanvasCount}, winMovePenIn=${this.pencilTiming.observedWindowMovePenInCanvasCount}, winUpPenIn=${this.pencilTiming.observedWindowUpPenInCanvasCount}`,
-			`obsPtr canvas(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedCanvasPointer)}), docIn(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedDocumentPointerInCanvas)}), winIn(d/m/u=${this.formatPointerStageObservation(this.pencilTiming.observedWindowPointerInCanvas)})`,
-			`obsTouch canvas(${this.formatTouchStageObservation(this.pencilTiming.observedCanvasTouch)}), docIn(${this.formatTouchStageObservation(this.pencilTiming.observedDocumentTouchInCanvas)}), winIn(${this.formatTouchStageObservation(this.pencilTiming.observedWindowTouchInCanvas)})`,
-			`touchDiag ${this.formatTouchFallbackObservation(this.pencilTiming.touchFallback)}`,
-			`touchMeta ${this.formatTouchMetadataObservation(this.pencilTiming.touchMetadata)}`,
+			`obs penDown(canvas/doc/win)=${this.pencilTiming.observedCanvasDownPenCount}/${this.pencilTiming.observedDocumentDownPenInCanvasCount}/${this.pencilTiming.observedWindowDownPenInCanvasCount}, penUp(canvas/win)=${this.pencilTiming.observedCanvasUpPenCount}/${this.pencilTiming.observedWindowUpPenInCanvasCount}`,
 			`up->down ${upToDown}`,
 			`down->up ${downToUp}`,
 			`finish ${finishStroke}`,
@@ -831,6 +827,8 @@ export class InkDrawer {
 		}
 		if (this.activePointerId !== null) {
 			this.pencilTiming.touchFallback.startBlockedActivePointerCount += 1;
+			// iOS can emit parallel stylus touch events while a pen pointer is active.
+			// Preventing default avoids Safari/OS gestures stealing the next stroke start.
 			event.preventDefault();
 			return;
 		}
@@ -859,6 +857,7 @@ export class InkDrawer {
 		}
 		if (this.activePointerId !== null) {
 			this.pencilTiming.touchFallback.moveBlockedActivePointerCount += 1;
+			// Keep gesture suppression active during pointer-driven strokes.
 			event.preventDefault();
 			return;
 		}
@@ -2387,26 +2386,6 @@ export class InkDrawer {
 		target.smallRadiusCount = 0;
 		target.largeRadiusCount = 0;
 		target.maxForceSeen = 0;
-	}
-
-	private formatPointerTypeObservation(target: PointerTypeObservation): string {
-		return `${target.total}/${target.pen}/${target.touch}/${target.mouse}/${target.other}`;
-	}
-
-	private formatPointerStageObservation(target: PointerStageObservation): string {
-		return `${this.formatPointerTypeObservation(target.down)}/${this.formatPointerTypeObservation(target.move)}/${this.formatPointerTypeObservation(target.up)}`;
-	}
-
-	private formatTouchStageObservation(target: TouchStageObservation): string {
-		return `s${target.start},m${target.move},e${target.end},c${target.cancel}`;
-	}
-
-	private formatTouchFallbackObservation(target: TouchFallbackObservation): string {
-		return `start(obs=${target.startObservedCount}, setPending=${target.startPendingSetCount}, blockModeOff=${target.startBlockedModeOffCount}, blockActivePtr=${target.startBlockedActivePointerCount}, blockActiveTouch=${target.startBlockedActiveTouchCount}, missChanged=${target.startMissingChangedTouchCount}), move(obs=${target.moveObservedCount}, activated=${target.moveActivatedCount}, blockModeOff=${target.moveBlockedModeOffCount}, blockActivePtr=${target.moveBlockedActivePointerCount}, blockNoPending=${target.moveBlockedNoPendingCount}, blockPendingMiss=${target.moveBlockedPendingNotFoundCount}, cont=${target.moveContinueCount}, contMissTouch=${target.moveContinueMissingTouchCount}, contMissStroke=${target.moveContinueMissingStrokeCount}), end(obs=${target.endObservedCount}, finalize=${target.endFinalizeWithActiveCount}, clearPending=${target.endPendingClearedCount}), cancel(obs=${target.cancelObservedCount}, finalize=${target.cancelFinalizeWithActiveCount}, clearPending=${target.cancelPendingClearedCount})`;
-	}
-
-	private formatTouchMetadataObservation(target: TouchMetadataObservation): string {
-		return `sampled=${target.sampledCount}, type(stylus=${target.typeStylusCount},direct=${target.typeDirectCount},unknown=${target.typeUnknownCount}), heur(stylusLike=${target.stylusLikeHeuristicCount},directLike=${target.directLikeHeuristicCount}), force>0=${target.forcePositiveCount}, radiusSmall=${target.smallRadiusCount}, radiusLarge=${target.largeRadiusCount}, maxForce=${target.maxForceSeen.toFixed(2)}`;
 	}
 
 	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {

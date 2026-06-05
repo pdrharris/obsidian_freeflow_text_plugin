@@ -90,3 +90,8 @@ If you have multiple URLs, you can also do:
 ## API Documentation
 
 See https://docs.obsidian.md
+
+## Project notes
+
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- Input regression checklist: [docs/regression-checklist.md](docs/regression-checklist.md)
