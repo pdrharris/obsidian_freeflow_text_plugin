@@ -81,7 +81,6 @@ export class InkDrawer {
 	private session: DrawerSession | null = null;
 	private activePointerId: number | null = null;
 	private activeStroke: InkStroke | null = null;
-	private activeStrokeAwaitingContact = false;
 	private hasPenInSession = false;
 	private redrawQueued = false;
 	private lastLocalX: number | null = null;
@@ -98,6 +97,8 @@ export class InkDrawer {
 	private pendingInferredPenClientX = 0;
 	private pendingInferredPenClientY = 0;
 	private pendingInferredPenAt = 0;
+	private inferredStartArmedPointerId: number | null = null;
+	private inferredStartArmedAt = 0;
 	private readonly pencilTiming: PencilTimingDiagnostics = {
 		downCount: 0,
 		upCount: 0,
@@ -424,7 +425,6 @@ export class InkDrawer {
 		this.activeTouchId = null;
 		this.clearInferredPenStart();
 		this.activeStroke = null;
-		this.activeStrokeAwaitingContact = false;
 		this.hasPenInSession = false;
 		this.lastPenLikeEventAt = 0;
 		this.lastLocalX = null;
@@ -648,7 +648,6 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
-			this.activeStrokeAwaitingContact = false;
 			this.appendTouchPoint(touch, 0.5);
 			this.requestDraw();
 			event.preventDefault();
@@ -765,7 +764,6 @@ export class InkDrawer {
 			width: DEFAULT_PEN_WIDTH,
 			points: [],
 		};
-		this.activeStrokeAwaitingContact = false;
 		this.pushStrokePoints(event);
 		this.requestDraw();
 	};
@@ -794,10 +792,12 @@ export class InkDrawer {
 				return;
 			}
 			const inContact = this.isPointerEventInContact(event);
-			if (!inContact && !this.shouldInferPenStartFromMotion(event, now)) {
+			if (!inContact) {
+				this.shouldInferPenStartFromMotion(event, now);
 				return;
 			}
-			if (!inContact) {
+			const startFromInferred = this.isInferredStartArmed(event.pointerId, now);
+			if (startFromInferred) {
 				this.pencilTiming.inferredStartCount += 1;
 			} else if (source === 'raw') {
 				this.pencilTiming.rawStartCount += 1;
@@ -820,11 +820,8 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
-			this.activeStrokeAwaitingContact = !inContact;
-			if (inContact) {
-				this.pushStrokePoints(event);
-				this.requestDraw();
-			}
+			this.pushStrokePoints(event);
+			this.requestDraw();
 			return;
 		}
 		if (this.activePointerId !== event.pointerId) {
@@ -832,13 +829,6 @@ export class InkDrawer {
 		}
 		if (this.isLikelyPenPointer(event)) {
 			this.lastPenLikeEventAt = performance.now();
-		}
-		const inContact = this.isPointerEventInContact(event);
-		if (this.activeStrokeAwaitingContact) {
-			if (!inContact) {
-				return;
-			}
-			this.activeStrokeAwaitingContact = false;
 		}
 		event.preventDefault();
 
@@ -852,13 +842,22 @@ export class InkDrawer {
 
 	private onPointerUp = (event: PointerEvent): void => {
 		if (this.activePointerId === null) {
-			this.clearInferredPenStart();
 			const now = performance.now();
 			const penLike = this.isLikelyPenPointer(event, now);
-			if (!penLike || !this.isPointerEventInContact(event)) {
+			if (!penLike) {
+				this.clearInferredPenStart();
 				return;
 			}
-			this.pencilTiming.upOnlyStartCount += 1;
+			const inContact = this.isPointerEventInContact(event);
+			const startFromInferred = this.isInferredStartArmed(event.pointerId, now);
+			if (!inContact && !startFromInferred) {
+				return;
+			}
+			if (startFromInferred) {
+				this.pencilTiming.inferredStartCount += 1;
+			} else {
+				this.pencilTiming.upOnlyStartCount += 1;
+			}
 			this.trackPointerDown(now, event.pointerType, penLike);
 			this.lastPenLikeEventAt = now;
 			this.hasPenInSession = true;
@@ -874,8 +873,14 @@ export class InkDrawer {
 				width: DEFAULT_PEN_WIDTH,
 				points: [],
 			};
-			this.activeStrokeAwaitingContact = false;
 			this.pushStrokePoints(event);
+			if (this.activeStroke.points.length === 0) {
+				this.appendSamplePoint(
+					event.clientX,
+					event.clientY,
+					event.pressure > 0 ? event.pressure : 0.5,
+				);
+			}
 		}
 		if (this.activePointerId !== event.pointerId) {
 			if (!this.shouldFinalizeCrossPointerId(event)) {
@@ -884,15 +889,15 @@ export class InkDrawer {
 			this.pencilTiming.crossIdFinalizeCount += 1;
 		}
 		const pointCountBeforeUp = this.activeStroke?.points.length ?? 0;
-		if (this.activeStroke && this.activeStrokeAwaitingContact) {
-			if (this.isPointerEventInContact(event)) {
-				this.activeStrokeAwaitingContact = false;
-			} else {
-				this.activeStroke = null;
-			}
-		}
 		if (this.activeStroke) {
 			this.pushStrokePoints(event);
+			if (this.activeStroke.points.length === 0) {
+				this.appendSamplePoint(
+					event.clientX,
+					event.clientY,
+					event.pressure > 0 ? event.pressure : 0.5,
+				);
+			}
 		}
 		const pointCountAfterUp = this.activeStroke?.points.length ?? pointCountBeforeUp;
 		if (pointCountAfterUp > pointCountBeforeUp) {
@@ -1018,7 +1023,6 @@ export class InkDrawer {
 		this.pendingTouchId = null;
 		this.clearInferredPenStart();
 		this.activeStroke = null;
-		this.activeStrokeAwaitingContact = false;
 		this.lastLocalX = null;
 		this.pendingAdvanceOnRelease = false;
 		this.requestDraw();
@@ -1686,6 +1690,8 @@ export class InkDrawer {
 		this.pendingInferredPenClientX = 0;
 		this.pendingInferredPenClientY = 0;
 		this.pendingInferredPenAt = 0;
+		this.inferredStartArmedPointerId = null;
+		this.inferredStartArmedAt = 0;
 	}
 
 	private shouldInferPenStartFromMotion(event: PointerEvent, now: number): boolean {
@@ -1713,8 +1719,22 @@ export class InkDrawer {
 		if (dx * dx + dy * dy < INFERRED_PEN_START_MOVE_PX * INFERRED_PEN_START_MOVE_PX) {
 			return false;
 		}
+		this.inferredStartArmedPointerId = event.pointerId;
+		this.inferredStartArmedAt = now;
+		this.pendingInferredPenPointerId = event.pointerId;
+		this.pendingInferredPenClientX = event.clientX;
+		this.pendingInferredPenClientY = event.clientY;
+		this.pendingInferredPenAt = now;
+		return true;
+	}
 
-		this.clearInferredPenStart();
+	private isInferredStartArmed(pointerId: number, now: number): boolean {
+		if (this.inferredStartArmedPointerId !== pointerId) {
+			return false;
+		}
+		if (now - this.inferredStartArmedAt > INFERRED_PEN_START_AFTER_UP_MS) {
+			return false;
+		}
 		return true;
 	}
 
