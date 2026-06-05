@@ -831,10 +831,12 @@ export class InkDrawer {
 		}
 		if (this.activePointerId !== null) {
 			this.pencilTiming.touchFallback.startBlockedActivePointerCount += 1;
+			event.preventDefault();
 			return;
 		}
 		if (this.activeTouchId !== null) {
 			this.pencilTiming.touchFallback.startBlockedActiveTouchCount += 1;
+			event.preventDefault();
 			return;
 		}
 		const touch = event.changedTouches[0];
@@ -857,6 +859,7 @@ export class InkDrawer {
 		}
 		if (this.activePointerId !== null) {
 			this.pencilTiming.touchFallback.moveBlockedActivePointerCount += 1;
+			event.preventDefault();
 			return;
 		}
 		const now = performance.now();
@@ -915,6 +918,10 @@ export class InkDrawer {
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
 			return;
 		}
+		if (this.activePointerId !== null) {
+			event.preventDefault();
+			return;
+		}
 		if (this.activeTouchId !== null) {
 			this.pencilTiming.touchFallback.endFinalizeWithActiveCount += 1;
 			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
@@ -943,6 +950,10 @@ export class InkDrawer {
 		this.pencilTiming.touchFallback.cancelObservedCount += 1;
 		this.trackTouchMetadataFromEvent(event);
 		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
+			return;
+		}
+		if (this.activePointerId !== null) {
+			event.preventDefault();
 			return;
 		}
 		if (this.activeTouchId !== null) {
