@@ -1,4 +1,5 @@
 export type InkTool = 'pen' | 'eraser';
+export type InkCursorLinePreference = 'auto' | 'prev' | 'next';
 
 export interface InkPoint {
 	x: number;
@@ -15,10 +16,30 @@ export interface InkStroke {
 	points: InkPoint[];
 }
 
+export interface InkCanonicalCursor {
+	index: number;
+	linePreference: InkCursorLinePreference;
+	updatedAt: number;
+}
+
+export interface InkLineBreakInsertOperation {
+	type: 'line-break-insert';
+	markerStrokeId: string;
+	createdAt: number;
+	anchorIndexBefore: number;
+	cursorAfter: InkCanonicalCursor;
+}
+
+export type InkStructuralOperation = InkLineBreakInsertOperation;
+
 export interface InkDocument {
 	version: 1;
 	meta: {
 		lineHeight: number;
+		// Canonical cursor state shared by drawer and renderer paths.
+		cursor: InkCanonicalCursor;
+		// Last structural operation enables deterministic erase semantics.
+		lastStructuralOp: InkStructuralOperation | null;
 	};
 	strokes: InkStroke[];
 }
@@ -32,6 +53,12 @@ export const DEFAULT_INK_DOCUMENT: InkDocument = {
 	version: 1,
 	meta: {
 		lineHeight: 180,
+		cursor: {
+			index: 0,
+			linePreference: 'auto',
+			updatedAt: 0,
+		},
+		lastStructuralOp: null,
 	},
 	strokes: [],
 };
@@ -40,6 +67,63 @@ export const INK_CODE_BLOCK_LANGUAGE = 'fii-ink';
 export const INK_WRAP_WORLD_WIDTH = 900;
 export const INK_BASELINE_RATIO_FROM_TOP = 2 / 3;
 export const INK_LINE_BREAK_MARKER_PREFIX = 'ff-nl-';
+
+function normalizeCursorLinePreference(value: unknown): InkCursorLinePreference {
+	return value === 'prev' || value === 'next' ? value : 'auto';
+}
+
+function clampCursorIndex(value: unknown, length: number, fallback: number): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		return Math.max(0, Math.min(length, fallback));
+	}
+	return Math.max(0, Math.min(length, Math.floor(value)));
+}
+
+function normalizeCanonicalCursor(
+	value: unknown,
+	strokeCount: number,
+	fallbackIndex: number,
+): InkCanonicalCursor {
+	const fallback: InkCanonicalCursor = {
+		index: clampCursorIndex(fallbackIndex, strokeCount, strokeCount),
+		linePreference: 'auto',
+		updatedAt: 0,
+	};
+	if (!value || typeof value !== 'object') {
+		return fallback;
+	}
+	const maybe = value as Partial<InkCanonicalCursor>;
+	return {
+		index: clampCursorIndex(maybe.index, strokeCount, fallback.index),
+		linePreference: normalizeCursorLinePreference(maybe.linePreference),
+		updatedAt:
+			typeof maybe.updatedAt === 'number' && Number.isFinite(maybe.updatedAt)
+				? maybe.updatedAt
+				: fallback.updatedAt,
+	};
+}
+
+function normalizeStructuralOperation(value: unknown, strokeCount: number): InkStructuralOperation | null {
+	if (!value || typeof value !== 'object') {
+		return null;
+	}
+	const maybe = value as Partial<InkLineBreakInsertOperation>;
+	if (maybe.type !== 'line-break-insert' || typeof maybe.markerStrokeId !== 'string') {
+		return null;
+	}
+	const fallbackCursor = normalizeCanonicalCursor(undefined, strokeCount, strokeCount);
+	const cursorAfter = normalizeCanonicalCursor(maybe.cursorAfter, strokeCount, fallbackCursor.index);
+	return {
+		type: 'line-break-insert',
+		markerStrokeId: maybe.markerStrokeId,
+		createdAt:
+			typeof maybe.createdAt === 'number' && Number.isFinite(maybe.createdAt)
+				? maybe.createdAt
+				: 0,
+		anchorIndexBefore: clampCursorIndex(maybe.anchorIndexBefore, strokeCount, cursorAfter.index),
+		cursorAfter,
+	};
+}
 
 export function isLineBreakMarkerStroke(stroke: InkStroke): boolean {
 	return stroke.id.startsWith(INK_LINE_BREAK_MARKER_PREFIX);
@@ -111,10 +195,15 @@ export function parseInkDocument(source: string): InkDocument {
 		})
 		.filter((stroke): stroke is InkStroke => stroke !== null);
 
+	const cursor = normalizeCanonicalCursor(value.meta?.cursor, strokes.length, strokes.length);
+	const lastStructuralOp = normalizeStructuralOperation(value.meta?.lastStructuralOp, strokes.length);
+
 	return {
 		version: 1,
 		meta: {
 			lineHeight,
+			cursor,
+			lastStructuralOp,
 		},
 		strokes,
 	};

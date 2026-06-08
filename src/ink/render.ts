@@ -1,5 +1,6 @@
 ﻿import {
 	InkDocument,
+	InkCursorLinePreference,
 	InkStroke,
 	INK_BASELINE_RATIO_FROM_TOP,
 	isLineBreakMarkerStroke,
@@ -56,7 +57,7 @@ minY: number;
 maxY: number;
 }
 
-export type InsertionLinePreference = 'auto' | 'prev' | 'next';
+export type InsertionLinePreference = InkCursorLinePreference;
 
 export interface InlineInsertionSelection {
 	index: number;

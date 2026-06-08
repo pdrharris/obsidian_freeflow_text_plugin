@@ -7,6 +7,13 @@ import {
 	InkViewport,
 	isLineBreakMarkerStroke,
 } from './model';
+import {
+	clearStructuralOperation,
+	getLineBreakInsertOperation,
+	readCanonicalCursor,
+	setLineBreakInsertOperation,
+	writeCanonicalCursor,
+} from './cursor';
 import { drawDrawerCanvas, type InsertionLinePreference } from './render';
 
 const STEP_RATIO = 0.72;
@@ -241,7 +248,6 @@ export class InkDrawer {
 	private redrawQueued = false;
 	private lastLocalX: number | null = null;
 	private pendingAdvanceOnRelease = false;
-	private lastInsertedLineBreakStrokeId: string | null = null;
 	private idleAdvanceTimer = 0;
 	private releaseAdvanceTimer = 0;
 	private snapNextStrokeToCursor = false;
@@ -414,12 +420,21 @@ export class InkDrawer {
 				/* noop */
 			},
 		});
-
-		const emptyDoc: InkDocument = {
+		const createDoc = (strokes: InkStroke[]): InkDocument => ({
 			version: 1,
-			meta: { lineHeight },
-			strokes: [],
-		};
+			meta: {
+				lineHeight,
+				cursor: {
+					index: strokes.length,
+					linePreference: 'auto',
+					updatedAt: 0,
+				},
+				lastStructuralOp: null,
+			},
+			strokes,
+		});
+
+		const emptyDoc = createDoc([]);
 		const emptyIndex = this.resolveNewlineInsertionIndex(
 			emptyDoc,
 			0,
@@ -442,15 +457,11 @@ export class InkDrawer {
 			detail: `index=${emptyIndex}, moved=${emptyChanged ? 'yes' : 'no'}, strokes=${emptyDoc.strokes.length}`,
 		});
 
-		const eolDoc: InkDocument = {
-			version: 1,
-			meta: { lineHeight },
-			strokes: [
-				makeStroke('eol-a', 40, 75, y1),
-				makeStroke('eol-b', 95, 132, y1),
-				makeStroke('eol-c', 155, 190, y1),
-			],
-		};
+		const eolDoc = createDoc([
+			makeStroke('eol-a', 40, 75, y1),
+			makeStroke('eol-b', 95, 132, y1),
+			makeStroke('eol-c', 155, 190, y1),
+		]);
 		const eolIndex = this.resolveNewlineInsertionIndex(
 			eolDoc,
 			eolDoc.strokes.length,
@@ -480,16 +491,12 @@ export class InkDrawer {
 			detail: `index=${eolIndex}, moved=${eolChanged ? 'yes' : 'no'}, lastYBefore=${eolLastBefore ?? 'n/a'}, lastYAfter=${eolLastAfter ?? 'n/a'}`,
 		});
 
-		const splitDoc: InkDocument = {
-			version: 1,
-			meta: { lineHeight },
-			strokes: [
-				makeStroke('split-a', 38, 70, y1),
-				makeStroke('split-b', 95, 124, y1),
-				makeStroke('split-c', 145, 178, y1),
-				makeStroke('split-d', 44, 86, y2),
-			],
-		};
+		const splitDoc = createDoc([
+			makeStroke('split-a', 38, 70, y1),
+			makeStroke('split-b', 95, 124, y1),
+			makeStroke('split-c', 145, 178, y1),
+			makeStroke('split-d', 44, 86, y2),
+		]);
 		const splitIndex = this.resolveNewlineInsertionIndex(splitDoc, 1, y1, 90, lineHeight);
 		const splitChanged = this.applyCarriageReturnAtCursor(
 			createSession(splitDoc),
@@ -524,14 +531,10 @@ export class InkDrawer {
 			detail: `index=${splitIndex}, moved=${splitChanged ? 'yes' : 'no'}, y=[a:${splitAY ?? 'n/a'}, b:${splitBY ?? 'n/a'}, c:${splitCY ?? 'n/a'}, d:${splitDY ?? 'n/a'}]`,
 		});
 
-		const markerDoc: InkDocument = {
-			version: 1,
-			meta: { lineHeight },
-			strokes: [
-				this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
-				this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y3),
-			],
-		};
+		const markerDoc = createDoc([
+			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
+			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y3),
+		]);
 		const markerPruned = this.pruneLineBreakMarkersIfNoVisibleStrokes(markerDoc);
 		results.push({
 			name: 'Marker-only block cleanup after erase',
@@ -539,15 +542,11 @@ export class InkDrawer {
 			detail: `pruned=${markerPruned ? 'yes' : 'no'}, remaining=${markerDoc.strokes.length}`,
 		});
 
-		const eraseAfterMarkerDoc: InkDocument = {
-			version: 1,
-			meta: { lineHeight },
-			strokes: [
-				makeStroke('erase-after-a', 38, 74, y1),
-				makeStroke('erase-after-b', 96, 132, y1),
-				this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
-			],
-		};
+		const eraseAfterMarkerDoc = createDoc([
+			makeStroke('erase-after-a', 38, 74, y1),
+			makeStroke('erase-after-b', 96, 132, y1),
+			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
+		]);
 		const eraseAfterSession = createSession(eraseAfterMarkerDoc);
 		eraseAfterSession.cursorIndex = eraseAfterMarkerDoc.strokes.length;
 		eraseAfterSession.linePreference = 'next';
@@ -573,15 +572,11 @@ export class InkDrawer {
 			detail: `count=${eraseAfterMarkerDoc.strokes.length}, cursor=${eraseAfterSession.cursorIndex}, linePref=${eraseAfterSession.linePreference}, lineOffsetY=${eraseAfterSession.viewport.lineOffsetY}, markerRemaining=${eraseAfterMarkerRemaining ? 'yes' : 'no'}`,
 		});
 
-		const eraseAtCursorDoc: InkDocument = {
-			version: 1,
-			meta: { lineHeight },
-			strokes: [
-				makeStroke('erase-cursor-a', 42, 76, y1),
-				makeStroke('erase-cursor-b', 98, 136, y1),
-				this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
-			],
-		};
+		const eraseAtCursorDoc = createDoc([
+			makeStroke('erase-cursor-a', 42, 76, y1),
+			makeStroke('erase-cursor-b', 98, 136, y1),
+			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
+		]);
 		const eraseAtCursorSession = createSession(eraseAtCursorDoc);
 		eraseAtCursorSession.cursorIndex = 2;
 		eraseAtCursorSession.linePreference = 'prev';
@@ -683,11 +678,14 @@ export class InkDrawer {
 		}
 
 		this.session = session;
-		this.session.cursorIndex = this.clampCursorIndex(
+		const canonicalCursor = readCanonicalCursor(
+			this.session.doc,
 			this.session.cursorIndex,
-			this.session.doc.strokes.length,
+			this.session.linePreference ?? 'auto',
 		);
-		this.session.linePreference = this.session.linePreference ?? 'auto';
+		this.session.cursorIndex = canonicalCursor.index;
+		this.session.linePreference = canonicalCursor.linePreference;
+		writeCanonicalCursor(this.session.doc, this.session.cursorIndex, this.session.linePreference);
 		this.session.onCursorChanged(this.session.cursorIndex);
 		this.session.onLinePreferenceChanged(this.session.linePreference);
 		this.activePointerId = null;
@@ -701,7 +699,6 @@ export class InkDrawer {
 		this.lastLocalX = null;
 		this.snapNextStrokeToCursor = true;
 		this.pendingSnapAnchorX = null;
-		this.lastInsertedLineBreakStrokeId = null;
 		this.pendingAdvanceOnRelease = false;
 		this.clearIdleAdvanceTimer();
 		this.clearReleaseAdvanceTimer();
@@ -729,6 +726,7 @@ export class InkDrawer {
 		this.pendingAdvanceOnRelease = false;
 		this.session.cursorIndex = this.clampCursorIndex(cursorIndex, this.session.doc.strokes.length);
 		this.session.linePreference = linePreference;
+		writeCanonicalCursor(this.session.doc, this.session.cursorIndex, this.session.linePreference);
 		this.snapNextStrokeToCursor = true;
 		this.pendingSnapAnchorX = null;
 		this.session.viewport = viewport;
@@ -748,7 +746,6 @@ export class InkDrawer {
 		const closingSession = this.session;
 		this.snapNextStrokeToCursor = false;
 		this.pendingSnapAnchorX = null;
-		this.lastInsertedLineBreakStrokeId = null;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
 		closingSession.onClose();
@@ -893,7 +890,14 @@ export class InkDrawer {
 			0,
 			markerStroke,
 		);
-		this.lastInsertedLineBreakStrokeId = markerStroke.id;
+		// Record the structural newline operation so immediate erase can undo this deterministically.
+		const cursorAfter = writeCanonicalCursor(session.doc, insertionIndex + 1, 'next');
+		setLineBreakInsertOperation(
+			session.doc,
+			markerStroke.id,
+			requestedIndex,
+			cursorAfter,
+		);
 		session.cursorIndex = insertionIndex + 1;
 		session.linePreference = 'next';
 		session.viewport = {
@@ -1509,10 +1513,11 @@ export class InkDrawer {
 				strokePeakLocalX = activeBounds.maxX - session.viewport.viewportX;
 			}
 			session.doc.strokes.splice(insertionIndex, 0, this.activeStroke);
-			this.lastInsertedLineBreakStrokeId = null;
+			clearStructuralOperation(session.doc);
 			this.shiftFollowingStrokesForInsertion(session.doc, insertionIndex, insertionAnchorX);
 			session.cursorIndex = insertionIndex + 1;
 			session.linePreference = 'prev';
+			writeCanonicalCursor(session.doc, session.cursorIndex, session.linePreference);
 			session.onCursorChanged(session.cursorIndex);
 			session.onLinePreferenceChanged(session.linePreference);
 			session.onDocumentChanged();
@@ -1572,18 +1577,20 @@ export class InkDrawer {
 		}
 		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
 
-		if (this.lastInsertedLineBreakStrokeId) {
+		// First stage erase path: if we just inserted a manual newline marker, remove that exact marker.
+		const lineBreakInsertOp = getLineBreakInsertOperation(session.doc);
+		if (lineBreakInsertOp) {
 			const trackedMarkerIndex = session.doc.strokes.findIndex(
-				(stroke) => stroke.id === this.lastInsertedLineBreakStrokeId,
+				(stroke) => stroke.id === lineBreakInsertOp.markerStrokeId,
 			);
 			if (trackedMarkerIndex >= 0 && Math.abs(trackedMarkerIndex - cursorIndex) <= 1) {
 				if (this.removeLineBreakMarkerAt(session, trackedMarkerIndex, lineHeight)) {
-					this.lastInsertedLineBreakStrokeId = null;
+					clearStructuralOperation(session.doc);
 					return;
 				}
 			}
 			if (trackedMarkerIndex < 0) {
-				this.lastInsertedLineBreakStrokeId = null;
+				clearStructuralOperation(session.doc);
 			}
 		}
 
@@ -1591,14 +1598,14 @@ export class InkDrawer {
 		const previousStroke = session.doc.strokes[previousIndex];
 		if (previousStroke && isLineBreakMarkerStroke(previousStroke)) {
 			this.removeLineBreakMarkerAt(session, previousIndex, lineHeight);
-			this.lastInsertedLineBreakStrokeId = null;
+			clearStructuralOperation(session.doc);
 			return;
 		}
 
 		const currentStroke = session.doc.strokes[cursorIndex];
 		if (currentStroke && isLineBreakMarkerStroke(currentStroke)) {
 			this.removeLineBreakMarkerAt(session, cursorIndex, lineHeight);
-			this.lastInsertedLineBreakStrokeId = null;
+			clearStructuralOperation(session.doc);
 			return;
 		}
 		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
@@ -1715,6 +1722,7 @@ export class InkDrawer {
 		if (markerBounds) {
 			this.collapseLineBreakGap(session.doc, markerIndex, markerBounds.centerY, lineHeight);
 		}
+		clearStructuralOperation(session.doc);
 		this.finishEraseAtIndex(session, markerIndex);
 		return true;
 	}
@@ -1725,6 +1733,7 @@ export class InkDrawer {
 			? 0
 			: this.clampCursorIndex(removeIndex, session.doc.strokes.length);
 		session.linePreference = 'prev';
+		writeCanonicalCursor(session.doc, session.cursorIndex, session.linePreference);
 		session.onCursorChanged(session.cursorIndex);
 		session.onLinePreferenceChanged(session.linePreference);
 
@@ -2156,6 +2165,13 @@ export class InkDrawer {
 	}
 
 	private resolveEffectiveInsertionIndex(session: DrawerSession): number {
+		const canonical = readCanonicalCursor(
+			session.doc,
+			session.cursorIndex,
+			session.linePreference,
+		);
+		session.cursorIndex = canonical.index;
+		session.linePreference = canonical.linePreference;
 		return this.clampCursorIndex(session.cursorIndex, session.doc.strokes.length);
 	}
 

@@ -8,6 +8,7 @@ import { InkDrawer } from './drawer';
 import {
 	DEFAULT_INK_DOCUMENT,
 	INK_CODE_BLOCK_LANGUAGE,
+	InkCanonicalCursor,
 	InkDocument,
 	InkStroke,
 	InkViewport,
@@ -15,6 +16,7 @@ import {
 	parseInkDocument,
 	serializeInkDocument,
 } from './model';
+import { readCanonicalCursor, writeCanonicalCursor } from './cursor';
 import {
 	drawInlineCanvas,
 	findInlineInsertionSelection,
@@ -98,9 +100,10 @@ export class InkBlockRegistry {
 		}
 
 		let documentModel = parsed;
+		const initialCursor = readCanonicalCursor(documentModel, documentModel.strokes.length, 'auto');
 		let viewport = initialViewportFor(documentModel, this.getWrapWidthWorld());
-		let cursorIndex = documentModel.strokes.length;
-		let cursorLinePreference: InsertionLinePreference = 'auto';
+		let cursorIndex = initialCursor.index;
+		let cursorLinePreference: InsertionLinePreference = initialCursor.linePreference;
 		let showInlineCaret = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
@@ -135,6 +138,22 @@ export class InkBlockRegistry {
 			);
 		};
 		renderInline();
+
+		const syncCursorFromDocument = (): InkCanonicalCursor => {
+			// Canonical cursor lives in document metadata and is the source of truth for both views.
+			const canonical = readCanonicalCursor(documentModel, cursorIndex, cursorLinePreference);
+			cursorIndex = canonical.index;
+			cursorLinePreference = canonical.linePreference;
+			return canonical;
+		};
+
+		const writeCursorToDocument = (): InkCanonicalCursor => {
+			// Keep metadata synchronized when inline interactions move the cursor.
+			const canonical = writeCanonicalCursor(documentModel, cursorIndex, cursorLinePreference);
+			cursorIndex = canonical.index;
+			cursorLinePreference = canonical.linePreference;
+			return canonical;
+		};
 
 		const flushSave = async (): Promise<void> => {
 			if (isDisposed) {
@@ -182,7 +201,7 @@ export class InkBlockRegistry {
 		};
 
 		const onDocumentChanged = (): void => {
-			cursorIndex = clampInsertionIndex(cursorIndex, documentModel.strokes.length);
+			syncCursorFromDocument();
 			renderInline();
 			if (isActiveKey(blockKey)) {
 				pendingInlineRefreshWhileActive = true;
@@ -197,6 +216,7 @@ export class InkBlockRegistry {
 				if (nextIndex !== cursorIndex) {
 					cursorIndex = nextIndex;
 					cursorLinePreference = 'auto';
+					writeCursorToDocument();
 					viewport = viewportForInsertion(
 						documentModel,
 						this.getWrapWidthWorld(),
@@ -220,11 +240,13 @@ export class InkBlockRegistry {
 				},
 				onCursorChanged: (nextCursorIndex) => {
 					cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
+					writeCursorToDocument();
 					showInlineCaret = true;
 					renderInline();
 				},
 				onLinePreferenceChanged: (nextLinePreference) => {
 					cursorLinePreference = nextLinePreference;
+					writeCursorToDocument();
 					showInlineCaret = true;
 					renderInline();
 				},
@@ -270,6 +292,7 @@ export class InkBlockRegistry {
 			);
 			cursorIndex = selection.index;
 			cursorLinePreference = selection.linePreference;
+			writeCursorToDocument();
 			viewport = viewportForInsertion(
 				documentModel,
 				this.getWrapWidthWorld(),
