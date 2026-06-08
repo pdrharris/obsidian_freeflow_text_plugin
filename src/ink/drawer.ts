@@ -705,6 +705,8 @@ export class InkDrawer {
 		this.updateToolUi();
 
 		this.rootEl.classList.add('is-open');
+		this.recenterViewportForCursor(this.session);
+		this.session.onViewportChanged(this.session.viewport);
 		this.requestDraw();
 	}
 
@@ -712,7 +714,6 @@ export class InkDrawer {
 		sessionKey: string,
 		cursorIndex: number,
 		linePreference: InsertionLinePreference,
-		viewport: InkViewport,
 	): void {
 		if (!this.session || this.session.key !== sessionKey) {
 			return;
@@ -729,11 +730,31 @@ export class InkDrawer {
 		writeCanonicalCursor(this.session.doc, this.session.cursorIndex, this.session.linePreference);
 		this.snapNextStrokeToCursor = true;
 		this.pendingSnapAnchorX = null;
-		this.session.viewport = viewport;
+		this.recenterViewportForCursor(this.session);
 		this.session.onCursorChanged(this.session.cursorIndex);
 		this.session.onLinePreferenceChanged(this.session.linePreference);
 		this.session.onViewportChanged(this.session.viewport);
 		this.requestDraw();
+	}
+
+	private recenterViewportForCursor(session: DrawerSession): void {
+		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
+		const cursorAnchor = this.getCursorAnchorPoint(session);
+		if (!cursorAnchor) {
+			session.viewport = {
+				viewportX: 0,
+				lineOffsetY: lineHeight,
+			};
+			return;
+		}
+
+		const runtime = this.getRuntimeConfig();
+		const drawerWidth =
+			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || runtime.wrapWidth;
+		session.viewport = {
+			viewportX: Math.max(0, cursorAnchor.x - drawerWidth * 0.3),
+			lineOffsetY: this.quantizeLineOffset(cursorAnchor.y, lineHeight),
+		};
 	}
 
 	close(): void {

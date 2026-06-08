@@ -10,7 +10,6 @@ import {
 	INK_CODE_BLOCK_LANGUAGE,
 	InkCanonicalCursor,
 	InkDocument,
-	InkStroke,
 	InkViewport,
 	isLineBreakMarkerStroke,
 	parseInkDocument,
@@ -25,7 +24,6 @@ import {
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
-const NEW_LINE_START_PADDING = 24;
 
 export class InkBlockRegistry {
 	private readonly plugin: Plugin;
@@ -217,12 +215,6 @@ export class InkBlockRegistry {
 					cursorIndex = nextIndex;
 					cursorLinePreference = 'auto';
 					writeCursorToDocument();
-					viewport = viewportForInsertion(
-						documentModel,
-						this.getWrapWidthWorld(),
-						cursorIndex,
-						cursorLinePreference,
-					);
 				}
 			}
 			showInlineCaret = true;
@@ -293,16 +285,10 @@ export class InkBlockRegistry {
 			cursorIndex = selection.index;
 			cursorLinePreference = selection.linePreference;
 			writeCursorToDocument();
-			viewport = viewportForInsertion(
-				documentModel,
-				this.getWrapWidthWorld(),
-				cursorIndex,
-				cursorLinePreference,
-			);
 			showInlineCaret = true;
 			renderInline();
 			if (isActiveKey(blockKey)) {
-				drawer.updateCursor(blockKey, cursorIndex, cursorLinePreference, viewport);
+				drawer.updateCursor(blockKey, cursorIndex, cursorLinePreference);
 			}
 		};
 
@@ -390,89 +376,6 @@ function initialViewportFor(doc: InkDocument, wrapWidth: number): InkViewport {
 	return {
 		viewportX: Math.max(0, bounds.maxX - wrapWidth * 0.66),
 		lineOffsetY,
-	};
-}
-
-function viewportForInsertion(
-	doc: InkDocument,
-	wrapWidth: number,
-	insertionIndex: number,
-	linePreference: InsertionLinePreference = 'auto',
-): InkViewport {
-	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
-	const clampedIndex = clampInsertionIndex(insertionIndex, doc.strokes.length);
-	const prevStroke = clampedIndex > 0 ? doc.strokes[clampedIndex - 1] : undefined;
-	const nextStroke = clampedIndex < doc.strokes.length ? doc.strokes[clampedIndex] : undefined;
-	const prevAnchor = getStrokeAnchor(prevStroke);
-	const nextAnchor = getStrokeAnchor(nextStroke);
-
-	if (!prevAnchor && !nextAnchor) {
-		return initialViewportFor(doc, wrapWidth);
-	}
-	const isSameLine =
-		!!prevAnchor &&
-		!!nextAnchor &&
-		Math.abs(nextAnchor.centerY - prevAnchor.centerY) <= lineHeight * 0.6;
-
-	const anchorX =
-		prevAnchor && nextAnchor
-			? isSameLine
-				? (prevAnchor.rightX + nextAnchor.leftX) * 0.5
-				: linePreference === 'prev'
-					? prevAnchor.rightX + 20
-					: Math.max(0, nextAnchor.leftX - 24)
-			: prevAnchor
-				? prevAnchor.rightX + 24
-				: Math.max(0, (nextAnchor?.leftX ?? 0) - 24);
-	const anchorY =
-		prevAnchor && nextAnchor
-			? isSameLine
-				? (prevAnchor.centerY + nextAnchor.centerY) * 0.5
-				: linePreference === 'prev'
-					? prevAnchor.centerY
-					: nextAnchor.centerY
-			: prevAnchor
-				? prevAnchor.centerY
-				: (nextAnchor?.centerY ?? lineHeight);
-
-	return {
-		viewportX: Math.max(0, anchorX - wrapWidth * 0.3),
-		lineOffsetY: quantizeLineOffset(anchorY, lineHeight),
-	};
-}
-
-function getStrokeAnchor(stroke: InkStroke | undefined): {
-	leftX: number;
-	rightX: number;
-	centerY: number;
-} | null {
-	if (!stroke || stroke.points.length === 0) {
-		return null;
-	}
-	if (isLineBreakMarkerStroke(stroke)) {
-		const markerY = stroke.points[0]?.y ?? 0;
-		return {
-			leftX: NEW_LINE_START_PADDING,
-			rightX: NEW_LINE_START_PADDING,
-			centerY: markerY,
-		};
-	}
-
-	let minX = stroke.points[0]?.x ?? 0;
-	let maxX = stroke.points[0]?.x ?? 0;
-	let minY = stroke.points[0]?.y ?? 0;
-	let maxY = stroke.points[0]?.y ?? 0;
-	for (const point of stroke.points) {
-		if (point.x < minX) minX = point.x;
-		if (point.x > maxX) maxX = point.x;
-		if (point.y < minY) minY = point.y;
-		if (point.y > maxY) maxY = point.y;
-	}
-
-	return {
-		leftX: minX,
-		rightX: maxX,
-		centerY: (minY + maxY) * 0.5,
 	};
 }
 
