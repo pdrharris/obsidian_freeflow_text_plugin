@@ -22,12 +22,22 @@ export interface InkCanonicalCursor {
 	updatedAt: number;
 }
 
+// World-space displacement applied to a single stroke when a newline was inserted.
+// Recorded so an immediate erase can replay the exact inverse and restore geometry.
+export interface InkStrokeShift {
+	id: string;
+	dx: number;
+	dy: number;
+}
+
 export interface InkLineBreakInsertOperation {
 	type: 'line-break-insert';
 	markerStrokeId: string;
 	createdAt: number;
 	anchorIndexBefore: number;
 	cursorAfter: InkCanonicalCursor;
+	// Per-stroke shifts applied by the carriage-return layout, keyed by stroke id.
+	shifts: InkStrokeShift[];
 }
 
 export type InkStructuralOperation = InkLineBreakInsertOperation;
@@ -103,6 +113,26 @@ function normalizeCanonicalCursor(
 	};
 }
 
+function normalizeStrokeShifts(value: unknown): InkStrokeShift[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const shifts: InkStrokeShift[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const maybe = entry as Partial<InkStrokeShift>;
+		const dx = Number(maybe.dx);
+		const dy = Number(maybe.dy);
+		if (typeof maybe.id !== 'string' || !Number.isFinite(dx) || !Number.isFinite(dy)) {
+			continue;
+		}
+		shifts.push({ id: maybe.id, dx, dy });
+	}
+	return shifts;
+}
+
 function normalizeStructuralOperation(value: unknown, strokeCount: number): InkStructuralOperation | null {
 	if (!value || typeof value !== 'object') {
 		return null;
@@ -122,6 +152,7 @@ function normalizeStructuralOperation(value: unknown, strokeCount: number): InkS
 				: 0,
 		anchorIndexBefore: clampCursorIndex(maybe.anchorIndexBefore, strokeCount, cursorAfter.index),
 		cursorAfter,
+		shifts: normalizeStrokeShifts(maybe.shifts),
 	};
 }
 

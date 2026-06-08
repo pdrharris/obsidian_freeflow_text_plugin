@@ -232,6 +232,14 @@ export class InkBlockRegistry {
 				},
 				onCursorChanged: (nextCursorIndex) => {
 					cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
+					// The drawer writes the canonical cursor (index + preference) before
+					// invoking this callback, so adopt the freshly written preference here
+					// to avoid rendering the inline caret with a stale line preference (RC4).
+					cursorLinePreference = readCanonicalCursor(
+						documentModel,
+						cursorIndex,
+						cursorLinePreference,
+					).linePreference;
 					writeCursorToDocument();
 					showInlineCaret = true;
 					renderInline();

@@ -3,7 +3,9 @@ import {
 	INK_BASELINE_RATIO_FROM_TOP,
 	INK_LINE_BREAK_MARKER_PREFIX,
 	InkDocument,
+	InkLineBreakInsertOperation,
 	InkStroke,
+	InkStrokeShift,
 	InkViewport,
 	isLineBreakMarkerStroke,
 } from './model';
@@ -11,6 +13,7 @@ import {
 	clearStructuralOperation,
 	getLineBreakInsertOperation,
 	readCanonicalCursor,
+	resolveAutoLinePreference,
 	setLineBreakInsertOperation,
 	writeCanonicalCursor,
 } from './cursor';
@@ -896,7 +899,7 @@ export class InkDrawer {
 			splitX,
 			lineHeight,
 		);
-		this.applyCarriageReturnAtCursor(
+		const carriageShifts = this.applyCarriageReturnAtCursor(
 			session,
 			insertionIndex,
 			currentLineStart,
@@ -918,6 +921,7 @@ export class InkDrawer {
 			markerStroke.id,
 			requestedIndex,
 			cursorAfter,
+			carriageShifts,
 		);
 		session.cursorIndex = insertionIndex + 1;
 		session.linePreference = 'next';
@@ -1605,8 +1609,9 @@ export class InkDrawer {
 				(stroke) => stroke.id === lineBreakInsertOp.markerStrokeId,
 			);
 			if (trackedMarkerIndex >= 0 && Math.abs(trackedMarkerIndex - cursorIndex) <= 1) {
-				if (this.removeLineBreakMarkerAt(session, trackedMarkerIndex, lineHeight)) {
-					clearStructuralOperation(session.doc);
+				// Pass the recorded operation so erase restores the pre-newline cursor (RC1)
+				// and replays the exact inverse of the carriage-return geometry (RC2).
+				if (this.removeLineBreakMarkerAt(session, trackedMarkerIndex, lineHeight, lineBreakInsertOp)) {
 					return;
 				}
 			}
@@ -1733,6 +1738,7 @@ export class InkDrawer {
 		session: DrawerSession,
 		markerIndex: number,
 		lineHeight: number,
+		op: InkLineBreakInsertOperation | null = null,
 	): boolean {
 		const markerStroke = session.doc.strokes[markerIndex];
 		if (!markerStroke || !isLineBreakMarkerStroke(markerStroke)) {
@@ -1740,29 +1746,72 @@ export class InkDrawer {
 		}
 		const markerBounds = this.getStrokeBounds(markerStroke);
 		session.doc.strokes.splice(markerIndex, 1);
-		if (markerBounds) {
+		if (op && op.shifts.length > 0) {
+			// Exact inverse of the carriage-return layout (RC2): undo each recorded shift
+			// by stroke id, so words return to their original X and Y.
+			this.revertStrokeShifts(session.doc, op.shifts);
+		} else if (markerBounds) {
+			// Fallback for operations without recorded shifts (e.g. loaded from disk).
 			this.collapseLineBreakGap(session.doc, markerIndex, markerBounds.centerY, lineHeight);
 		}
 		clearStructuralOperation(session.doc);
-		this.finishEraseAtIndex(session, markerIndex);
+		// Restore the cursor to where it sat before the newline was inserted (RC1).
+		// Because inserting then removing the marker is index-neutral, anchorIndexBefore
+		// maps directly onto the post-erase document.
+		const restoreCursor = op
+			? { index: op.anchorIndexBefore, linePreference: 'prev' as InsertionLinePreference }
+			: null;
+		this.finishEraseAtIndex(session, markerIndex, restoreCursor);
 		return true;
 	}
 
-	private finishEraseAtIndex(session: DrawerSession, removeIndex: number): void {
+	private revertStrokeShifts(doc: InkDocument, shifts: InkStrokeShift[]): void {
+		if (shifts.length === 0) {
+			return;
+		}
+		const shiftsById = new Map(shifts.map((shift) => [shift.id, shift]));
+		for (const stroke of doc.strokes) {
+			const shift = shiftsById.get(stroke.id);
+			if (!shift) {
+				continue;
+			}
+			for (const point of stroke.points) {
+				point.x -= shift.dx;
+				point.y -= shift.dy;
+			}
+		}
+	}
+
+	private finishEraseAtIndex(
+		session: DrawerSession,
+		removeIndex: number,
+		restoreCursor: { index: number; linePreference: InsertionLinePreference } | null = null,
+	): void {
 		const removedOnlyMarkers = this.pruneLineBreakMarkersIfNoVisibleStrokes(session.doc);
-		session.cursorIndex = removedOnlyMarkers
-			? 0
-			: this.clampCursorIndex(removeIndex, session.doc.strokes.length);
-		session.linePreference = 'prev';
+		if (restoreCursor && !removedOnlyMarkers) {
+			session.cursorIndex = this.clampCursorIndex(restoreCursor.index, session.doc.strokes.length);
+			session.linePreference = restoreCursor.linePreference;
+		} else {
+			session.cursorIndex = removedOnlyMarkers
+				? 0
+				: this.clampCursorIndex(removeIndex, session.doc.strokes.length);
+			session.linePreference = 'prev';
+		}
 		writeCanonicalCursor(session.doc, session.cursorIndex, session.linePreference);
 		session.onCursorChanged(session.cursorIndex);
 		session.onLinePreferenceChanged(session.linePreference);
 
 		const drawerWidth =
 			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 480;
-		const prevStroke = removeIndex > 0 ? session.doc.strokes[removeIndex - 1] : undefined;
+		// Anchor the viewport on the restored cursor line, not the removed marker slot.
+		const anchorIndexForViewport =
+			restoreCursor && !removedOnlyMarkers ? session.cursorIndex : removeIndex;
+		const prevStroke =
+			anchorIndexForViewport > 0 ? session.doc.strokes[anchorIndexForViewport - 1] : undefined;
 		const nextStroke =
-			removeIndex < session.doc.strokes.length ? session.doc.strokes[removeIndex] : undefined;
+			anchorIndexForViewport < session.doc.strokes.length
+				? session.doc.strokes[anchorIndexForViewport]
+				: undefined;
 		const prevPoint = prevStroke?.points[prevStroke.points.length - 1];
 		const nextPoint = nextStroke?.points[0];
 		const anchorPoint = prevPoint || nextPoint;
@@ -2067,7 +2116,7 @@ export class InkDrawer {
 		targetStartX: number,
 		splitX: number,
 		lineHeight: number,
-	): boolean {
+	): InkStrokeShift[] {
 		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
 		const splitXTolerance = Math.max(2, lineHeight * 0.03);
 
@@ -2110,11 +2159,14 @@ export class InkDrawer {
 		}
 
 		if (trailingSameLineIndexes.length === 0 && lowerLineIndexes.length === 0) {
-			return false;
+			return [];
 		}
 
 		const shiftX = Number.isFinite(firstTrailingMinX) ? targetStartX - firstTrailingMinX : 0;
 		const shiftY = targetLineStart - currentLineStart;
+
+		// Record every displacement so erase can replay the exact inverse (RC2).
+		const shifts: InkStrokeShift[] = [];
 
 		for (const index of trailingSameLineIndexes) {
 			const stroke = session.doc.strokes[index];
@@ -2124,6 +2176,9 @@ export class InkDrawer {
 			for (const point of stroke.points) {
 				point.x += shiftX;
 				point.y += shiftY;
+			}
+			if (shiftX !== 0 || shiftY !== 0) {
+				shifts.push({ id: stroke.id, dx: shiftX, dy: shiftY });
 			}
 		}
 
@@ -2135,9 +2190,10 @@ export class InkDrawer {
 			for (const point of stroke.points) {
 				point.y += lineHeight;
 			}
+			shifts.push({ id: stroke.id, dx: 0, dy: lineHeight });
 		}
 
-		return true;
+		return shifts;
 	}
 
 	private resolveNewlineInsertionIndex(
@@ -2310,11 +2366,9 @@ export class InkDrawer {
 						y: nextBounds.centerY,
 					};
 				}
-				const viewportLineStart =
-					Math.floor(Math.max(lineHeight, session.viewport.lineOffsetY) / lineHeight) * lineHeight;
-				const prevDistance = Math.abs(prevBounds.centerY - viewportLineStart);
-				const nextDistance = Math.abs(nextBounds.centerY - viewportLineStart);
-				if (nextDistance < prevDistance) {
+				// 'auto': resolve via the shared rule so the drawer and the inline
+				// renderer always agree which line the caret sits on (RC3).
+				if (resolveAutoLinePreference() === 'next') {
 					return {
 						x: Math.max(0, nextBounds.minX - 24),
 						y: nextBounds.centerY,

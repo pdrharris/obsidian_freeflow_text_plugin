@@ -5,6 +5,7 @@
 	INK_BASELINE_RATIO_FROM_TOP,
 	isLineBreakMarkerStroke,
 } from './model';
+import { resolveAutoLinePreference } from './cursor';
 
 export interface InlineRenderMetrics {
 cssHeight: number;
@@ -731,12 +732,14 @@ doc,
 layout.strokePoints,
 layout.effectiveLineHeight,
 );
-const preferredBoundary =
-	linePreference === 'auto'
-		? null
-		: boundaries.find(
-			(item) => item.index === clampedIndex && item.linePreference === linePreference,
-		);
+// Resolve 'auto' through the shared rule so the inline caret lands on the same
+// line the drawer's viewport anchors to (RC3) instead of silently picking the
+// first boundary at the index.
+const resolvedPreference: InkCursorLinePreference =
+	linePreference === 'auto' ? resolveAutoLinePreference() : linePreference;
+const preferredBoundary = boundaries.find(
+	(item) => item.index === clampedIndex && item.linePreference === resolvedPreference,
+);
 const boundary = preferredBoundary ?? boundaries.find((item) => item.index === clampedIndex);
 if (!boundary) {
 return null;

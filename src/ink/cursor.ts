@@ -3,6 +3,7 @@ import {
 	InkCursorLinePreference,
 	InkDocument,
 	InkLineBreakInsertOperation,
+	InkStrokeShift,
 } from './model';
 
 // Shared canonical cursor helpers used by both drawer and renderer integration layers.
@@ -10,6 +11,15 @@ import {
 
 export function normalizeLinePreference(value: unknown): InkCursorLinePreference {
 	return value === 'prev' || value === 'next' ? value : 'auto';
+}
+
+// When the cursor sits on a line boundary with an ambiguous ('auto') preference,
+// both the drawer and the inline renderer must agree on which line the caret
+// belongs to. The shared rule: anchor to the end of the previous line's content
+// (where writing most recently ended). Centralized here so the two render paths
+// cannot drift apart.
+export function resolveAutoLinePreference(): Exclude<InkCursorLinePreference, 'auto'> {
+	return 'prev';
 }
 
 export function clampCursorIndex(index: number, length: number): number {
@@ -56,6 +66,7 @@ export function setLineBreakInsertOperation(
 	markerStrokeId: string,
 	anchorIndexBefore: number,
 	cursorAfter: InkCanonicalCursor,
+	shifts: InkStrokeShift[] = [],
 	now = Date.now(),
 ): InkLineBreakInsertOperation {
 	// This operation record provides deterministic "erase the just-added newline" behavior.
@@ -65,6 +76,7 @@ export function setLineBreakInsertOperation(
 		createdAt: now,
 		anchorIndexBefore: clampCursorIndex(anchorIndexBefore, doc.strokes.length),
 		cursorAfter,
+		shifts,
 	};
 	doc.meta.lastStructuralOp = operation;
 	return operation;
