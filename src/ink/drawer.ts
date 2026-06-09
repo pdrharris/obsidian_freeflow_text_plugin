@@ -8,7 +8,6 @@
 import {
 	InkCursor,
 	InkDocument,
-	InkFragment,
 	InkStroke,
 	clampCursor,
 	createStrokeId,
@@ -16,6 +15,7 @@ import {
 	selectionIsEmpty,
 	wordBounds,
 } from './doc';
+import { getClipboard, setClipboard } from './clipboard';
 import {
 	appendStrokeToCurrentWord,
 	deleteSelection,
@@ -82,7 +82,6 @@ export class InkDrawer {
 	private activePointerId: number | null = null;
 	private tool: 'pen' | 'select' = 'pen';
 	private selecting = false;
-	private clipboard: InkFragment | null = null;
 	private scrollX = 0;
 	private scrollY = 0;
 	private redrawQueued = false;
@@ -564,7 +563,7 @@ export class InkDrawer {
 		if (!session || selectionIsEmpty(session.doc.meta.selection)) {
 			return;
 		}
-		this.clipboard = extractSelection(session.doc, session.doc.meta.selection!);
+		setClipboard(extractSelection(session.doc, session.doc.meta.selection!));
 		this.requestDraw();
 	};
 
@@ -573,7 +572,7 @@ export class InkDrawer {
 		if (!session || selectionIsEmpty(session.doc.meta.selection)) {
 			return;
 		}
-		this.clipboard = extractSelection(session.doc, session.doc.meta.selection!);
+		setClipboard(extractSelection(session.doc, session.doc.meta.selection!));
 		deleteSelection(session.doc, session.doc.meta.selection!);
 		this.tool = 'pen';
 		this.updateScrollToCursor();
@@ -583,10 +582,11 @@ export class InkDrawer {
 
 	private onPaste = (): void => {
 		const session = this.session;
-		if (!session || fragmentIsEmpty(this.clipboard)) {
+		const clip = getClipboard();
+		if (!session || fragmentIsEmpty(clip)) {
 			return;
 		}
-		insertFragmentAtCursor(session.doc, this.clipboard!);
+		insertFragmentAtCursor(session.doc, clip!);
 		this.updateScrollToCursor();
 		session.onContentChanged();
 		this.requestDraw();
@@ -597,7 +597,7 @@ export class InkDrawer {
 		this.selectButtonEl.classList.toggle('is-active', this.tool === 'select');
 		this.copyButtonEl.disabled = !hasSelection;
 		this.cutButtonEl.disabled = !hasSelection;
-		this.pasteButtonEl.disabled = fragmentIsEmpty(this.clipboard);
+		this.pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
 		this.statusEl.textContent = this.tool === 'select' ? 'Select' : 'Pen';
 	}
 

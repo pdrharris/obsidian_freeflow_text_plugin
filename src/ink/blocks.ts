@@ -9,9 +9,13 @@ import {
 	INK_CODE_BLOCK_LANGUAGE,
 	InkDocument,
 	clampCursor,
+	fragmentIsEmpty,
 	parseInkDocument,
+	selectionIsEmpty,
 	serializeInkDocument,
 } from './doc';
+import { deleteSelection, extractSelection, insertFragmentAtCursor } from './edit';
+import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions } from './render';
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
@@ -102,6 +106,8 @@ export class InkBlockRegistry {
 		const documentModel = parsed;
 		documentModel.meta.cursor = clampCursor(documentModel.meta.cursor, documentModel.lines);
 		let showInlineCaret = false;
+		let selectMode = false;
+		let selecting = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
 		let pendingInlineRefreshWhileActive = false;
@@ -114,12 +120,26 @@ export class InkBlockRegistry {
 			attr: { role: 'button', 'aria-label': 'Open freeflow ink drawer' },
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
-		metaRowEl.createSpan({ text: 'Tap to place cursor' });
-		const actionEl = metaRowEl.createEl('button', {
-			cls: 'freeflow-ink-meta-action',
-			text: 'Open',
-		});
-		actionEl.type = 'button';
+		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor' });
+		const makeMetaButton = (label: string): HTMLButtonElement => {
+			const btn = metaRowEl.createEl('button', { cls: 'freeflow-ink-meta-action', text: label });
+			btn.type = 'button';
+			return btn;
+		};
+		const selectButtonEl = makeMetaButton('Select');
+		const copyButtonEl = makeMetaButton('Copy');
+		const cutButtonEl = makeMetaButton('Cut');
+		const pasteButtonEl = makeMetaButton('Paste');
+		const actionEl = makeMetaButton('Open');
+
+		const updateMetaButtons = (): void => {
+			const hasSelection = !selectionIsEmpty(documentModel.meta.selection);
+			selectButtonEl.classList.toggle('is-active', selectMode);
+			copyButtonEl.disabled = !hasSelection;
+			cutButtonEl.disabled = !hasSelection;
+			pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
+			hintEl.textContent = selectMode ? 'Drag to select words' : 'Tap to place cursor';
+		};
 
 		const renderInline = (): void => {
 			drawInlineCanvas(
@@ -129,6 +149,7 @@ export class InkBlockRegistry {
 				showInlineCaret ? documentModel.meta.cursor : null,
 				documentModel.meta.selection,
 			);
+			updateMetaButtons();
 		};
 		renderInline();
 
@@ -216,7 +237,106 @@ export class InkBlockRegistry {
 			}
 		};
 
+		const cursorAtEvent = (event: PointerEvent): ReturnType<typeof clampCursor> => {
+			const rect = canvasEl.getBoundingClientRect();
+			const { layout } = inlineLayout(canvasEl, documentModel, this.renderOptions());
+			return layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+		};
+
+		const applyInlineEdit = (): void => {
+			showInlineCaret = true;
+			renderInline();
+			if (isActiveKey(blockKey)) {
+				drawer.refreshLayout();
+				pendingInlineRefreshWhileActive = true;
+				return;
+			}
+			scheduleSave();
+		};
+
+		const onCanvasPointerDown = (event: PointerEvent): void => {
+			if (!selectMode) {
+				return;
+			}
+			event.preventDefault();
+			const cur = cursorAtEvent(event);
+			documentModel.meta.selection = { anchor: cur, focus: cur };
+			documentModel.meta.cursor = cur;
+			selecting = true;
+			try {
+				canvasEl.setPointerCapture(event.pointerId);
+			} catch {
+				/* capture is best-effort */
+			}
+			showInlineCaret = true;
+			renderInline();
+		};
+
+		const onCanvasPointerMove = (event: PointerEvent): void => {
+			if (!selectMode || !selecting) {
+				return;
+			}
+			event.preventDefault();
+			const focus = cursorAtEvent(event);
+			if (documentModel.meta.selection) {
+				documentModel.meta.selection.focus = focus;
+			}
+			documentModel.meta.cursor = focus;
+			renderInline();
+		};
+
+		const onCanvasPointerUp = (event: PointerEvent): void => {
+			if (!selectMode || !selecting) {
+				return;
+			}
+			event.preventDefault();
+			selecting = false;
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				documentModel.meta.selection = null; // a tap just places the cursor
+			}
+			renderInline();
+			scheduleSave();
+			if (isActiveKey(blockKey)) {
+				drawer.refreshLayout();
+			}
+		};
+
+		const onToggleSelect = (): void => {
+			selectMode = !selectMode;
+			canvasEl.style.touchAction = selectMode ? 'none' : '';
+			renderInline();
+		};
+
+		const onCopy = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			setClipboard(extractSelection(documentModel, documentModel.meta.selection!));
+			renderInline();
+		};
+
+		const onCut = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			setClipboard(extractSelection(documentModel, documentModel.meta.selection!));
+			deleteSelection(documentModel, documentModel.meta.selection!);
+			applyInlineEdit();
+		};
+
+		const onPaste = (): void => {
+			const clip = getClipboard();
+			if (fragmentIsEmpty(clip)) {
+				return;
+			}
+			insertFragmentAtCursor(documentModel, clip!);
+			applyInlineEdit();
+		};
+
 		const onCanvasClick = (event: MouseEvent): void => {
+			if (selectMode) {
+				return; // selection is handled by the pointer drag handlers
+			}
 			const rect = canvasEl.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) {
 				showInlineCaret = true;
@@ -247,6 +367,14 @@ export class InkBlockRegistry {
 		canvasEl.addEventListener('click', onCanvasClick);
 		canvasEl.addEventListener('dblclick', onCanvasDoubleClick);
 		canvasEl.addEventListener('keydown', onCanvasKeyDown);
+		canvasEl.addEventListener('pointerdown', onCanvasPointerDown);
+		canvasEl.addEventListener('pointermove', onCanvasPointerMove);
+		canvasEl.addEventListener('pointerup', onCanvasPointerUp);
+		canvasEl.addEventListener('pointercancel', onCanvasPointerUp);
+		selectButtonEl.addEventListener('click', onToggleSelect);
+		copyButtonEl.addEventListener('click', onCopy);
+		cutButtonEl.addEventListener('click', onCut);
+		pasteButtonEl.addEventListener('click', onPaste);
 		actionEl.addEventListener('click', onActionClick);
 		canvasEl.tabIndex = 0;
 
@@ -263,6 +391,14 @@ export class InkBlockRegistry {
 					canvasEl.removeEventListener('click', onCanvasClick);
 					canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
 					canvasEl.removeEventListener('keydown', onCanvasKeyDown);
+					canvasEl.removeEventListener('pointerdown', onCanvasPointerDown);
+					canvasEl.removeEventListener('pointermove', onCanvasPointerMove);
+					canvasEl.removeEventListener('pointerup', onCanvasPointerUp);
+					canvasEl.removeEventListener('pointercancel', onCanvasPointerUp);
+					selectButtonEl.removeEventListener('click', onToggleSelect);
+					copyButtonEl.removeEventListener('click', onCopy);
+					cutButtonEl.removeEventListener('click', onCut);
+					pasteButtonEl.removeEventListener('click', onPaste);
 					actionEl.removeEventListener('click', onActionClick);
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
