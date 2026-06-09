@@ -16,6 +16,21 @@
 	cursor: pointer;
 }
 
+/* Reading mode: a clean block of writing, no chrome. */
+.freeflow-ink-block.is-reading {
+	border: none;
+	border-radius: 0;
+	padding: 0;
+	background: transparent;
+	overflow: visible;
+}
+
+.freeflow-ink-block.is-reading .freeflow-ink-inline-canvas {
+	border: none;
+	border-radius: 0;
+	cursor: default;
+}
+
 .freeflow-ink-inline-canvas:focus-visible {
 	outline: 2px solid var(--interactive-accent);
 	outline-offset: 2px;

@@ -1,4 +1,5 @@
-import { Modal, Notice, Platform, Plugin } from 'obsidian';
+import { Editor, MarkdownView, Modal, Notice, Platform, Plugin } from 'obsidian';
+import { INK_CODE_BLOCK_LANGUAGE } from './ink/doc';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import {
@@ -50,6 +51,16 @@ export default class FreeFlowInkPlugin extends Plugin {
 			callback: () => {
 				this.resetPencilTimingSummary();
 			},
+		});
+		this.addCommand({
+			id: 'insert-freeflow-ink-block',
+			name: 'Insert handwriting block',
+			editorCallback: (editor) => {
+				this.insertInkBlockAtCursor(editor);
+			},
+		});
+		this.addRibbonIcon('pencil-line', 'New handwriting block', () => {
+			this.insertInkBlockFromRibbon();
 		});
 		const registry = new InkBlockRegistry(
 			this,
@@ -257,6 +268,24 @@ export default class FreeFlowInkPlugin extends Plugin {
 
 	private isIOSLikeDevice(): boolean {
 		return Platform.isIosApp;
+	}
+
+	private insertInkBlockFromRibbon(): void {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) {
+			new Notice('Open a note in edit mode to add a handwriting block.');
+			return;
+		}
+		this.insertInkBlockAtCursor(view.editor);
+	}
+
+	private insertInkBlockAtCursor(editor: Editor): void {
+		const cursor = editor.getCursor();
+		const onBlankLine = editor.getLine(cursor.line).trim().length === 0;
+		const prefix = onBlankLine ? '' : '\n';
+		// An empty body parses to an empty document, ready to write into.
+		const block = `${prefix}\`\`\`${INK_CODE_BLOCK_LANGUAGE}\n\n\`\`\`\n`;
+		editor.replaceSelection(block);
 	}
 }
 

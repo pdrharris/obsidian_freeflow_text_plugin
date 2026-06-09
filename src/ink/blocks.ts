@@ -89,6 +89,19 @@ export class InkBlockRegistry {
 		const isActiveKey = (value: string): boolean => this.activeKey === value;
 
 		const containerEl = el.createDiv({ cls: 'freeflow-ink-block' });
+		const parsed = this.parseWithError(source, containerEl);
+		if (!parsed) {
+			return;
+		}
+		const documentModel = parsed;
+		documentModel.meta.cursor = clampCursor(documentModel.meta.cursor, documentModel.lines);
+
+		// Reading mode (and previews/exports): render read-only, no chrome, no border.
+		if (el.closest('.markdown-source-view') === null) {
+			this.mountReadOnly(containerEl, documentModel, el, ctx);
+			return;
+		}
+
 		const section = toSectionInfoLike(ctx.getSectionInfo(el));
 		if (!section) {
 			containerEl.createDiv({
@@ -97,14 +110,6 @@ export class InkBlockRegistry {
 			});
 			return;
 		}
-
-		const parsed = this.parseWithError(source, containerEl);
-		if (!parsed) {
-			return;
-		}
-
-		const documentModel = parsed;
-		documentModel.meta.cursor = clampCursor(documentModel.meta.cursor, documentModel.lines);
 		let showInlineCaret = false;
 		let selectMode = false;
 		let selecting = false;
@@ -407,6 +412,29 @@ export class InkBlockRegistry {
 					if (isActiveKey(blockKey)) {
 						drawer.close();
 					}
+				}
+			})(el),
+		);
+	}
+
+	private mountReadOnly(
+		containerEl: HTMLDivElement,
+		documentModel: InkDocument,
+		el: HTMLElement,
+		ctx: MarkdownPostProcessorContext,
+	): void {
+		containerEl.classList.add('is-reading');
+		const canvasEl = containerEl.createEl('canvas', { cls: 'freeflow-ink-inline-canvas' });
+		const render = (): void => {
+			drawInlineCanvas(canvasEl, documentModel, this.renderOptions(), null, null);
+		};
+		render();
+		const resizeObserver = new ResizeObserver(() => render());
+		resizeObserver.observe(containerEl);
+		ctx.addChild(
+			new (class extends MarkdownRenderChild {
+				onunload(): void {
+					resizeObserver.disconnect();
 				}
 			})(el),
 		);

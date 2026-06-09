@@ -1,10 +1,13 @@
 // The floating writing drawer for the flowing-text ink model.
 //
-// The drawer is a writing surface: it renders the laid-out document (large "write big" glyphs,
-// no soft-wrap), scrolled to follow the cursor, and lets the user add strokes. Captured strokes
-// are converted to source coordinates and inserted into the logical tree via `edit.ts`; after
-// every change the layout engine recomputes geometry. There is no absolute-coordinate patching.
+// The drawer is a focused writing surface that mimics how people actually write: it shows ONLY
+// the current line and ONLY the content to the left of the insertion point, so new strokes
+// appear exactly where the pen is (an append-at-the-end feel). The view stays put on pen lift
+// (so you can dot an i / cross a t) and only advances horizontally — after a short delay — when
+// writing nears the right edge. Captured strokes are converted to source coordinates and
+// inserted into the logical tree via edit.ts.
 
+import { setIcon } from 'obsidian';
 import {
 	InkCursor,
 	InkDocument,
@@ -12,15 +15,12 @@ import {
 	clampCursor,
 	createStrokeId,
 	fragmentIsEmpty,
-	selectionIsEmpty,
 	wordBounds,
 } from './doc';
-import { getClipboard, setClipboard } from './clipboard';
+import { getClipboard } from './clipboard';
 import {
 	appendStrokeToCurrentWord,
-	deleteSelection,
 	eraseAtCursor,
-	extractSelection,
 	insertFragmentAtCursor,
 	insertWordAtCursor,
 	splitLineAtCursor,
@@ -31,6 +31,9 @@ import { drawLaidStroke, resizeCanvasForDpr } from './render';
 
 const BACKDROP_CLOSE_GUARD_MS = 420;
 const MIN_POINT_DISTANCE_SQ = 0.35;
+const ADVANCE_DELAY_MS = 650; // delay before the view scrolls on, so you can add dots/crosses
+const ADVANCE_SOFT_RATIO = 0.8; // schedule an advance once the caret passes this fraction of width
+const ADVANCE_HARD_RATIO = 0.85; // advance immediately on the next pen-down past this fraction
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
@@ -63,15 +66,17 @@ interface ActivePoint {
 	time: number;
 }
 
+interface DrawerView {
+	layout: LayoutResult;
+	viewCursor: InkCursor;
+}
+
 export class InkDrawer {
 	private readonly getRuntimeConfig: () => DrawerRuntimeConfig;
 	private readonly rootEl: HTMLDivElement;
 	private readonly sheetEl: HTMLDivElement;
 	private readonly canvasEl: HTMLCanvasElement;
 	private readonly statusEl: HTMLDivElement;
-	private readonly selectButtonEl: HTMLButtonElement;
-	private readonly copyButtonEl: HTMLButtonElement;
-	private readonly cutButtonEl: HTMLButtonElement;
 	private readonly pasteButtonEl: HTMLButtonElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
@@ -80,12 +85,11 @@ export class InkDrawer {
 	private session: DrawerSession | null = null;
 	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
-	private tool: 'pen' | 'select' = 'pen';
-	private selecting = false;
 	private scrollX = 0;
 	private scrollY = 0;
 	private redrawQueued = false;
 	private lastInteractionAt = 0;
+	private advanceTimer = 0;
 
 	constructor(getRuntimeConfig: () => DrawerRuntimeConfig) {
 		this.getRuntimeConfig = getRuntimeConfig;
@@ -103,20 +107,19 @@ export class InkDrawer {
 
 		const rightButtons = activeDocument.createElement('div');
 		rightButtons.className = 'freeflow-ink-drawer-buttons';
-		const makeButton = (label: string): HTMLButtonElement => {
+		const makeIconButton = (icon: string, label: string): HTMLButtonElement => {
 			const btn = activeDocument.createElement('button');
 			btn.type = 'button';
 			btn.className = 'freeflow-ink-drawer-btn';
-			btn.textContent = label;
+			btn.setAttribute('aria-label', label);
+			btn.title = label;
+			setIcon(btn, icon);
 			rightButtons.appendChild(btn);
 			return btn;
 		};
-		this.selectButtonEl = makeButton('Select');
-		this.copyButtonEl = makeButton('Copy');
-		this.cutButtonEl = makeButton('Cut');
-		this.pasteButtonEl = makeButton('Paste');
-		this.eraseButtonEl = makeButton('Erase');
-		this.newLineButtonEl = makeButton('New line');
+		this.eraseButtonEl = makeIconButton('eraser', 'Erase');
+		this.newLineButtonEl = makeIconButton('corner-down-left', 'New line');
+		this.pasteButtonEl = makeIconButton('clipboard-paste', 'Paste');
 
 		const topBar = activeDocument.createElement('div');
 		topBar.className = 'freeflow-ink-drawer-top';
@@ -142,6 +145,7 @@ export class InkDrawer {
 	destroy(): void {
 		this.close();
 		this.detachListeners();
+		this.clearAdvanceTimer();
 		this.rootEl.remove();
 	}
 
@@ -157,10 +161,9 @@ export class InkDrawer {
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		this.activeStroke = null;
 		this.activePointerId = null;
-		this.tool = 'pen';
-		this.selecting = false;
+		this.clearAdvanceTimer();
 		this.rootEl.classList.add('is-open');
-		this.updateScrollToCursor();
+		this.resetScrollX();
 		this.requestDraw();
 	}
 
@@ -170,7 +173,7 @@ export class InkDrawer {
 		}
 		this.session.doc.meta.cursor = clampCursor(cursor, this.session.doc.lines);
 		this.session.doc.meta.selection = null;
-		this.updateScrollToCursor();
+		this.resetScrollX();
 		this.session.onCursorChanged();
 		this.requestDraw();
 	}
@@ -180,44 +183,102 @@ export class InkDrawer {
 			return;
 		}
 		this.finishStroke();
+		this.clearAdvanceTimer();
 		const closing = this.session;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
 		closing.onClose();
 	}
 
-	// ----------------------------------------------------------------- layout
+	// ----------------------------------------------------------------- view
 
-	private drawerLayout(): LayoutResult | null {
+	// Builds a one-line view document containing only the words before the cursor, so the drawer
+	// shows just the current line up to the insertion point.
+	private drawerView(): DrawerView | null {
 		const session = this.session;
 		if (!session) {
 			return null;
 		}
+		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
+		const line = session.doc.lines[cursor.line];
+		const words = line ? line.words.slice(0, cursor.word) : [];
+		const viewDoc: InkDocument = {
+			version: session.doc.version,
+			meta: {
+				lineHeight: session.doc.meta.lineHeight,
+				cursor: { line: 0, word: words.length },
+				selection: null,
+			},
+			lines: [{ id: line?.id ?? 'view', words }],
+		};
 		const rect = this.canvasEl.getBoundingClientRect();
 		const cssHeight = rect.height || this.canvasEl.clientHeight || 200;
-		const config = this.getRuntimeConfig();
 		const targetLineHeight = clamp(cssHeight * 0.5, 40, 240);
-		return layoutDocument(session.doc, {
-			contentWidthCss: Number.POSITIVE_INFINITY, // drawer never soft-wraps; it scrolls
+		const layout = layoutDocument(viewDoc, {
+			contentWidthCss: Number.POSITIVE_INFINITY, // drawer never wraps; it scrolls horizontally
 			targetLineHeightCss: targetLineHeight,
 			sourceLineHeight: session.doc.meta.lineHeight,
-			wordGapScale: config.wordGapScale,
+			wordGapScale: this.getRuntimeConfig().wordGapScale,
 			strokeFillScale: 1,
 		});
+		return { layout, viewCursor: { line: 0, word: words.length } };
 	}
 
-	private updateScrollToCursor(): void {
-		const session = this.session;
-		const layout = this.drawerLayout();
-		if (!session || !layout) {
+	private canvasSize(): { width: number; height: number } {
+		const rect = this.canvasEl.getBoundingClientRect();
+		return {
+			width: rect.width || this.canvasEl.clientWidth || 480,
+			height: rect.height || this.canvasEl.clientHeight || 200,
+		};
+	}
+
+	// Position the line start sensibly: from the left if it fits, otherwise keep the caret in view.
+	private resetScrollX(): void {
+		const view = this.drawerView();
+		if (!view) {
 			return;
 		}
-		const rect = this.canvasEl.getBoundingClientRect();
-		const width = rect.width || this.canvasEl.clientWidth || 480;
-		const height = rect.height || this.canvasEl.clientHeight || 200;
-		const caret = layout.caretRect(session.doc.meta.cursor);
-		this.scrollX = Math.max(-layout.marginX, caret.x - width * 0.32);
-		this.scrollY = caret.baselineY - height * 0.62;
+		const { width } = this.canvasSize();
+		const caret = view.layout.caretRect(view.viewCursor);
+		this.scrollX = caret.x <= width * 0.7 ? 0 : caret.x - width * 0.5;
+	}
+
+	private caretLocalX(view: DrawerView): number {
+		return view.layout.caretRect(view.viewCursor).x - this.scrollX;
+	}
+
+	private clearAdvanceTimer(): void {
+		if (this.advanceTimer) {
+			window.clearTimeout(this.advanceTimer);
+			this.advanceTimer = 0;
+		}
+	}
+
+	private scheduleAdvanceIfNeeded(): void {
+		const view = this.drawerView();
+		if (!view) {
+			return;
+		}
+		const { width } = this.canvasSize();
+		if (this.caretLocalX(view) <= width * ADVANCE_SOFT_RATIO) {
+			return;
+		}
+		this.clearAdvanceTimer();
+		this.advanceTimer = window.setTimeout(() => {
+			this.advanceTimer = 0;
+			this.advanceView();
+		}, ADVANCE_DELAY_MS);
+	}
+
+	private advanceView(): void {
+		const view = this.drawerView();
+		if (!view) {
+			return;
+		}
+		const { width } = this.canvasSize();
+		const caret = view.layout.caretRect(view.viewCursor);
+		this.scrollX = Math.max(0, caret.x - width * 0.4);
+		this.requestDraw();
 	}
 
 	// ----------------------------------------------------------------- drawing
@@ -235,13 +296,13 @@ export class InkDrawer {
 
 	private draw(): void {
 		const session = this.session;
-		const layout = this.drawerLayout();
-		if (!session || !layout) {
+		const view = this.drawerView();
+		if (!session || !view) {
 			return;
 		}
-		const rect = this.canvasEl.getBoundingClientRect();
-		const cssWidth = Math.floor(rect.width || this.canvasEl.clientWidth);
-		const cssHeight = Math.floor(rect.height || this.canvasEl.clientHeight);
+		const { width: cssWidthRaw, height: cssHeightRaw } = this.canvasSize();
+		const cssWidth = Math.floor(cssWidthRaw);
+		const cssHeight = Math.floor(cssHeightRaw);
 		if (cssWidth <= 0 || cssHeight <= 0) {
 			return;
 		}
@@ -250,23 +311,17 @@ export class InkDrawer {
 		if (!ctx) {
 			return;
 		}
+
+		const caret = view.layout.caretRect(view.viewCursor);
+		// Vertical placement is fixed (single line) so it never jumps between strokes.
+		this.scrollY = caret.baselineY - cssHeight * 0.62;
+
 		const dpr = Math.max(1, window.devicePixelRatio || 1);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, cssWidth, cssHeight);
 		ctx.fillStyle = '#ffffff';
 		ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-		// Selection highlight (behind the strokes).
-		const selection = session.doc.meta.selection;
-		if (selection && !selectionIsEmpty(selection)) {
-			ctx.fillStyle = 'rgba(37, 99, 235, 0.18)';
-			for (const r of layout.rangeRects(selection)) {
-				ctx.fillRect(r.x - this.scrollX, r.y - this.scrollY, r.w, r.h);
-			}
-		}
-
-		// Baseline guide for the cursor's row.
-		const caret = layout.caretRect(session.doc.meta.cursor);
 		if (this.getRuntimeConfig().showWritingLine) {
 			const baselineLocalY = caret.baselineY - this.scrollY;
 			ctx.strokeStyle = '#a5b4c6';
@@ -277,8 +332,8 @@ export class InkDrawer {
 			ctx.stroke();
 		}
 
-		const widthScale = layout.cssPerSource;
-		for (const word of layout.words) {
+		const widthScale = view.layout.cssPerSource;
+		for (const word of view.layout.words) {
 			for (const laid of word.strokes) {
 				const points = laid.points.map((p) => ({ x: p.x - this.scrollX, y: p.y - this.scrollY }));
 				const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
@@ -286,7 +341,7 @@ export class InkDrawer {
 			}
 		}
 
-		// Caret.
+		// Caret at the insertion point (right end of the shown content).
 		ctx.strokeStyle = '#2563eb';
 		ctx.lineWidth = 2;
 		ctx.beginPath();
@@ -294,7 +349,7 @@ export class InkDrawer {
 		ctx.lineTo(caret.x - this.scrollX, caret.y + caret.height - this.scrollY);
 		ctx.stroke();
 
-		// Active (in-progress) stroke, drawn raw in canvas space.
+		// Active (in-progress) stroke, drawn raw where the pen is.
 		if (this.activeStroke && this.activeStroke.length > 0) {
 			drawLaidStroke(
 				ctx,
@@ -304,7 +359,7 @@ export class InkDrawer {
 			);
 		}
 
-		this.updateToolUi();
+		this.pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
 	}
 
 	// ----------------------------------------------------------------- input
@@ -314,12 +369,9 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
 		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.addEventListener('pointercancel', this.onPointerUp);
-		this.selectButtonEl.addEventListener('click', this.onToggleSelect);
-		this.copyButtonEl.addEventListener('click', this.onCopy);
-		this.cutButtonEl.addEventListener('click', this.onCut);
-		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.eraseButtonEl.addEventListener('click', this.onErase);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
+		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
 		this.rootEl.addEventListener('pointerdown', this.onBackdropPointerDown);
 	}
@@ -329,29 +381,28 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
 		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerUp);
-		this.selectButtonEl.removeEventListener('click', this.onToggleSelect);
-		this.copyButtonEl.removeEventListener('click', this.onCopy);
-		this.cutButtonEl.removeEventListener('click', this.onCut);
-		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.eraseButtonEl.removeEventListener('click', this.onErase);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
+		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
 	}
 
-	private acceptsPointer(_event: PointerEvent): boolean {
-		// Accept pen, mouse and touch on every platform (Android/iOS/desktop). The drawer is an
-		// explicit writing surface, and the single-active-pointer guard ignores extra touches,
-		// giving basic palm rejection.
-		return true;
-	}
-
 	private onPointerDown = (event: PointerEvent): void => {
-		if (!this.session || this.activePointerId !== null || !this.acceptsPointer(event)) {
+		if (!this.session || this.activePointerId !== null) {
 			return;
 		}
 		event.preventDefault();
 		this.lastInteractionAt = Date.now();
+
+		// If a delayed advance is pending and the caret is already near the edge, advance now so
+		// there's room; otherwise cancel it (the user is staying put, e.g. dotting an i).
+		const view = this.drawerView();
+		this.clearAdvanceTimer();
+		if (view && this.caretLocalX(view) > this.canvasSize().width * ADVANCE_HARD_RATIO) {
+			this.advanceView();
+		}
+
 		this.activePointerId = event.pointerId;
 		if (this.getRuntimeConfig().usePointerCapture) {
 			try {
@@ -360,15 +411,7 @@ export class InkDrawer {
 				/* iOS can reject capture during fast pen input */
 			}
 		}
-		if (this.tool === 'select') {
-			this.selecting = true;
-			const cursor = this.pointerToCursor(event);
-			this.session.doc.meta.selection = { anchor: cursor, focus: cursor };
-			this.session.doc.meta.cursor = cursor;
-			this.requestDraw();
-			return;
-		}
-		// Pen: starting a stroke clears any selection.
+		// Starting to write clears any selection carried over from the rendered view.
 		this.session.doc.meta.selection = null;
 		this.activeStroke = [];
 		this.appendActivePoint(event);
@@ -376,25 +419,10 @@ export class InkDrawer {
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
-		if (this.activePointerId !== event.pointerId) {
+		if (this.activePointerId !== event.pointerId || !this.activeStroke) {
 			return;
 		}
 		event.preventDefault();
-		if (this.tool === 'select') {
-			if (this.selecting && this.session) {
-				const focus = this.pointerToCursor(event);
-				const sel = this.session.doc.meta.selection;
-				if (sel) {
-					sel.focus = focus;
-				}
-				this.session.doc.meta.cursor = focus;
-				this.requestDraw();
-			}
-			return;
-		}
-		if (!this.activeStroke) {
-			return;
-		}
 		const samples =
 			typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
 		for (const sample of samples.length > 0 ? samples : [event]) {
@@ -416,34 +444,8 @@ export class InkDrawer {
 				/* ignore */
 			}
 		}
-		if (this.tool === 'select') {
-			this.activePointerId = null;
-			this.selecting = false;
-			const session = this.session;
-			if (session) {
-				// A tap (empty selection) just places the cursor.
-				if (selectionIsEmpty(session.doc.meta.selection)) {
-					session.doc.meta.selection = null;
-				}
-				this.updateScrollToCursor();
-				session.onCursorChanged();
-			}
-			this.requestDraw();
-			return;
-		}
 		this.finishStroke();
 	};
-
-	private pointerToCursor(event: PointerEvent): InkCursor {
-		const layout = this.drawerLayout();
-		if (!layout) {
-			return { line: 0, word: 0 };
-		}
-		const rect = this.canvasEl.getBoundingClientRect();
-		const lx = event.clientX - rect.left + this.scrollX;
-		const ly = event.clientY - rect.top + this.scrollY;
-		return layout.cursorFromPoint(lx, ly);
-	}
 
 	private appendActivePoint(event: PointerEvent): void {
 		if (!this.activeStroke) {
@@ -482,14 +484,15 @@ export class InkDrawer {
 			this.requestDraw();
 			return;
 		}
-		const layout = this.drawerLayout();
-		if (!layout) {
+		const view = this.drawerView();
+		if (!view) {
 			return;
 		}
+		const layout = view.layout;
 		const cssPerSource = layout.cssPerSource || 1;
 		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 
-		// Layout-space positions of the captured points.
+		// Captured points in the view's layout space.
 		const layoutPoints = active.map((p) => ({
 			lx: p.x + this.scrollX,
 			ly: p.y + this.scrollY,
@@ -501,10 +504,8 @@ export class InkDrawer {
 			if (p.lx < strokeMinX) strokeMinX = p.lx;
 		}
 
-		// Decide: continue the current word, or start a new word at the cursor.
-		const currentWordLaid = layout.words.find(
-			(w) => w.line === cursor.line && w.word === cursor.word - 1,
-		);
+		// Continue the current (last shown) word if the new stroke is close to it; else new word.
+		const currentWordLaid = layout.words.find((w) => w.word === view.viewCursor.word - 1);
 		const currentWord = session.doc.lines[cursor.line]?.words[cursor.word - 1];
 		const gapThreshold = layout.rowHeight * 0.6;
 		const continueWord =
@@ -521,7 +522,7 @@ export class InkDrawer {
 			baselineY = currentWordLaid.baselineY;
 			sourceOriginX = bounds ? bounds.minX : 0;
 		} else {
-			const caret = layout.caretRect(cursor);
+			const caret = layout.caretRect(view.viewCursor);
 			originX = caret.x;
 			baselineY = caret.baselineY;
 			sourceOriginX = 0;
@@ -545,40 +546,13 @@ export class InkDrawer {
 		} else {
 			insertWordAtCursor(session.doc, wordFromStroke(stroke));
 		}
-		this.updateScrollToCursor();
+		// Don't jump the view on lift-off; only advance (after a delay) if we've neared the edge.
+		this.scheduleAdvanceIfNeeded();
 		session.onContentChanged();
 		this.requestDraw();
 	}
 
 	// ----------------------------------------------------------------- buttons
-
-	private onToggleSelect = (): void => {
-		this.tool = this.tool === 'select' ? 'pen' : 'select';
-		this.selecting = false;
-		this.requestDraw();
-	};
-
-	private onCopy = (): void => {
-		const session = this.session;
-		if (!session || selectionIsEmpty(session.doc.meta.selection)) {
-			return;
-		}
-		setClipboard(extractSelection(session.doc, session.doc.meta.selection!));
-		this.requestDraw();
-	};
-
-	private onCut = (): void => {
-		const session = this.session;
-		if (!session || selectionIsEmpty(session.doc.meta.selection)) {
-			return;
-		}
-		setClipboard(extractSelection(session.doc, session.doc.meta.selection!));
-		deleteSelection(session.doc, session.doc.meta.selection!);
-		this.tool = 'pen';
-		this.updateScrollToCursor();
-		session.onContentChanged();
-		this.requestDraw();
-	};
 
 	private onPaste = (): void => {
 		const session = this.session;
@@ -587,19 +561,10 @@ export class InkDrawer {
 			return;
 		}
 		insertFragmentAtCursor(session.doc, clip!);
-		this.updateScrollToCursor();
+		this.resetScrollX();
 		session.onContentChanged();
 		this.requestDraw();
 	};
-
-	private updateToolUi(): void {
-		const hasSelection = !!this.session && !selectionIsEmpty(this.session.doc.meta.selection);
-		this.selectButtonEl.classList.toggle('is-active', this.tool === 'select');
-		this.copyButtonEl.disabled = !hasSelection;
-		this.cutButtonEl.disabled = !hasSelection;
-		this.pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
-		this.statusEl.textContent = this.tool === 'select' ? 'Select' : 'Pen';
-	}
 
 	private onErase = (): void => {
 		const session = this.session;
@@ -607,7 +572,7 @@ export class InkDrawer {
 			return;
 		}
 		eraseAtCursor(session.doc);
-		this.updateScrollToCursor();
+		this.resetScrollX();
 		session.onContentChanged();
 		this.requestDraw();
 	};
@@ -618,7 +583,7 @@ export class InkDrawer {
 			return;
 		}
 		splitLineAtCursor(session.doc);
-		this.updateScrollToCursor();
+		this.resetScrollX();
 		session.onContentChanged();
 		this.requestDraw();
 	};
@@ -637,19 +602,19 @@ export class InkDrawer {
 		this.close();
 	};
 
-	// ----------------------------------------------------------------- diagnostics (kept for the command palette)
+	// ----------------------------------------------------------------- diagnostics (command palette)
 
 	runBasicDiagnostics(): InkDiagnosticResult[] {
-		const results: InkDiagnosticResult[] = [];
 		const doc = this.session?.doc;
-		results.push({
-			name: 'layout-engine',
-			pass: true,
-			detail: doc
-				? `lines=${doc.lines.length}, cursor=${doc.meta.cursor.line}:${doc.meta.cursor.word}`
-				: 'no active session',
-		});
-		return results;
+		return [
+			{
+				name: 'layout-engine',
+				pass: true,
+				detail: doc
+					? `lines=${doc.lines.length}, cursor=${doc.meta.cursor.line}:${doc.meta.cursor.word}`
+					: 'no active session',
+			},
+		];
 	}
 
 	getPencilTimingSummary(): string {
