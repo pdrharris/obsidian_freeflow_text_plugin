@@ -1,0 +1,276 @@
+// Headless tests for the pure logic of the flowing-text ink model: doc, edit, layout.
+// These modules have no DOM/Obsidian dependencies, so they run in plain Node (bundled by
+// esbuild via `npm test`). They lock down parse/serialize, the editing splices, and layout
+// hit-testing so they cannot regress as selection/copy-paste are added.
+
+import {
+	INK_DOC_VERSION,
+	InkDocument,
+	InkPoint,
+	InkStroke,
+	InkWord,
+	clampCursor,
+	createEmptyDocument,
+	orderCursors,
+	parseInkDocument,
+	serializeInkDocument,
+	wordBounds,
+} from '../src/ink/doc';
+import {
+	appendStrokeToCurrentWord,
+	deleteSelection,
+	eraseAtCursor,
+	insertWordAtCursor,
+	splitLineAtCursor,
+	wordFromStroke,
+} from '../src/ink/edit';
+import { layoutDocument } from '../src/ink/layout';
+
+let passed = 0;
+let failed = 0;
+
+function test(name: string, fn: () => void): void {
+	try {
+		fn();
+		passed += 1;
+	} catch (error) {
+		failed += 1;
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`FAIL  ${name}\n      ${message}`);
+	}
+}
+
+function ok(cond: boolean, msg: string): void {
+	if (!cond) {
+		throw new Error(msg);
+	}
+}
+
+function eq(actual: unknown, expected: unknown, msg = ''): void {
+	const a = JSON.stringify(actual);
+	const b = JSON.stringify(expected);
+	if (a !== b) {
+		throw new Error(`${msg} expected ${b} got ${a}`);
+	}
+}
+
+// ---- builders -------------------------------------------------------------
+
+function pt(x: number, y: number): InkPoint {
+	return { x, y, pressure: 0.5, time: 0 };
+}
+function stroke(id: string, points: InkPoint[]): InkStroke {
+	return { id, points, width: 3, color: '#111827' };
+}
+function word(id: string, ...strokes: InkStroke[]): InkWord {
+	return { id, strokes };
+}
+function mkDoc(words0: InkWord[], words1: InkWord[] = []): InkDocument {
+	const lines = [{ id: 'l0', words: words0 }];
+	if (words1.length > 0) {
+		lines.push({ id: 'l1', words: words1 });
+	}
+	return {
+		version: INK_DOC_VERSION,
+		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+		lines,
+	};
+}
+const W = (id: string) => word(id, stroke(`${id}s`, [pt(0, -40), pt(40, 0)]));
+
+// ---- doc.ts ---------------------------------------------------------------
+
+test('createEmptyDocument: one empty line, cursor 0/0', () => {
+	const d = createEmptyDocument();
+	eq(d.lines.length, 1);
+	eq(d.lines[0]?.words.length, 0);
+	eq(d.meta.cursor, { line: 0, word: 0 });
+});
+
+test('serialize -> parse round-trips structure', () => {
+	const d = mkDoc([W('a'), W('b')], [W('c')]);
+	const back = parseInkDocument(serializeInkDocument(d));
+	eq(back.version, INK_DOC_VERSION);
+	eq(back.lines.length, 2);
+	eq(back.lines[0]?.words.length, 2);
+	eq(back.lines[1]?.words.length, 1);
+	eq(back.lines[0]?.words[0]?.strokes[0]?.points[1], pt(40, 0));
+});
+
+test('parse rejects v1 documents', () => {
+	let threw = false;
+	try {
+		parseInkDocument('{"version":1,"strokes":[]}');
+	} catch {
+		threw = true;
+	}
+	ok(threw, 'expected parse to throw on version 1');
+});
+
+test('parse empty string -> empty doc', () => {
+	const d = parseInkDocument('   ');
+	eq(d.lines.length, 1);
+	eq(d.lines[0]?.words.length, 0);
+});
+
+test('parse drops empty words/strokes', () => {
+	const d = parseInkDocument(
+		JSON.stringify({
+			version: 2,
+			meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+			lines: [{ id: 'l0', words: [{ id: 'w', strokes: [{ id: 's', points: [] }] }] }],
+		}),
+	);
+	eq(d.lines[0]?.words.length, 0, 'word with only empty strokes should be dropped');
+});
+
+test('wordBounds spans all strokes', () => {
+	const w = word('w', stroke('a', [pt(0, -10), pt(10, 0)]), stroke('b', [pt(20, -30), pt(30, 5)]));
+	eq(wordBounds(w), { minX: 0, maxX: 30, minY: -30, maxY: 5 });
+});
+
+test('orderCursors returns document order', () => {
+	eq(orderCursors({ line: 1, word: 0 }, { line: 0, word: 3 }), [
+		{ line: 0, word: 3 },
+		{ line: 1, word: 0 },
+	]);
+});
+
+test('clampCursor clamps line and word', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	eq(clampCursor({ line: 9, word: 9 }, d.lines), { line: 0, word: 2 });
+	eq(clampCursor({ line: -3, word: -3 }, d.lines), { line: 0, word: 0 });
+});
+
+// ---- edit.ts --------------------------------------------------------------
+
+test('insertWordAtCursor inserts and advances cursor', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	d.meta.cursor = { line: 0, word: 1 };
+	const next = insertWordAtCursor(d, W('x'));
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'x', 'b']);
+	eq(next, { line: 0, word: 2 });
+});
+
+test('appendStrokeToCurrentWord adds to the word before the cursor', () => {
+	const d = mkDoc([W('a')]);
+	d.meta.cursor = { line: 0, word: 1 };
+	const did = appendStrokeToCurrentWord(d, stroke('extra', [pt(0, 0)]));
+	ok(did, 'expected append to succeed');
+	eq(d.lines[0]?.words[0]?.strokes.length, 2);
+});
+
+test('appendStrokeToCurrentWord fails at line start', () => {
+	const d = mkDoc([W('a')]);
+	d.meta.cursor = { line: 0, word: 0 };
+	eq(appendStrokeToCurrentWord(d, stroke('extra', [pt(0, 0)])), false);
+});
+
+test('splitLineAtCursor splits the line and moves to the new line', () => {
+	const d = mkDoc([W('a'), W('b'), W('c')]);
+	d.meta.cursor = { line: 0, word: 1 };
+	const next = splitLineAtCursor(d);
+	eq(d.lines.length, 2);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a']);
+	eq(d.lines[1]?.words.map((w) => w.id), ['b', 'c']);
+	eq(next, { line: 1, word: 0 });
+});
+
+test('eraseAtCursor deletes the word before the cursor', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	d.meta.cursor = { line: 0, word: 2 };
+	const next = eraseAtCursor(d);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a']);
+	eq(next, { line: 0, word: 1 });
+});
+
+test('eraseAtCursor at line start joins with the previous line', () => {
+	const d = mkDoc([W('a')], [W('b'), W('c')]);
+	d.meta.cursor = { line: 1, word: 0 };
+	const next = eraseAtCursor(d);
+	eq(d.lines.length, 1);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'b', 'c']);
+	eq(next, { line: 0, word: 1 }, 'cursor should land at the join point');
+});
+
+test('deleteSelection removes a same-line word range', () => {
+	const d = mkDoc([W('a'), W('b'), W('c'), W('d')]);
+	d.meta.selection = { anchor: { line: 0, word: 1 }, focus: { line: 0, word: 3 } };
+	const next = deleteSelection(d, d.meta.selection);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'd']);
+	eq(next, { line: 0, word: 1 });
+	eq(d.meta.selection, null);
+});
+
+test('deleteSelection merges across lines', () => {
+	const d = mkDoc([W('a'), W('b')], [W('c'), W('d')]);
+	const sel = { anchor: { line: 0, word: 1 }, focus: { line: 1, word: 1 } };
+	const next = deleteSelection(d, sel);
+	eq(d.lines.length, 1);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'd']);
+	eq(next, { line: 0, word: 1 });
+});
+
+test('wordFromStroke wraps a stroke into a single-stroke word', () => {
+	const w = wordFromStroke(stroke('s', [pt(0, 0)]));
+	eq(w.strokes.length, 1);
+});
+
+// ---- layout.ts ------------------------------------------------------------
+
+const layoutConfig = {
+	contentWidthCss: Number.POSITIVE_INFINITY,
+	targetLineHeightCss: 30,
+	sourceLineHeight: 180,
+	wordGapScale: 1,
+	strokeFillScale: 1,
+};
+
+test('layoutDocument places every word on the cursor line', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	const layout = layoutDocument(d, layoutConfig);
+	eq(layout.words.length, 2);
+	ok(
+		layout.words.every((w) => w.visualRow === 0),
+		'both words should be on visual row 0 (no wrap)',
+	);
+	ok((layout.words[1]?.x ?? 0) > (layout.words[0]?.x ?? 0), 'second word should be to the right');
+});
+
+test('caretRect advances to the right as the cursor moves through words', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	const layout = layoutDocument(d, layoutConfig);
+	const c0 = layout.caretRect({ line: 0, word: 0 });
+	const c2 = layout.caretRect({ line: 0, word: 2 });
+	ok(c2.x > c0.x, 'caret at end should be right of caret at start');
+});
+
+test('cursorFromPoint maps far-left/far-right clicks to word slots', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	const layout = layoutDocument(d, layoutConfig);
+	const midY = layout.rowHeight * 0.5;
+	eq(layout.cursorFromPoint(-100, midY), { line: 0, word: 0 });
+	eq(layout.cursorFromPoint(100000, midY), { line: 0, word: 2 });
+});
+
+test('cursorFromPoint resolves the second line by Y', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	const layout = layoutDocument(d, layoutConfig);
+	const secondRowY = layout.rowHeight * 1.5;
+	eq(layout.cursorFromPoint(-100, secondRowY).line, 1);
+});
+
+test('rangeRects returns one rect per visual row for a same-line selection', () => {
+	const d = mkDoc([W('a'), W('b'), W('c')]);
+	const layout = layoutDocument(d, layoutConfig);
+	const rects = layout.rangeRects({ anchor: { line: 0, word: 0 }, focus: { line: 0, word: 2 } });
+	eq(rects.length, 1);
+	ok((rects[0]?.w ?? 0) > 0, 'selection rect should have width');
+});
+
+// ---- report ---------------------------------------------------------------
+
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) {
+	process.exit(1);
+}
