@@ -1,5 +1,5 @@
 import { App, TFile } from 'obsidian';
-import { INK_CODE_BLOCK_LANGUAGE } from './model';
+import { INK_CODE_BLOCK_LANGUAGE } from './doc';
 
 export interface SectionInfoLike {
 	lineStart: number;

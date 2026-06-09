@@ -1,4 +1,5 @@
-import { Modal, Notice, Platform, Plugin } from 'obsidian';
+import { Editor, MarkdownView, Modal, Notice, Platform, Plugin } from 'obsidian';
+import { INK_CODE_BLOCK_LANGUAGE } from './ink/doc';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import {
@@ -51,6 +52,16 @@ export default class FreeFlowInkPlugin extends Plugin {
 				this.resetPencilTimingSummary();
 			},
 		});
+		this.addCommand({
+			id: 'insert-freeflow-ink-block',
+			name: 'Insert handwriting block',
+			editorCallback: (editor) => {
+				this.insertInkBlockAtCursor(editor);
+			},
+		});
+		this.addRibbonIcon('pencil-line', 'New handwriting block', () => {
+			this.insertInkBlockFromRibbon();
+		});
 		const registry = new InkBlockRegistry(
 			this,
 			this.drawer,
@@ -97,6 +108,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			wordGapScale: this.getWordGapScale(),
 			idleAdvanceMs: this.settings.idleAdvanceMs,
 			releaseAdvanceDelayMs: this.settings.releaseAdvanceDelayMs,
+			advanceTriggerRatio: clamp(this.settings.advanceLinePosition, 50, 95) / 100,
 			showWritingLine: this.settings.showWritingLine,
 			usePointerCapture: !iosLike,
 			allowAnyNonMousePointer: iosLike,
@@ -197,6 +209,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			0,
 			1200,
 		);
+		this.settings.advanceLinePosition = clamp(Math.round(this.settings.advanceLinePosition), 50, 95);
 		if (this.settings.hardBlockLimitKb <= this.settings.softBlockLimitKb) {
 			this.settings.hardBlockLimitKb = Math.min(16000, this.settings.softBlockLimitKb + 256);
 		}
@@ -257,6 +270,24 @@ export default class FreeFlowInkPlugin extends Plugin {
 
 	private isIOSLikeDevice(): boolean {
 		return Platform.isIosApp;
+	}
+
+	private insertInkBlockFromRibbon(): void {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) {
+			new Notice('Open a note in edit mode to add a handwriting block.');
+			return;
+		}
+		this.insertInkBlockAtCursor(view.editor);
+	}
+
+	private insertInkBlockAtCursor(editor: Editor): void {
+		const cursor = editor.getCursor();
+		const onBlankLine = editor.getLine(cursor.line).trim().length === 0;
+		const prefix = onBlankLine ? '' : '\n';
+		// An empty body parses to an empty document, ready to write into.
+		const block = `${prefix}\`\`\`${INK_CODE_BLOCK_LANGUAGE}\n\n\`\`\`\n`;
+		editor.replaceSelection(block);
 	}
 }
 

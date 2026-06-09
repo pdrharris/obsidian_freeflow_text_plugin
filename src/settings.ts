@@ -9,6 +9,7 @@ export interface FreeFlowInkSettings {
 	drawerHeightScale: number;
 	idleAdvanceMs: number;
 	releaseAdvanceDelayMs: number;
+	advanceLinePosition: number;
 	showWritingLine: boolean;
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
@@ -23,6 +24,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	drawerHeightScale: 1,
 	idleAdvanceMs: 2000,
 	releaseAdvanceDelayMs: 260,
+	advanceLinePosition: 85,
 	showWritingLine: true,
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
@@ -208,6 +210,9 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		const releaseAdvanceDelayValueEl = createDiv();
 		releaseAdvanceDelayValueEl.addClass('freeflow-ink-settings-value');
 		releaseAdvanceDelayValueEl.setText(`${this.plugin.settings.releaseAdvanceDelayMs} ms`);
+		const advanceLineValueEl = createDiv();
+		advanceLineValueEl.addClass('freeflow-ink-settings-value');
+		advanceLineValueEl.setText(`${this.plugin.settings.advanceLinePosition}%`);
 
 		new Setting(containerEl)
 			.setName('Show writing line')
@@ -258,6 +263,24 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 					}),
 			)
 			.controlEl.appendChild(releaseAdvanceDelayValueEl);
+
+		new Setting(containerEl)
+			.setName('Edge line position')
+			.setDesc(
+				'Where the dotted orange "near the right edge" guide sits in the drawer. Past this line, writing advances after the shorter (edge) delay; before it, only after the longer (pause) delay.',
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(50, 95, 1)
+					.setValue(this.plugin.settings.advanceLinePosition)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.advanceLinePosition = value;
+						advanceLineValueEl.setText(`${value}%`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(advanceLineValueEl);
 
 		new Setting(containerEl).setName('Block size guardrails').setHeading();
 

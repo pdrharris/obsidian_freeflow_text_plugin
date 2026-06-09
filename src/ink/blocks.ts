@@ -1,26 +1,23 @@
 import {
 	MarkdownPostProcessorContext,
 	MarkdownRenderChild,
+	MarkdownView,
 	Notice,
 	Plugin,
 } from 'obsidian';
 import { InkDrawer } from './drawer';
 import {
-	DEFAULT_INK_DOCUMENT,
 	INK_CODE_BLOCK_LANGUAGE,
-	InkCanonicalCursor,
 	InkDocument,
-	InkViewport,
-	isLineBreakMarkerStroke,
+	clampCursor,
+	fragmentIsEmpty,
 	parseInkDocument,
+	selectionIsEmpty,
 	serializeInkDocument,
-} from './model';
-import { readCanonicalCursor, writeCanonicalCursor } from './cursor';
-import {
-	drawInlineCanvas,
-	findInlineInsertionSelection,
-	type InsertionLinePreference,
-} from './render';
+} from './doc';
+import { deleteSelection, extractSelection, insertFragmentAtCursor } from './edit';
+import { getClipboard, setClipboard } from './clipboard';
+import { drawInlineCanvas, inlineLayout, InlineRenderOptions } from './render';
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
@@ -71,6 +68,16 @@ export class InkBlockRegistry {
 		);
 	}
 
+	private renderOptions(): InlineRenderOptions {
+		return {
+			wrapWidth: this.getWrapWidthWorld(),
+			wordGapScale: this.getWordGapScale(),
+			renderLineHeightScale: this.getRenderLineHeightScale(),
+			renderStrokeFillScale: this.getRenderStrokeFillScale(),
+			showWritingLine: this.getShowWritingLine(),
+		};
+	}
+
 	private mountBlock(
 		source: string,
 		el: HTMLElement,
@@ -83,6 +90,19 @@ export class InkBlockRegistry {
 		const isActiveKey = (value: string): boolean => this.activeKey === value;
 
 		const containerEl = el.createDiv({ cls: 'freeflow-ink-block' });
+		const parsed = this.parseWithError(source, containerEl);
+		if (!parsed) {
+			return;
+		}
+		const documentModel = parsed;
+		documentModel.meta.cursor = clampCursor(documentModel.meta.cursor, documentModel.lines);
+
+		// Reading mode (and previews/exports): render read-only, no chrome, no border.
+		if (this.isReadingMode(el, ctx)) {
+			this.mountReadOnly(containerEl, documentModel, el, ctx);
+			return;
+		}
+
 		const section = toSectionInfoLike(ctx.getSectionInfo(el));
 		if (!section) {
 			containerEl.createDiv({
@@ -91,18 +111,9 @@ export class InkBlockRegistry {
 			});
 			return;
 		}
-
-		const parsed = this.parseWithError(source, containerEl);
-		if (!parsed) {
-			return;
-		}
-
-		let documentModel = parsed;
-		const initialCursor = readCanonicalCursor(documentModel, documentModel.strokes.length, 'auto');
-		let viewport = initialViewportFor(documentModel, this.getWrapWidthWorld());
-		let cursorIndex = initialCursor.index;
-		let cursorLinePreference: InsertionLinePreference = initialCursor.linePreference;
 		let showInlineCaret = false;
+		let selectMode = false;
+		let selecting = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
 		let pendingInlineRefreshWhileActive = false;
@@ -115,43 +126,38 @@ export class InkBlockRegistry {
 			attr: { role: 'button', 'aria-label': 'Open freeflow ink drawer' },
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
-		metaRowEl.createSpan({ text: 'Tap to place cursor' });
-		const actionEl = metaRowEl.createEl('button', {
-			cls: 'freeflow-ink-meta-action',
-			text: 'Open',
-		});
-		actionEl.type = 'button';
+		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor' });
+		const makeMetaButton = (label: string): HTMLButtonElement => {
+			const btn = metaRowEl.createEl('button', { cls: 'freeflow-ink-meta-action', text: label });
+			btn.type = 'button';
+			return btn;
+		};
+		const selectButtonEl = makeMetaButton('Select');
+		const copyButtonEl = makeMetaButton('Copy');
+		const cutButtonEl = makeMetaButton('Cut');
+		const pasteButtonEl = makeMetaButton('Paste');
+		const actionEl = makeMetaButton('Open');
+
+		const updateMetaButtons = (): void => {
+			const hasSelection = !selectionIsEmpty(documentModel.meta.selection);
+			selectButtonEl.classList.toggle('is-active', selectMode);
+			copyButtonEl.disabled = !hasSelection;
+			cutButtonEl.disabled = !hasSelection;
+			pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
+			hintEl.textContent = selectMode ? 'Drag to select words' : 'Tap to place cursor';
+		};
 
 		const renderInline = (): void => {
 			drawInlineCanvas(
 				canvasEl,
 				documentModel,
-				this.getWrapWidthWorld(),
-				this.getWordGapScale(),
-				this.getRenderLineHeightScale(),
-				this.getRenderStrokeFillScale(),
-				this.getShowWritingLine(),
-				showInlineCaret ? cursorIndex : null,
-				cursorLinePreference,
+				this.renderOptions(),
+				showInlineCaret ? documentModel.meta.cursor : null,
+				documentModel.meta.selection,
 			);
+			updateMetaButtons();
 		};
 		renderInline();
-
-		const syncCursorFromDocument = (): InkCanonicalCursor => {
-			// Canonical cursor lives in document metadata and is the source of truth for both views.
-			const canonical = readCanonicalCursor(documentModel, cursorIndex, cursorLinePreference);
-			cursorIndex = canonical.index;
-			cursorLinePreference = canonical.linePreference;
-			return canonical;
-		};
-
-		const writeCursorToDocument = (): InkCanonicalCursor => {
-			// Keep metadata synchronized when inline interactions move the cursor.
-			const canonical = writeCanonicalCursor(documentModel, cursorIndex, cursorLinePreference);
-			cursorIndex = canonical.index;
-			cursorLinePreference = canonical.linePreference;
-			return canonical;
-		};
 
 		const flushSave = async (): Promise<void> => {
 			if (isDisposed) {
@@ -198,8 +204,9 @@ export class InkBlockRegistry {
 			}, SAVE_DEBOUNCE_MS);
 		};
 
-		const onDocumentChanged = (): void => {
-			syncCursorFromDocument();
+		// Re-render the inline view from the document; defer persistence until the drawer closes
+		// while it is the active block (avoids thrashing the vault file mid-stroke).
+		const onChanged = (): void => {
 			renderInline();
 			if (isActiveKey(blockKey)) {
 				pendingInlineRefreshWhileActive = true;
@@ -208,48 +215,14 @@ export class InkBlockRegistry {
 			scheduleSave();
 		};
 
-		const openDrawer = (nextCursorIndex?: number): void => {
-			if (typeof nextCursorIndex === 'number' && Number.isFinite(nextCursorIndex)) {
-				const nextIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
-				if (nextIndex !== cursorIndex) {
-					cursorIndex = nextIndex;
-					cursorLinePreference = 'auto';
-					writeCursorToDocument();
-				}
-			}
+		const openDrawer = (): void => {
 			showInlineCaret = true;
-
 			setActiveKey(blockKey);
 			drawer.open({
 				key: blockKey,
 				doc: documentModel,
-				viewport,
-				cursorIndex,
-				linePreference: cursorLinePreference,
-				onDocumentChanged,
-				onViewportChanged: (nextViewport) => {
-					viewport = nextViewport;
-				},
-				onCursorChanged: (nextCursorIndex) => {
-					cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
-					// The drawer writes the canonical cursor (index + preference) before
-					// invoking this callback, so adopt the freshly written preference here
-					// to avoid rendering the inline caret with a stale line preference (RC4).
-					cursorLinePreference = readCanonicalCursor(
-						documentModel,
-						cursorIndex,
-						cursorLinePreference,
-					).linePreference;
-					writeCursorToDocument();
-					showInlineCaret = true;
-					renderInline();
-				},
-				onLinePreferenceChanged: (nextLinePreference) => {
-					cursorLinePreference = nextLinePreference;
-					writeCursorToDocument();
-					showInlineCaret = true;
-					renderInline();
-				},
+				onContentChanged: onChanged,
+				onCursorChanged: onChanged,
 				onClose: () => {
 					if (isActiveKey(blockKey)) {
 						setActiveKey(null);
@@ -270,47 +243,144 @@ export class InkBlockRegistry {
 			}
 		};
 
+		const cursorAtEvent = (event: PointerEvent): ReturnType<typeof clampCursor> => {
+			const rect = canvasEl.getBoundingClientRect();
+			const { layout } = inlineLayout(canvasEl, documentModel, this.renderOptions());
+			return layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+		};
+
+		const applyInlineEdit = (): void => {
+			showInlineCaret = true;
+			renderInline();
+			if (isActiveKey(blockKey)) {
+				drawer.refreshLayout();
+				pendingInlineRefreshWhileActive = true;
+				return;
+			}
+			scheduleSave();
+		};
+
+		const onCanvasPointerDown = (event: PointerEvent): void => {
+			if (!selectMode) {
+				return;
+			}
+			event.preventDefault();
+			const cur = cursorAtEvent(event);
+			documentModel.meta.selection = { anchor: cur, focus: cur };
+			documentModel.meta.cursor = cur;
+			selecting = true;
+			try {
+				canvasEl.setPointerCapture(event.pointerId);
+			} catch {
+				/* capture is best-effort */
+			}
+			showInlineCaret = true;
+			renderInline();
+		};
+
+		const onCanvasPointerMove = (event: PointerEvent): void => {
+			if (!selectMode || !selecting) {
+				return;
+			}
+			event.preventDefault();
+			const focus = cursorAtEvent(event);
+			if (documentModel.meta.selection) {
+				documentModel.meta.selection.focus = focus;
+			}
+			documentModel.meta.cursor = focus;
+			renderInline();
+		};
+
+		const onCanvasPointerUp = (event: PointerEvent): void => {
+			if (!selectMode || !selecting) {
+				return;
+			}
+			event.preventDefault();
+			selecting = false;
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				documentModel.meta.selection = null; // a tap just places the cursor
+			}
+			renderInline();
+			scheduleSave();
+			if (isActiveKey(blockKey)) {
+				drawer.refreshLayout();
+			}
+		};
+
+		const onToggleSelect = (): void => {
+			selectMode = !selectMode;
+			canvasEl.style.touchAction = selectMode ? 'none' : '';
+			renderInline();
+		};
+
+		const onCopy = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			setClipboard(extractSelection(documentModel, documentModel.meta.selection!));
+			renderInline();
+		};
+
+		const onCut = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			setClipboard(extractSelection(documentModel, documentModel.meta.selection!));
+			deleteSelection(documentModel, documentModel.meta.selection!);
+			applyInlineEdit();
+		};
+
+		const onPaste = (): void => {
+			const clip = getClipboard();
+			if (fragmentIsEmpty(clip)) {
+				return;
+			}
+			insertFragmentAtCursor(documentModel, clip!);
+			applyInlineEdit();
+		};
+
 		const onCanvasClick = (event: MouseEvent): void => {
+			if (selectMode) {
+				return; // selection is handled by the pointer drag handlers
+			}
 			const rect = canvasEl.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) {
 				showInlineCaret = true;
 				renderInline();
 				return;
 			}
-
-			const clickX = event.clientX - rect.left;
-			const clickY = event.clientY - rect.top;
-			const selection = findInlineInsertionSelection(
-				documentModel,
-				this.getWrapWidthWorld(),
-				this.getWordGapScale(),
-				this.getRenderLineHeightScale(),
-				this.getRenderStrokeFillScale(),
-				rect.width,
-				clickX,
-				clickY,
-			);
-			cursorIndex = selection.index;
-			cursorLinePreference = selection.linePreference;
-			writeCursorToDocument();
+			const { layout } = inlineLayout(canvasEl, documentModel, this.renderOptions());
+			const cursor = layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+			documentModel.meta.cursor = cursor;
+			documentModel.meta.selection = null;
 			showInlineCaret = true;
 			renderInline();
 			if (isActiveKey(blockKey)) {
-				drawer.updateCursor(blockKey, cursorIndex, cursorLinePreference);
+				drawer.updateCursor(blockKey, cursor);
+			} else {
+				scheduleSave();
 			}
 		};
 
 		const onCanvasDoubleClick = (): void => {
-			openDrawer(cursorIndex);
+			openDrawer();
 		};
 
 		const onActionClick = (): void => {
-			openDrawer(cursorIndex);
+			openDrawer();
 		};
 
 		canvasEl.addEventListener('click', onCanvasClick);
 		canvasEl.addEventListener('dblclick', onCanvasDoubleClick);
 		canvasEl.addEventListener('keydown', onCanvasKeyDown);
+		canvasEl.addEventListener('pointerdown', onCanvasPointerDown);
+		canvasEl.addEventListener('pointermove', onCanvasPointerMove);
+		canvasEl.addEventListener('pointerup', onCanvasPointerUp);
+		canvasEl.addEventListener('pointercancel', onCanvasPointerUp);
+		selectButtonEl.addEventListener('click', onToggleSelect);
+		copyButtonEl.addEventListener('click', onCopy);
+		cutButtonEl.addEventListener('click', onCut);
+		pasteButtonEl.addEventListener('click', onPaste);
 		actionEl.addEventListener('click', onActionClick);
 		canvasEl.tabIndex = 0;
 
@@ -324,10 +394,18 @@ export class InkBlockRegistry {
 				onunload(): void {
 					isDisposed = true;
 					resizeObserver.disconnect();
-						canvasEl.removeEventListener('click', onCanvasClick);
-						canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
+					canvasEl.removeEventListener('click', onCanvasClick);
+					canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
 					canvasEl.removeEventListener('keydown', onCanvasKeyDown);
-						actionEl.removeEventListener('click', onActionClick);
+					canvasEl.removeEventListener('pointerdown', onCanvasPointerDown);
+					canvasEl.removeEventListener('pointermove', onCanvasPointerMove);
+					canvasEl.removeEventListener('pointerup', onCanvasPointerUp);
+					canvasEl.removeEventListener('pointercancel', onCanvasPointerUp);
+					selectButtonEl.removeEventListener('click', onToggleSelect);
+					copyButtonEl.removeEventListener('click', onCopy);
+					cutButtonEl.removeEventListener('click', onCut);
+					pasteButtonEl.removeEventListener('click', onPaste);
+					actionEl.removeEventListener('click', onActionClick);
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
 						saveTimeout = 0;
@@ -335,6 +413,46 @@ export class InkBlockRegistry {
 					if (isActiveKey(blockKey)) {
 						drawer.close();
 					}
+				}
+			})(el),
+		);
+	}
+
+	// Decide whether this block is being rendered for Reading view (read-only) vs the editor.
+	// The element is frequently not attached yet when the processor runs, so DOM ancestry alone
+	// is unreliable; fall back to the active view's mode and default to editable.
+	private isReadingMode(el: HTMLElement, ctx: MarkdownPostProcessorContext): boolean {
+		if (el.closest('.markdown-source-view')) {
+			return false;
+		}
+		if (el.closest('.markdown-reading-view')) {
+			return true;
+		}
+		const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view && view.file?.path === ctx.sourcePath) {
+			return view.getMode() === 'preview';
+		}
+		return false; // when unsure, stay editable so the editor always works
+	}
+
+	private mountReadOnly(
+		containerEl: HTMLDivElement,
+		documentModel: InkDocument,
+		el: HTMLElement,
+		ctx: MarkdownPostProcessorContext,
+	): void {
+		containerEl.classList.add('is-reading');
+		const canvasEl = containerEl.createEl('canvas', { cls: 'freeflow-ink-inline-canvas' });
+		const render = (): void => {
+			drawInlineCanvas(canvasEl, documentModel, this.renderOptions(), null, null);
+		};
+		render();
+		const resizeObserver = new ResizeObserver(() => render());
+		resizeObserver.observe(containerEl);
+		ctx.addChild(
+			new (class extends MarkdownRenderChild {
+				onunload(): void {
+					resizeObserver.disconnect();
 				}
 			})(el),
 		);
@@ -377,78 +495,9 @@ function toSectionInfoLike(value: unknown): SectionInfoLike | null {
 	};
 }
 
-function initialViewportFor(doc: InkDocument, wrapWidth: number): InkViewport {
-	const bounds = getVisibleInkBounds(doc);
-	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
-	const lineOffsetY = quantizeLineOffset(bounds.maxY, lineHeight);
-	return {
-		viewportX: Math.max(0, bounds.maxX - wrapWidth * 0.66),
-		lineOffsetY,
-	};
-}
-
-function clampInsertionIndex(value: number, length: number): number {
-	if (!Number.isFinite(value)) {
-		return length;
-	}
-	const normalizedLength = Math.max(0, length);
-	return Math.max(0, Math.min(normalizedLength, Math.floor(value)));
-}
-
 function formatBlockLimit(bytes: number): string {
 	if (bytes >= 1_000_000) {
 		return `${(bytes / 1_000_000).toFixed(1)} MB`;
 	}
 	return `${Math.round(bytes / 1000)} KB`;
-}
-
-function getVisibleInkBounds(doc: InkDocument): {
-	minX: number;
-	maxX: number;
-	minY: number;
-	maxY: number;
-} {
-	let minX = 0;
-	let maxX = 0;
-	let minY = 0;
-	let maxY = 0;
-	let hasPoint = false;
-
-	for (const stroke of doc.strokes) {
-		if (isLineBreakMarkerStroke(stroke)) {
-			continue;
-		}
-		for (const point of stroke.points) {
-			if (!hasPoint) {
-				minX = point.x;
-				maxX = point.x;
-				minY = point.y;
-				maxY = point.y;
-				hasPoint = true;
-				continue;
-			}
-			if (point.x < minX) minX = point.x;
-			if (point.x > maxX) maxX = point.x;
-			if (point.y < minY) minY = point.y;
-			if (point.y > maxY) maxY = point.y;
-		}
-	}
-
-	if (!hasPoint) {
-		return {
-			minX: 0,
-			maxX: 0,
-			minY: 0,
-			maxY: 0,
-		};
-	}
-
-	return { minX, maxX, minY, maxY };
-}
-
-function quantizeLineOffset(y: number, lineHeight: number): number {
-	if (!Number.isFinite(y)) {
-		return lineHeight;
-	}
-	return Math.max(lineHeight, Math.round(y / lineHeight) * lineHeight);
 }
