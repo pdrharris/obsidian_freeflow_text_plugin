@@ -31,15 +31,15 @@ import { drawLaidStroke, resizeCanvasForDpr } from './render';
 
 const BACKDROP_CLOSE_GUARD_MS = 420;
 const MIN_POINT_DISTANCE_SQ = 0.35;
-const ADVANCE_DELAY_MS = 650; // delay before the view scrolls on, so you can add dots/crosses
-const ADVANCE_SOFT_RATIO = 0.8; // schedule an advance once the caret passes this fraction of width
-const ADVANCE_HARD_RATIO = 0.85; // advance immediately on the next pen-down past this fraction
+const ADVANCE_TARGET_RATIO = 0.4; // after advancing, the caret lands at this fraction of width
+const ADVANCE_MIN_CARET_RATIO = 0.4; // don't bother advancing while there's still room to the left
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
 	wordGapScale: number;
 	idleAdvanceMs: number;
 	releaseAdvanceDelayMs: number;
+	advanceTriggerRatio: number; // position of the orange "near the edge" line (fraction of width)
 	showWritingLine: boolean;
 	usePointerCapture: boolean;
 	allowAnyNonMousePointer: boolean;
@@ -254,22 +254,29 @@ export class InkDrawer {
 		}
 	}
 
-	private scheduleAdvanceIfNeeded(): void {
+	// On pen lift, schedule the view to advance. Two speeds: a short pause once the caret is past
+	// the orange trigger line (running out of room), a long pause before it.
+	private scheduleAdvanceAfterStroke(): void {
 		const view = this.drawerView();
 		if (!view) {
 			return;
 		}
 		const { width } = this.canvasSize();
-		if (this.caretLocalX(view) <= width * ADVANCE_SOFT_RATIO) {
-			return;
+		const caretLocalX = this.caretLocalX(view);
+		if (caretLocalX <= width * ADVANCE_MIN_CARET_RATIO) {
+			return; // plenty of room to the left; nothing to advance
 		}
+		const config = this.getRuntimeConfig();
+		const pastTrigger = caretLocalX >= width * config.advanceTriggerRatio;
+		const delay = Math.max(0, pastTrigger ? config.releaseAdvanceDelayMs : config.idleAdvanceMs);
 		this.clearAdvanceTimer();
 		this.advanceTimer = window.setTimeout(() => {
 			this.advanceTimer = 0;
 			this.advanceView();
-		}, ADVANCE_DELAY_MS);
+		}, delay);
 	}
 
+	// Forward-only: bring the caret back to ADVANCE_TARGET_RATIO, never scroll backwards.
 	private advanceView(): void {
 		const view = this.drawerView();
 		if (!view) {
@@ -277,7 +284,7 @@ export class InkDrawer {
 		}
 		const { width } = this.canvasSize();
 		const caret = view.layout.caretRect(view.viewCursor);
-		this.scrollX = Math.max(0, caret.x - width * 0.4);
+		this.scrollX = Math.max(this.scrollX, caret.x - width * ADVANCE_TARGET_RATIO);
 		this.requestDraw();
 	}
 
@@ -341,6 +348,17 @@ export class InkDrawer {
 			}
 		}
 
+		// Dotted orange "near the right edge" guide line; writing advances once the caret passes it.
+		const triggerX = cssWidth * this.getRuntimeConfig().advanceTriggerRatio;
+		ctx.strokeStyle = '#f59e0b';
+		ctx.lineWidth = 1.5;
+		ctx.setLineDash([6, 6]);
+		ctx.beginPath();
+		ctx.moveTo(triggerX, 0);
+		ctx.lineTo(triggerX, cssHeight);
+		ctx.stroke();
+		ctx.setLineDash([]);
+
 		// Caret at the insertion point (right end of the shown content).
 		ctx.strokeStyle = '#2563eb';
 		ctx.lineWidth = 2;
@@ -395,13 +413,8 @@ export class InkDrawer {
 		event.preventDefault();
 		this.lastInteractionAt = Date.now();
 
-		// If a delayed advance is pending and the caret is already near the edge, advance now so
-		// there's room; otherwise cancel it (the user is staying put, e.g. dotting an i).
-		const view = this.drawerView();
+		// Keep writing cancels any pending advance, so the view only moves when you actually pause.
 		this.clearAdvanceTimer();
-		if (view && this.caretLocalX(view) > this.canvasSize().width * ADVANCE_HARD_RATIO) {
-			this.advanceView();
-		}
 
 		this.activePointerId = event.pointerId;
 		if (this.getRuntimeConfig().usePointerCapture) {
@@ -546,8 +559,8 @@ export class InkDrawer {
 		} else {
 			insertWordAtCursor(session.doc, wordFromStroke(stroke));
 		}
-		// Don't jump the view on lift-off; only advance (after a delay) if we've neared the edge.
-		this.scheduleAdvanceIfNeeded();
+		// Don't jump the view on lift-off; only advance after the configured pause.
+		this.scheduleAdvanceAfterStroke();
 		session.onContentChanged();
 		this.requestDraw();
 	}

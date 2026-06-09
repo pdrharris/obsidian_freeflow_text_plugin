@@ -108,6 +108,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			wordGapScale: this.getWordGapScale(),
 			idleAdvanceMs: this.settings.idleAdvanceMs,
 			releaseAdvanceDelayMs: this.settings.releaseAdvanceDelayMs,
+			advanceTriggerRatio: clamp(this.settings.advanceLinePosition, 50, 95) / 100,
 			showWritingLine: this.settings.showWritingLine,
 			usePointerCapture: !iosLike,
 			allowAnyNonMousePointer: iosLike,
@@ -208,6 +209,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			0,
 			1200,
 		);
+		this.settings.advanceLinePosition = clamp(Math.round(this.settings.advanceLinePosition), 50, 95);
 		if (this.settings.hardBlockLimitKb <= this.settings.softBlockLimitKb) {
 			this.settings.hardBlockLimitKb = Math.min(16000, this.settings.softBlockLimitKb + 256);
 		}
