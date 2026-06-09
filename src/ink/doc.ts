@@ -1,16 +1,16 @@
-// Flowing-text ink document model (v2).
+// Flowing-text ink document model (v3).
 //
-// Content is a logical tree: Document -> Lines -> Words -> Strokes. No absolute screen
-// positions are stored; the layout engine (`layout.ts`) derives all geometry from this tree
-// plus a width/scale. Intra-word stroke geometry IS preserved — a word is a rigid cluster of
-// pen marks — but the spacing *between* words and *between* lines is a layout constant, so
-// editing is a tree splice followed by a deterministic relayout (no coordinate patching).
+// Content is a logical tree: Document -> Lines -> Words -> Strokes. Stroke points are stored
+// in LINE-ABSOLUTE coordinates: x is the position along the line (so the whitespace you draw
+// between strokes is preserved exactly) and y is relative to the line baseline. Words are just
+// whitespace groupings of the line's strokes (used for selection and wrapping); they do NOT
+// affect spacing. The layout engine scales these coordinates and wraps lines to width, but it
+// never re-spaces what you drew. Editing is a tree splice + relayout (no coordinate patching).
 //
-// This file deliberately defines its own types independent of the legacy `model.ts` so the
-// two can coexist during the re-architecture. Once the cutover is complete, `model.ts` is
-// retired and this becomes the single document model.
+// v2 (the previous convention) stored points in word-local space and normalised inter-word
+// gaps; `parseInkDocument` migrates v2 docs to line-absolute on load.
 
-export const INK_DOC_VERSION = 2 as const;
+export const INK_DOC_VERSION = 3 as const;
 export const DEFAULT_LINE_HEIGHT = 180;
 export const INK_CODE_BLOCK_LANGUAGE = 'fii-ink';
 
@@ -23,9 +23,7 @@ export interface InkPoint {
 
 export interface InkStroke {
 	id: string;
-	// Points are in a word-local coordinate space shared by every stroke in the word, so the
-	// strokes keep their natural relative positions. The layout engine translates/scales the
-	// whole cluster as a unit.
+	// Points in line-absolute coordinates: x along the line, y relative to the baseline.
 	points: InkPoint[];
 	width: number;
 	color: string;
@@ -191,7 +189,9 @@ export function parseInkDocument(source: string): InkDocument {
 		throw new Error('Invalid fii-ink JSON: expected an object.');
 	}
 	const value = raw as Partial<InkDocument>;
-	if (value.version !== INK_DOC_VERSION || !Array.isArray(value.lines)) {
+	const version: unknown = (raw as { version?: unknown }).version;
+	// Accept the current version and the previous one (which we migrate below).
+	if ((version !== INK_DOC_VERSION && version !== 2) || !Array.isArray(value.lines)) {
 		throw new Error(`Invalid fii-ink JSON: expected { version: ${INK_DOC_VERSION}, lines: [] }.`);
 	}
 
@@ -207,6 +207,12 @@ export function parseInkDocument(source: string): InkDocument {
 		lines.push(createEmptyLine());
 	}
 
+	if (version === 2) {
+		// v2 stored word-local coordinates with normalised gaps. Spread each line's words to
+		// line-absolute positions with a default gap so old content stays readable.
+		migrateWordLocalToLineAbsolute(lines, lineHeight);
+	}
+
 	const cursor = clampCursor(value.meta?.cursor, lines);
 	const selection = normalizeSelection(value.meta?.selection, lines);
 
@@ -215,6 +221,26 @@ export function parseInkDocument(source: string): InkDocument {
 		meta: { lineHeight, cursor, selection },
 		lines,
 	};
+}
+
+function migrateWordLocalToLineAbsolute(lines: InkLine[], lineHeight: number): void {
+	const defaultGap = lineHeight * 0.35;
+	for (const line of lines) {
+		let runningX = 0;
+		for (const word of line.words) {
+			const bounds = wordBounds(word);
+			if (!bounds) {
+				continue;
+			}
+			const shift = runningX - bounds.minX;
+			for (const stroke of word.strokes) {
+				for (const point of stroke.points) {
+					point.x += shift;
+				}
+			}
+			runningX += bounds.maxX - bounds.minX + defaultGap;
+		}
+	}
 }
 
 function normalizeLine(value: unknown): InkLine | null {

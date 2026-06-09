@@ -140,7 +140,6 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 	const cssPerSource = (rowHeight * strokeFillScale) / (sourceLineHeight * sourceHeightRatio);
 	const baselineOffset = rowHeight * BASELINE_RATIO_FROM_TOP;
 	const marginX = config.marginXCss ?? DEFAULT_MARGIN_X;
-	const interWordGap = clamp(rowHeight * 0.32 * config.wordGapScale, 6, rowHeight * 1.2);
 	const availableWidth = Math.max(20, config.contentWidthCss - marginX * 2);
 
 	const laidWords: LaidWord[] = [];
@@ -162,7 +161,11 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 		if (!line) {
 			continue;
 		}
-		let penX = 0; // css px from the left margin, within the current visual row
+		// Words are placed at their LINE-ABSOLUTE x so drawn whitespace is preserved exactly.
+		// `rowOriginSource` is the source-x that maps to the left margin of the current row
+		// (the first word of the line/row); on wrap it resets so the wrapped word starts at the
+		// margin while keeping the within-row spacing of the words that follow it.
+		let rowOriginSource: number | null = null;
 		let rowHasContent = false;
 		ensureRow(lineIndex, visualRow);
 
@@ -172,18 +175,23 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 				continue;
 			}
 			const bounds = wordBounds(word);
-			const sourceWidth = bounds ? Math.max(0, bounds.maxX - bounds.minX) : 0;
-			const wordWidth = sourceWidth * cssPerSource;
-			const gap = rowHasContent ? interWordGap : 0;
+			if (!bounds) {
+				continue;
+			}
+			const wordWidth = Math.max(0, bounds.maxX - bounds.minX) * cssPerSource;
+			if (rowOriginSource === null) {
+				rowOriginSource = bounds.minX;
+			}
+			let leftCss = marginX + (bounds.minX - rowOriginSource) * cssPerSource;
 
-			if (rowHasContent && penX + gap + wordWidth > availableWidth) {
+			if (rowHasContent && leftCss - marginX + wordWidth > availableWidth) {
 				visualRow += 1;
-				penX = 0;
+				rowOriginSource = bounds.minX;
 				rowHasContent = false;
 				ensureRow(lineIndex, visualRow);
+				leftCss = marginX;
 			}
 
-			const leftCss = marginX + penX + (rowHasContent ? interWordGap : 0);
 			const baselineY = visualRow * rowHeight + baselineOffset;
 			const placed = placeWord(word, bounds, leftCss, baselineY, cssPerSource, wordWidth, rowHeight);
 			placed.line = lineIndex;
@@ -192,7 +200,6 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 			laidWords.push(placed);
 			ensureRow(lineIndex, visualRow).words.push(placed);
 
-			penX = leftCss - marginX + wordWidth;
 			rowHasContent = true;
 			if (leftCss + wordWidth + marginX > maxRight) {
 				maxRight = leftCss + wordWidth + marginX;

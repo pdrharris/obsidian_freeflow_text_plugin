@@ -12,6 +12,7 @@ import {
 	InkCursor,
 	InkDocument,
 	InkStroke,
+	InkWord,
 	clampCursor,
 	createStrokeId,
 	fragmentIsEmpty,
@@ -19,10 +20,8 @@ import {
 } from './doc';
 import { getClipboard } from './clipboard';
 import {
-	appendStrokeToCurrentWord,
 	eraseAtCursor,
 	insertFragmentAtCursor,
-	insertWordAtCursor,
 	splitLineAtCursor,
 	wordFromStroke,
 } from './edit';
@@ -503,62 +502,77 @@ export class InkDrawer {
 		}
 		const layout = view.layout;
 		const cssPerSource = layout.cssPerSource || 1;
+		const marginX = layout.marginX;
 		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
+		const line = session.doc.lines[cursor.line];
+		if (!line) {
+			return;
+		}
 
-		// Captured points in the view's layout space.
-		const layoutPoints = active.map((p) => ({
-			lx: p.x + this.scrollX,
-			ly: p.y + this.scrollY,
+		// Convert canvas points to LINE-ABSOLUTE source coordinates, using the same frame the
+		// view was laid out in, so the stroke is stored exactly where it was drawn.
+		const shownWords = line.words.slice(0, cursor.word);
+		const firstShown = shownWords[0];
+		const rowOriginSource = firstShown ? wordBounds(firstShown)?.minX ?? 0 : 0;
+		const baselineY = layout.caretRect(view.viewCursor).baselineY;
+
+		const points = active.map((p) => ({
+			x: rowOriginSource + (p.x + this.scrollX - marginX) / cssPerSource,
+			y: (p.y + this.scrollY - baselineY) / cssPerSource,
 			pressure: p.pressure,
 			time: p.time,
 		}));
-		let strokeMinX = Infinity;
-		for (const p of layoutPoints) {
-			if (p.lx < strokeMinX) strokeMinX = p.lx;
-		}
-
-		// Continue the current (last shown) word if the new stroke is close to it; else new word.
-		const currentWordLaid = layout.words.find((w) => w.word === view.viewCursor.word - 1);
-		const currentWord = session.doc.lines[cursor.line]?.words[cursor.word - 1];
-		const gapThreshold = layout.rowHeight * 0.6;
-		const continueWord =
-			!!currentWordLaid &&
-			!!currentWord &&
-			strokeMinX - (currentWordLaid.x + currentWordLaid.width) <= gapThreshold;
-
-		let originX: number;
-		let baselineY: number;
-		let sourceOriginX: number;
-		if (continueWord && currentWordLaid && currentWord) {
-			const bounds = wordBounds(currentWord);
-			originX = currentWordLaid.x;
-			baselineY = currentWordLaid.baselineY;
-			sourceOriginX = bounds ? bounds.minX : 0;
-		} else {
-			const caret = layout.caretRect(view.viewCursor);
-			originX = caret.x;
-			baselineY = caret.baselineY;
-			sourceOriginX = 0;
-		}
-
-		const penWidth = Math.max(0.5, 2.4 / cssPerSource);
 		const stroke: InkStroke = {
 			id: createStrokeId(),
-			width: penWidth,
+			width: Math.max(0.5, 2.4 / cssPerSource),
 			color: '#111827',
-			points: layoutPoints.map((p) => ({
-				x: (p.lx - originX) / cssPerSource + sourceOriginX,
-				y: (p.ly - baselineY) / cssPerSource,
-				pressure: p.pressure,
-				time: p.time,
-			})),
+			points,
 		};
-
-		if (continueWord) {
-			appendStrokeToCurrentWord(session.doc, stroke);
-		} else {
-			insertWordAtCursor(session.doc, wordFromStroke(stroke));
+		let sMinX = Infinity;
+		let sMaxX = -Infinity;
+		for (const p of points) {
+			if (p.x < sMinX) sMinX = p.x;
+			if (p.x > sMaxX) sMaxX = p.x;
 		}
+
+		// Merge into the nearest word within the word-gap threshold (overlap or close), else make
+		// a new word. Either way the stroke keeps its absolute x, so its position is preserved.
+		const threshold = Math.max(
+			8,
+			session.doc.meta.lineHeight * 0.12 * this.getRuntimeConfig().wordGapScale,
+		);
+		let mergeIndex = -1;
+		let bestGap = threshold;
+		for (let i = 0; i < line.words.length; i += 1) {
+			const word = line.words[i];
+			if (!word) {
+				continue;
+			}
+			const b = wordBounds(word);
+			if (!b) {
+				continue;
+			}
+			const gap = Math.max(0, Math.max(sMinX, b.minX) - Math.min(sMaxX, b.maxX));
+			if (gap < bestGap) {
+				bestGap = gap;
+				mergeIndex = i;
+			}
+		}
+
+		let affected: InkWord;
+		const existing = mergeIndex >= 0 ? line.words[mergeIndex] : undefined;
+		if (existing) {
+			existing.strokes.push(stroke);
+			affected = existing;
+		} else {
+			affected = wordFromStroke(stroke);
+			line.words.push(affected);
+		}
+		// Keep words ordered left-to-right; put the cursor just after the affected word.
+		line.words.sort((a, b) => (wordBounds(a)?.minX ?? 0) - (wordBounds(b)?.minX ?? 0));
+		session.doc.meta.cursor = { line: cursor.line, word: line.words.indexOf(affected) + 1 };
+		session.doc.meta.selection = null;
+
 		// Don't jump the view on lift-off; only advance after the configured pause.
 		this.scheduleAdvanceAfterStroke();
 		session.onContentChanged();

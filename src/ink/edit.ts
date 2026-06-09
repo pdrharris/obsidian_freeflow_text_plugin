@@ -17,7 +17,41 @@ import {
 	createWordId,
 	orderCursors,
 	selectionIsEmpty,
+	wordBounds,
 } from './doc';
+
+const PASTE_GAP_FACTOR = 0.35; // inter-word gap (x lineHeight) used when rebasing pasted content
+
+// Shift every point of a word by dx (line-absolute x).
+function shiftWordX(word: InkWord, dx: number): void {
+	if (dx === 0) {
+		return;
+	}
+	for (const stroke of word.strokes) {
+		for (const point of stroke.points) {
+			point.x += dx;
+		}
+	}
+}
+
+// Move a run of words so the first word's left edge sits at startX, preserving internal gaps.
+// Returns the run's right edge (or startX if empty).
+function placeRun(words: InkWord[], startX: number): number {
+	const firstBounds = words.length > 0 && words[0] ? wordBounds(words[0]) : null;
+	if (!firstBounds) {
+		return startX;
+	}
+	const dx = startX - firstBounds.minX;
+	let right = startX;
+	for (const word of words) {
+		shiftWordX(word, dx);
+		const b = wordBounds(word);
+		if (b && b.maxX > right) {
+			right = b.maxX;
+		}
+	}
+	return right;
+}
 
 function clampCursorToDoc(doc: InkDocument, cursor: InkCursor): InkCursor {
 	const line = Math.max(0, Math.min(doc.lines.length - 1, cursor.line));
@@ -144,8 +178,24 @@ export function insertFragmentAtCursor(doc: InkDocument, fragment: InkFragment):
 		return cursor;
 	}
 
+	const gap = doc.meta.lineHeight * PASTE_GAP_FACTOR;
+	const before = line.words[cursor.word - 1];
+	const startX = before ? (wordBounds(before)?.maxX ?? 0) + gap : 0;
+
 	const first = clone.segments[0] ?? [];
 	if (clone.segments.length === 1) {
+		const runRight = placeRun(first, startX);
+		// Push the words that follow the cursor right so they don't overlap the pasted content.
+		const after = line.words.slice(cursor.word);
+		if (after.length > 0 && after[0]) {
+			const afterStart = wordBounds(after[0])?.minX ?? 0;
+			const delta = runRight + gap - afterStart;
+			if (delta > 0) {
+				for (const word of after) {
+					shiftWordX(word, delta);
+				}
+			}
+		}
 		line.words.splice(cursor.word, 0, ...first);
 		const next: InkCursor = { line: cursor.line, word: cursor.word + first.length };
 		doc.meta.cursor = next;
@@ -159,20 +209,21 @@ export function insertFragmentAtCursor(doc: InkDocument, fragment: InkFragment):
 	const last = clone.segments[clone.segments.length - 1] ?? [];
 	const middle = clone.segments.slice(1, -1);
 
+	placeRun(first, startX);
 	line.words = [...head, ...first];
-	const newLines = [
-		...middle.map((seg) => {
-			const l = createEmptyLine();
-			l.words = seg;
-			return l;
-		}),
-		(() => {
-			const l = createEmptyLine();
-			l.words = [...last, ...tail];
-			return l;
-		})(),
-	];
-	doc.lines.splice(cursor.line + 1, 0, ...newLines);
+
+	const newLines = middle.map((seg) => {
+		placeRun(seg, 0);
+		const l = createEmptyLine();
+		l.words = seg;
+		return l;
+	});
+
+	const lastRight = placeRun(last, 0);
+	placeRun(tail, last.length > 0 ? lastRight + gap : 0);
+	const lastLine = createEmptyLine();
+	lastLine.words = [...last, ...tail];
+	doc.lines.splice(cursor.line + 1, 0, ...newLines, lastLine);
 
 	const next: InkCursor = { line: cursor.line + clone.segments.length - 1, word: last.length };
 	doc.meta.cursor = next;

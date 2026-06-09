@@ -79,6 +79,8 @@ function mkDoc(words0: InkWord[], words1: InkWord[] = []): InkDocument {
 	};
 }
 const W = (id: string) => word(id, stroke(`${id}s`, [pt(0, -40), pt(40, 0)]));
+// A word placed at a specific line-absolute x (for layout tests, where spacing matters).
+const Wx = (id: string, x: number) => word(id, stroke(`${id}s`, [pt(x, -40), pt(x + 40, 0)]));
 
 // ---- doc.ts ---------------------------------------------------------------
 
@@ -124,6 +126,33 @@ test('parse drops empty words/strokes', () => {
 		}),
 	);
 	eq(d.lines[0]?.words.length, 0, 'word with only empty strokes should be dropped');
+});
+
+test('parse migrates v2 word-local docs to spread, line-absolute words', () => {
+	const v2 = JSON.stringify({
+		version: 2,
+		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+		lines: [
+			{
+				id: 'l',
+				words: [
+					{ id: 'a', strokes: [{ id: 'as', points: [pt(0, -40), pt(40, 0)] }] },
+					{ id: 'b', strokes: [{ id: 'bs', points: [pt(0, -40), pt(40, 0)] }] },
+				],
+			},
+		],
+	});
+	const d = parseInkDocument(v2);
+	eq(d.version, INK_DOC_VERSION);
+	const a = wordBounds(d.lines[0]!.words[0]!);
+	const b = wordBounds(d.lines[0]!.words[1]!);
+	ok(!!a && !!b && b.minX > a.maxX, 'migrated v2 words should be spread apart, not overlapping');
+});
+
+test('v3 round-trip preserves line-absolute positions', () => {
+	const d = mkDoc([Wx('a', 0), Wx('b', 200)]);
+	const back = parseInkDocument(serializeInkDocument(d));
+	eq(wordBounds(back.lines[0]!.words[1]!)?.minX, 200, 'absolute x must survive save/load unchanged');
 });
 
 test('wordBounds spans all strokes', () => {
@@ -286,7 +315,7 @@ const layoutConfig = {
 };
 
 test('layoutDocument places every word on the cursor line', () => {
-	const d = mkDoc([W('a'), W('b')]);
+	const d = mkDoc([Wx('a', 0), Wx('b', 120)]);
 	const layout = layoutDocument(d, layoutConfig);
 	eq(layout.words.length, 2);
 	ok(
@@ -297,7 +326,7 @@ test('layoutDocument places every word on the cursor line', () => {
 });
 
 test('caretRect advances to the right as the cursor moves through words', () => {
-	const d = mkDoc([W('a'), W('b')]);
+	const d = mkDoc([Wx('a', 0), Wx('b', 120)]);
 	const layout = layoutDocument(d, layoutConfig);
 	const c0 = layout.caretRect({ line: 0, word: 0 });
 	const c2 = layout.caretRect({ line: 0, word: 2 });
@@ -305,7 +334,7 @@ test('caretRect advances to the right as the cursor moves through words', () => 
 });
 
 test('cursorFromPoint maps far-left/far-right clicks to word slots', () => {
-	const d = mkDoc([W('a'), W('b')]);
+	const d = mkDoc([Wx('a', 0), Wx('b', 120)]);
 	const layout = layoutDocument(d, layoutConfig);
 	const midY = layout.rowHeight * 0.5;
 	eq(layout.cursorFromPoint(-100, midY), { line: 0, word: 0 });
@@ -313,18 +342,27 @@ test('cursorFromPoint maps far-left/far-right clicks to word slots', () => {
 });
 
 test('cursorFromPoint resolves the second line by Y', () => {
-	const d = mkDoc([W('a')], [W('b')]);
+	const d = mkDoc([Wx('a', 0)], [Wx('b', 0)]);
 	const layout = layoutDocument(d, layoutConfig);
 	const secondRowY = layout.rowHeight * 1.5;
 	eq(layout.cursorFromPoint(-100, secondRowY).line, 1);
 });
 
 test('rangeRects returns one rect per visual row for a same-line selection', () => {
-	const d = mkDoc([W('a'), W('b'), W('c')]);
+	const d = mkDoc([Wx('a', 0), Wx('b', 120), Wx('c', 240)]);
 	const layout = layoutDocument(d, layoutConfig);
 	const rects = layout.rangeRects({ anchor: { line: 0, word: 0 }, focus: { line: 0, word: 2 } });
 	eq(rects.length, 1);
 	ok((rects[0]?.w ?? 0) > 0, 'selection rect should have width');
+});
+
+test('preserves the drawn gap between words (absolute spacing)', () => {
+	// b is drawn far to the right of a; the layout must keep that big gap, not normalise it.
+	const near = layoutDocument(mkDoc([Wx('a', 0), Wx('b', 80)]), layoutConfig);
+	const far = layoutDocument(mkDoc([Wx('a', 0), Wx('b', 400)]), layoutConfig);
+	const nearGap = (near.words[1]?.x ?? 0) - (near.words[0]?.x ?? 0);
+	const farGap = (far.words[1]?.x ?? 0) - (far.words[0]?.x ?? 0);
+	ok(farGap > nearGap * 2, 'a larger drawn gap must produce a larger laid-out gap');
 });
 
 // ---- report ---------------------------------------------------------------
