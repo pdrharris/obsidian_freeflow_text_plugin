@@ -1,6 +1,7 @@
 import {
 	MarkdownPostProcessorContext,
 	MarkdownRenderChild,
+	MarkdownView,
 	Notice,
 	Plugin,
 } from 'obsidian';
@@ -97,7 +98,7 @@ export class InkBlockRegistry {
 		documentModel.meta.cursor = clampCursor(documentModel.meta.cursor, documentModel.lines);
 
 		// Reading mode (and previews/exports): render read-only, no chrome, no border.
-		if (el.closest('.markdown-source-view') === null) {
+		if (this.isReadingMode(el, ctx)) {
 			this.mountReadOnly(containerEl, documentModel, el, ctx);
 			return;
 		}
@@ -415,6 +416,23 @@ export class InkBlockRegistry {
 				}
 			})(el),
 		);
+	}
+
+	// Decide whether this block is being rendered for Reading view (read-only) vs the editor.
+	// The element is frequently not attached yet when the processor runs, so DOM ancestry alone
+	// is unreliable; fall back to the active view's mode and default to editable.
+	private isReadingMode(el: HTMLElement, ctx: MarkdownPostProcessorContext): boolean {
+		if (el.closest('.markdown-source-view')) {
+			return false;
+		}
+		if (el.closest('.markdown-reading-view')) {
+			return true;
+		}
+		const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view && view.file?.path === ctx.sourcePath) {
+			return view.getMode() === 'preview';
+		}
+		return false; // when unsure, stay editable so the editor always works
 	}
 
 	private mountReadOnly(
