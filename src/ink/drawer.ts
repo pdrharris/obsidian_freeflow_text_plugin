@@ -536,15 +536,20 @@ export class InkDrawer {
 			if (p.x > sMaxX) sMaxX = p.x;
 		}
 
-		// Merge into the nearest word within the word-gap threshold (overlap or close), else make
-		// a new word. Either way the stroke keeps its absolute x, so its position is preserved.
+		// Words to the RIGHT of the insertion point are hidden in the drawer but still present.
+		// They must never be merged into (that would draw the new stroke on top of them) — they
+		// get pushed aside below. Only the shown words (left of the cursor) are merge candidates.
+		const rightWords = line.words.slice(cursor.word);
+
+		// Merge into the nearest SHOWN word within the word-gap threshold (overlap or close), else
+		// make a new word. Either way the stroke keeps its absolute x, so its position is preserved.
 		const threshold = Math.max(
 			8,
 			session.doc.meta.lineHeight * 0.12 * this.getRuntimeConfig().wordGapScale,
 		);
 		let mergeIndex = -1;
 		let bestGap = threshold;
-		for (let i = 0; i < line.words.length; i += 1) {
+		for (let i = 0; i < cursor.word; i += 1) {
 			const word = line.words[i];
 			if (!word) {
 				continue;
@@ -566,17 +571,13 @@ export class InkDrawer {
 			existing.strokes.push(stroke);
 			affected = existing;
 		} else {
+			// Insert the new word at the cursor, ahead of the right-of-cursor words.
 			affected = wordFromStroke(stroke);
-			line.words.push(affected);
+			line.words.splice(cursor.word, 0, affected);
 		}
-		// Keep words ordered left-to-right; put the cursor just after the affected word.
-		line.words.sort((a, b) => (wordBounds(a)?.minX ?? 0) - (wordBounds(b)?.minX ?? 0));
-		const affectedIndex = line.words.indexOf(affected);
 
-		// Push any words to the RIGHT of the insertion point along so the new content doesn't land
-		// on top of them (they're not shown in the drawer, but they're still there).
+		// Push the right-of-cursor words along so the new content doesn't land on top of them.
 		const affectedBounds = wordBounds(affected);
-		const rightWords = line.words.slice(affectedIndex + 1);
 		const firstRight = rightWords[0];
 		if (affectedBounds && firstRight) {
 			const gap = session.doc.meta.lineHeight * 0.35;
@@ -588,6 +589,9 @@ export class InkDrawer {
 			}
 		}
 
+		// Keep words ordered left-to-right; put the cursor just after the affected word.
+		line.words.sort((a, b) => (wordBounds(a)?.minX ?? 0) - (wordBounds(b)?.minX ?? 0));
+		const affectedIndex = line.words.indexOf(affected);
 		session.doc.meta.cursor = { line: cursor.line, word: affectedIndex + 1 };
 		session.doc.meta.selection = null;
 
