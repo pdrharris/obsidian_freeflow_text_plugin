@@ -89,6 +89,27 @@ export function createEmptyLine(): InkLine {
 	return { id: createLineId(), words: [] };
 }
 
+// Deep clone with fresh ids — used when copying/pasting so duplicated content never shares ids.
+export function cloneStroke(stroke: InkStroke): InkStroke {
+	return { ...stroke, id: createStrokeId(), points: stroke.points.map((p) => ({ ...p })) };
+}
+export function cloneWord(word: InkWord): InkWord {
+	return { id: createWordId(), strokes: word.strokes.map(cloneStroke) };
+}
+
+// A clipboard fragment: one word-list per copied line segment (length 1 == single-line copy).
+export interface InkFragment {
+	segments: InkWord[][];
+}
+
+export function cloneFragment(fragment: InkFragment): InkFragment {
+	return { segments: fragment.segments.map((seg) => seg.map(cloneWord)) };
+}
+
+export function fragmentIsEmpty(fragment: InkFragment | null): boolean {
+	return !fragment || fragment.segments.every((seg) => seg.length === 0);
+}
+
 export function createEmptyDocument(lineHeight = DEFAULT_LINE_HEIGHT): InkDocument {
 	return {
 		version: INK_DOC_VERSION,

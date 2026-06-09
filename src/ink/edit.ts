@@ -7,9 +7,12 @@
 import {
 	InkCursor,
 	InkDocument,
+	InkFragment,
 	InkSelection,
 	InkStroke,
 	InkWord,
+	cloneFragment,
+	cloneWord,
 	createEmptyLine,
 	createWordId,
 	orderCursors,
@@ -103,6 +106,78 @@ export function eraseAtCursor(doc: InkDocument): InkCursor {
 		}
 	}
 	return cursor;
+}
+
+// Copy the word range covered by `selection` into a fragment (deep-cloned, fresh ids).
+export function extractSelection(doc: InkDocument, selection: InkSelection): InkFragment {
+	const [start, end] = orderCursors(
+		clampCursorToDoc(doc, selection.anchor),
+		clampCursorToDoc(doc, selection.focus),
+	);
+	const segments: InkWord[][] = [];
+	if (start.line === end.line) {
+		const line = doc.lines[start.line];
+		segments.push((line?.words.slice(start.word, end.word) ?? []).map(cloneWord));
+		return { segments };
+	}
+	for (let lineIndex = start.line; lineIndex <= end.line; lineIndex += 1) {
+		const line = doc.lines[lineIndex];
+		if (!line) {
+			continue;
+		}
+		const from = lineIndex === start.line ? start.word : 0;
+		const to = lineIndex === end.line ? end.word : line.words.length;
+		segments.push(line.words.slice(from, to).map(cloneWord));
+	}
+	return { segments };
+}
+
+// Paste a fragment at the cursor (deletes the active selection first). Returns the new cursor.
+export function insertFragmentAtCursor(doc: InkDocument, fragment: InkFragment): InkCursor {
+	if (!selectionIsEmpty(doc.meta.selection)) {
+		deleteSelection(doc, doc.meta.selection as InkSelection);
+	}
+	const clone = cloneFragment(fragment);
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	const line = doc.lines[cursor.line];
+	if (!line || clone.segments.length === 0) {
+		return cursor;
+	}
+
+	const first = clone.segments[0] ?? [];
+	if (clone.segments.length === 1) {
+		line.words.splice(cursor.word, 0, ...first);
+		const next: InkCursor = { line: cursor.line, word: cursor.word + first.length };
+		doc.meta.cursor = next;
+		doc.meta.selection = null;
+		return next;
+	}
+
+	// Multi-segment paste: split the current line and stitch the fragment between the halves.
+	const head = line.words.slice(0, cursor.word);
+	const tail = line.words.slice(cursor.word);
+	const last = clone.segments[clone.segments.length - 1] ?? [];
+	const middle = clone.segments.slice(1, -1);
+
+	line.words = [...head, ...first];
+	const newLines = [
+		...middle.map((seg) => {
+			const l = createEmptyLine();
+			l.words = seg;
+			return l;
+		}),
+		(() => {
+			const l = createEmptyLine();
+			l.words = [...last, ...tail];
+			return l;
+		})(),
+	];
+	doc.lines.splice(cursor.line + 1, 0, ...newLines);
+
+	const next: InkCursor = { line: cursor.line + clone.segments.length - 1, word: last.length };
+	doc.meta.cursor = next;
+	doc.meta.selection = null;
+	return next;
 }
 
 export function deleteSelection(doc: InkDocument, selection: InkSelection): InkCursor {

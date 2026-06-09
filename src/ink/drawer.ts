@@ -8,14 +8,20 @@
 import {
 	InkCursor,
 	InkDocument,
+	InkFragment,
 	InkStroke,
 	clampCursor,
 	createStrokeId,
+	fragmentIsEmpty,
+	selectionIsEmpty,
 	wordBounds,
 } from './doc';
 import {
 	appendStrokeToCurrentWord,
+	deleteSelection,
 	eraseAtCursor,
+	extractSelection,
+	insertFragmentAtCursor,
 	insertWordAtCursor,
 	splitLineAtCursor,
 	wordFromStroke,
@@ -63,6 +69,10 @@ export class InkDrawer {
 	private readonly sheetEl: HTMLDivElement;
 	private readonly canvasEl: HTMLCanvasElement;
 	private readonly statusEl: HTMLDivElement;
+	private readonly selectButtonEl: HTMLButtonElement;
+	private readonly copyButtonEl: HTMLButtonElement;
+	private readonly cutButtonEl: HTMLButtonElement;
+	private readonly pasteButtonEl: HTMLButtonElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
 	private readonly closeButtonEl: HTMLButtonElement;
@@ -70,6 +80,9 @@ export class InkDrawer {
 	private session: DrawerSession | null = null;
 	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
+	private tool: 'pen' | 'select' = 'pen';
+	private selecting = false;
+	private clipboard: InkFragment | null = null;
 	private scrollX = 0;
 	private scrollY = 0;
 	private redrawQueued = false;
@@ -91,16 +104,20 @@ export class InkDrawer {
 
 		const rightButtons = activeDocument.createElement('div');
 		rightButtons.className = 'freeflow-ink-drawer-buttons';
-		this.eraseButtonEl = activeDocument.createElement('button');
-		this.eraseButtonEl.type = 'button';
-		this.eraseButtonEl.className = 'freeflow-ink-drawer-btn';
-		this.eraseButtonEl.textContent = 'Erase';
-		rightButtons.appendChild(this.eraseButtonEl);
-		this.newLineButtonEl = activeDocument.createElement('button');
-		this.newLineButtonEl.type = 'button';
-		this.newLineButtonEl.className = 'freeflow-ink-drawer-btn';
-		this.newLineButtonEl.textContent = 'New line';
-		rightButtons.appendChild(this.newLineButtonEl);
+		const makeButton = (label: string): HTMLButtonElement => {
+			const btn = activeDocument.createElement('button');
+			btn.type = 'button';
+			btn.className = 'freeflow-ink-drawer-btn';
+			btn.textContent = label;
+			rightButtons.appendChild(btn);
+			return btn;
+		};
+		this.selectButtonEl = makeButton('Select');
+		this.copyButtonEl = makeButton('Copy');
+		this.cutButtonEl = makeButton('Cut');
+		this.pasteButtonEl = makeButton('Paste');
+		this.eraseButtonEl = makeButton('Erase');
+		this.newLineButtonEl = makeButton('New line');
 
 		const topBar = activeDocument.createElement('div');
 		topBar.className = 'freeflow-ink-drawer-top';
@@ -141,6 +158,8 @@ export class InkDrawer {
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		this.activeStroke = null;
 		this.activePointerId = null;
+		this.tool = 'pen';
+		this.selecting = false;
 		this.rootEl.classList.add('is-open');
 		this.updateScrollToCursor();
 		this.requestDraw();
@@ -238,6 +257,15 @@ export class InkDrawer {
 		ctx.fillStyle = '#ffffff';
 		ctx.fillRect(0, 0, cssWidth, cssHeight);
 
+		// Selection highlight (behind the strokes).
+		const selection = session.doc.meta.selection;
+		if (selection && !selectionIsEmpty(selection)) {
+			ctx.fillStyle = 'rgba(37, 99, 235, 0.18)';
+			for (const r of layout.rangeRects(selection)) {
+				ctx.fillRect(r.x - this.scrollX, r.y - this.scrollY, r.w, r.h);
+			}
+		}
+
 		// Baseline guide for the cursor's row.
 		const caret = layout.caretRect(session.doc.meta.cursor);
 		if (this.getRuntimeConfig().showWritingLine) {
@@ -276,6 +304,8 @@ export class InkDrawer {
 				'#111827',
 			);
 		}
+
+		this.updateToolUi();
 	}
 
 	// ----------------------------------------------------------------- input
@@ -285,6 +315,10 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
 		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.addEventListener('pointercancel', this.onPointerUp);
+		this.selectButtonEl.addEventListener('click', this.onToggleSelect);
+		this.copyButtonEl.addEventListener('click', this.onCopy);
+		this.cutButtonEl.addEventListener('click', this.onCut);
+		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.eraseButtonEl.addEventListener('click', this.onErase);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
@@ -296,16 +330,20 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
 		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerUp);
+		this.selectButtonEl.removeEventListener('click', this.onToggleSelect);
+		this.copyButtonEl.removeEventListener('click', this.onCopy);
+		this.cutButtonEl.removeEventListener('click', this.onCut);
+		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.eraseButtonEl.removeEventListener('click', this.onErase);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
 	}
 
-	private acceptsPointer(event: PointerEvent): boolean {
-		if (event.pointerType === 'touch') {
-			return this.getRuntimeConfig().allowAnyNonMousePointer;
-		}
+	private acceptsPointer(_event: PointerEvent): boolean {
+		// Accept pen, mouse and touch on every platform (Android/iOS/desktop). The drawer is an
+		// explicit writing surface, and the single-active-pointer guard ignores extra touches,
+		// giving basic palm rejection.
 		return true;
 	}
 
@@ -316,7 +354,6 @@ export class InkDrawer {
 		event.preventDefault();
 		this.lastInteractionAt = Date.now();
 		this.activePointerId = event.pointerId;
-		this.activeStroke = [];
 		if (this.getRuntimeConfig().usePointerCapture) {
 			try {
 				this.canvasEl.setPointerCapture(event.pointerId);
@@ -324,15 +361,41 @@ export class InkDrawer {
 				/* iOS can reject capture during fast pen input */
 			}
 		}
+		if (this.tool === 'select') {
+			this.selecting = true;
+			const cursor = this.pointerToCursor(event);
+			this.session.doc.meta.selection = { anchor: cursor, focus: cursor };
+			this.session.doc.meta.cursor = cursor;
+			this.requestDraw();
+			return;
+		}
+		// Pen: starting a stroke clears any selection.
+		this.session.doc.meta.selection = null;
+		this.activeStroke = [];
 		this.appendActivePoint(event);
 		this.requestDraw();
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
-		if (this.activePointerId !== event.pointerId || !this.activeStroke) {
+		if (this.activePointerId !== event.pointerId) {
 			return;
 		}
 		event.preventDefault();
+		if (this.tool === 'select') {
+			if (this.selecting && this.session) {
+				const focus = this.pointerToCursor(event);
+				const sel = this.session.doc.meta.selection;
+				if (sel) {
+					sel.focus = focus;
+				}
+				this.session.doc.meta.cursor = focus;
+				this.requestDraw();
+			}
+			return;
+		}
+		if (!this.activeStroke) {
+			return;
+		}
 		const samples =
 			typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
 		for (const sample of samples.length > 0 ? samples : [event]) {
@@ -354,8 +417,34 @@ export class InkDrawer {
 				/* ignore */
 			}
 		}
+		if (this.tool === 'select') {
+			this.activePointerId = null;
+			this.selecting = false;
+			const session = this.session;
+			if (session) {
+				// A tap (empty selection) just places the cursor.
+				if (selectionIsEmpty(session.doc.meta.selection)) {
+					session.doc.meta.selection = null;
+				}
+				this.updateScrollToCursor();
+				session.onCursorChanged();
+			}
+			this.requestDraw();
+			return;
+		}
 		this.finishStroke();
 	};
+
+	private pointerToCursor(event: PointerEvent): InkCursor {
+		const layout = this.drawerLayout();
+		if (!layout) {
+			return { line: 0, word: 0 };
+		}
+		const rect = this.canvasEl.getBoundingClientRect();
+		const lx = event.clientX - rect.left + this.scrollX;
+		const ly = event.clientY - rect.top + this.scrollY;
+		return layout.cursorFromPoint(lx, ly);
+	}
 
 	private appendActivePoint(event: PointerEvent): void {
 		if (!this.activeStroke) {
@@ -463,6 +552,54 @@ export class InkDrawer {
 	}
 
 	// ----------------------------------------------------------------- buttons
+
+	private onToggleSelect = (): void => {
+		this.tool = this.tool === 'select' ? 'pen' : 'select';
+		this.selecting = false;
+		this.requestDraw();
+	};
+
+	private onCopy = (): void => {
+		const session = this.session;
+		if (!session || selectionIsEmpty(session.doc.meta.selection)) {
+			return;
+		}
+		this.clipboard = extractSelection(session.doc, session.doc.meta.selection!);
+		this.requestDraw();
+	};
+
+	private onCut = (): void => {
+		const session = this.session;
+		if (!session || selectionIsEmpty(session.doc.meta.selection)) {
+			return;
+		}
+		this.clipboard = extractSelection(session.doc, session.doc.meta.selection!);
+		deleteSelection(session.doc, session.doc.meta.selection!);
+		this.tool = 'pen';
+		this.updateScrollToCursor();
+		session.onContentChanged();
+		this.requestDraw();
+	};
+
+	private onPaste = (): void => {
+		const session = this.session;
+		if (!session || fragmentIsEmpty(this.clipboard)) {
+			return;
+		}
+		insertFragmentAtCursor(session.doc, this.clipboard!);
+		this.updateScrollToCursor();
+		session.onContentChanged();
+		this.requestDraw();
+	};
+
+	private updateToolUi(): void {
+		const hasSelection = !!this.session && !selectionIsEmpty(this.session.doc.meta.selection);
+		this.selectButtonEl.classList.toggle('is-active', this.tool === 'select');
+		this.copyButtonEl.disabled = !hasSelection;
+		this.cutButtonEl.disabled = !hasSelection;
+		this.pasteButtonEl.disabled = fragmentIsEmpty(this.clipboard);
+		this.statusEl.textContent = this.tool === 'select' ? 'Select' : 'Pen';
+	}
 
 	private onErase = (): void => {
 		const session = this.session;

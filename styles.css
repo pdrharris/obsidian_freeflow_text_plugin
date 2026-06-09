@@ -157,6 +157,9 @@
 .freeflow-ink-drawer-buttons {
 	display: flex;
 	flex-direction: column;
+	flex-wrap: wrap;
+	align-content: flex-end;
+	max-height: calc(100vh - 40px);
 	gap: 10px;
 	padding-bottom: 8px;
 }
@@ -179,6 +182,12 @@
 	background: rgba(220, 38, 38, 0.1);
 	border-color: rgba(220, 38, 38, 0.5);
 	color: #b91c1c;
+}
+
+.freeflow-ink-drawer-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+	box-shadow: none;
 }
 
 .freeflow-ink-settings-value {

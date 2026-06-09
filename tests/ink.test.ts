@@ -20,6 +20,8 @@ import {
 	appendStrokeToCurrentWord,
 	deleteSelection,
 	eraseAtCursor,
+	extractSelection,
+	insertFragmentAtCursor,
 	insertWordAtCursor,
 	splitLineAtCursor,
 	wordFromStroke,
@@ -214,6 +216,63 @@ test('deleteSelection merges across lines', () => {
 test('wordFromStroke wraps a stroke into a single-stroke word', () => {
 	const w = wordFromStroke(stroke('s', [pt(0, 0)]));
 	eq(w.strokes.length, 1);
+});
+
+// ---- copy / paste ---------------------------------------------------------
+
+test('extractSelection copies a same-line range without mutating the source', () => {
+	const d = mkDoc([W('a'), W('b'), W('c'), W('d')]);
+	const frag = extractSelection(d, { anchor: { line: 0, word: 1 }, focus: { line: 0, word: 3 } });
+	eq(frag.segments.length, 1);
+	eq(frag.segments[0]?.length, 2, 'should copy words b and c');
+	eq(d.lines[0]?.words.length, 4, 'copy must not delete from the source');
+});
+
+test('extractSelection copies a multi-line range as multiple segments', () => {
+	const d = mkDoc([W('a'), W('b')], [W('c'), W('d')]);
+	const frag = extractSelection(d, { anchor: { line: 0, word: 1 }, focus: { line: 1, word: 1 } });
+	eq(frag.segments.length, 2);
+	eq(frag.segments[0]?.length, 1);
+	eq(frag.segments[1]?.length, 1);
+});
+
+test('insertFragmentAtCursor pastes a single segment inline', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	d.meta.cursor = { line: 0, word: 1 };
+	const next = insertFragmentAtCursor(d, { segments: [[W('x'), W('y')]] });
+	eq(d.lines[0]?.words.length, 4);
+	eq(next, { line: 0, word: 3 });
+});
+
+test('insertFragmentAtCursor pastes a multi-segment fragment across lines', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	d.meta.cursor = { line: 0, word: 1 };
+	const next = insertFragmentAtCursor(d, { segments: [[W('x')], [W('y')]] });
+	eq(d.lines.length, 2);
+	eq(d.lines[0]?.words.length, 2, 'first line = a + x');
+	eq(d.lines[1]?.words.length, 2, 'second line = y + b');
+	eq(next, { line: 1, word: 1 });
+});
+
+test('pasting the same fragment twice yields unique stroke/word ids', () => {
+	const d = mkDoc([W('a')]);
+	const frag = extractSelection(
+		mkDoc([W('p'), W('q')]),
+		{ anchor: { line: 0, word: 0 }, focus: { line: 0, word: 2 } },
+	);
+	d.meta.cursor = { line: 0, word: 1 };
+	insertFragmentAtCursor(d, frag);
+	insertFragmentAtCursor(d, frag);
+	const ids: string[] = [];
+	for (const line of d.lines) {
+		for (const w of line.words) {
+			ids.push(w.id);
+			for (const s of w.strokes) {
+				ids.push(s.id);
+			}
+		}
+	}
+	eq(ids.length, new Set(ids).size, 'all word/stroke ids must be unique after repeated paste');
 });
 
 // ---- layout.ts ------------------------------------------------------------
