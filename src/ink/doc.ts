@@ -148,6 +148,18 @@ export function strokeBounds(stroke: InkStroke): InkBounds | null {
 	return { minX, maxX, minY, maxY };
 }
 
+// Translate every point of a word along the line by dx (line-absolute coordinates).
+export function shiftWordX(word: InkWord, dx: number): void {
+	if (dx === 0) {
+		return;
+	}
+	for (const stroke of word.strokes) {
+		for (const point of stroke.points) {
+			point.x += dx;
+		}
+	}
+}
+
 export function wordBounds(word: InkWord): InkBounds | null {
 	let bounds: InkBounds | null = null;
 	for (const stroke of word.strokes) {

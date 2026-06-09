@@ -17,22 +17,11 @@ import {
 	createWordId,
 	orderCursors,
 	selectionIsEmpty,
+	shiftWordX,
 	wordBounds,
 } from './doc';
 
 const PASTE_GAP_FACTOR = 0.35; // inter-word gap (x lineHeight) used when rebasing pasted content
-
-// Shift every point of a word by dx (line-absolute x).
-function shiftWordX(word: InkWord, dx: number): void {
-	if (dx === 0) {
-		return;
-	}
-	for (const stroke of word.strokes) {
-		for (const point of stroke.points) {
-			point.x += dx;
-		}
-	}
-}
 
 // Move a run of words so the first word's left edge sits at startX, preserving internal gaps.
 // Returns the run's right edge (or startX if empty).

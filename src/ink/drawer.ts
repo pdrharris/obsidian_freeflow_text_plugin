@@ -16,6 +16,7 @@ import {
 	clampCursor,
 	createStrokeId,
 	fragmentIsEmpty,
+	shiftWordX,
 	wordBounds,
 } from './doc';
 import { getClipboard } from './clipboard';
@@ -570,7 +571,24 @@ export class InkDrawer {
 		}
 		// Keep words ordered left-to-right; put the cursor just after the affected word.
 		line.words.sort((a, b) => (wordBounds(a)?.minX ?? 0) - (wordBounds(b)?.minX ?? 0));
-		session.doc.meta.cursor = { line: cursor.line, word: line.words.indexOf(affected) + 1 };
+		const affectedIndex = line.words.indexOf(affected);
+
+		// Push any words to the RIGHT of the insertion point along so the new content doesn't land
+		// on top of them (they're not shown in the drawer, but they're still there).
+		const affectedBounds = wordBounds(affected);
+		const rightWords = line.words.slice(affectedIndex + 1);
+		const firstRight = rightWords[0];
+		if (affectedBounds && firstRight) {
+			const gap = session.doc.meta.lineHeight * 0.35;
+			const delta = affectedBounds.maxX + gap - (wordBounds(firstRight)?.minX ?? 0);
+			if (delta > 0) {
+				for (const word of rightWords) {
+					shiftWordX(word, delta);
+				}
+			}
+		}
+
+		session.doc.meta.cursor = { line: cursor.line, word: affectedIndex + 1 };
 		session.doc.meta.selection = null;
 
 		// Don't jump the view on lift-off; only advance after the configured pause.
