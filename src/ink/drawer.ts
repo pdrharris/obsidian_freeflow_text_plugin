@@ -1,48 +1,30 @@
+// The floating writing drawer for the flowing-text ink model.
+//
+// The drawer is a writing surface: it renders the laid-out document (large "write big" glyphs,
+// no soft-wrap), scrolled to follow the cursor, and lets the user add strokes. Captured strokes
+// are converted to source coordinates and inserted into the logical tree via `edit.ts`; after
+// every change the layout engine recomputes geometry. There is no absolute-coordinate patching.
+
 import {
-	createStrokeId,
-	INK_BASELINE_RATIO_FROM_TOP,
-	INK_LINE_BREAK_MARKER_PREFIX,
+	InkCursor,
 	InkDocument,
-	InkLineBreakInsertOperation,
 	InkStroke,
-	InkStrokeShift,
-	InkViewport,
-	isLineBreakMarkerStroke,
-} from './model';
+	clampCursor,
+	createStrokeId,
+	wordBounds,
+} from './doc';
 import {
-	clearStructuralOperation,
-	getLineBreakInsertOperation,
-	readCanonicalCursor,
-	resolveAutoLinePreference,
-	setLineBreakInsertOperation,
-	writeCanonicalCursor,
-} from './cursor';
-import { drawDrawerCanvas, type InsertionLinePreference } from './render';
+	appendStrokeToCurrentWord,
+	eraseAtCursor,
+	insertWordAtCursor,
+	splitLineAtCursor,
+	wordFromStroke,
+} from './edit';
+import { LayoutResult, layoutDocument } from './layout';
+import { drawLaidStroke, resizeCanvasForDpr } from './render';
 
-const STEP_RATIO = 0.72;
-const DEFAULT_PEN_COLOR = '#111827';
-const DEFAULT_PEN_WIDTH = 3;
-const NEW_LINE_START_PADDING = 24;
-const INFERRED_PEN_START_MOVE_PX = 1.8;
-const INFERRED_PEN_START_MAX_AGE_MS = 220;
-const INFERRED_PEN_START_AFTER_UP_MS = 1200;
-const DOWNLESS_PEN_BUFFER_MAX_AGE_MS = 220;
-const DOWNLESS_PEN_BUFFER_MAX_IDLE_MS = 90;
-const DOWNLESS_PEN_BUFFER_MIN_TRAVEL_PX = 2.5;
 const BACKDROP_CLOSE_GUARD_MS = 420;
-
-export interface DrawerSession {
-	key: string;
-	doc: InkDocument;
-	viewport: InkViewport;
-	cursorIndex: number;
-	linePreference: InsertionLinePreference;
-	onDocumentChanged: () => void;
-	onViewportChanged: (viewport: InkViewport) => void;
-	onCursorChanged: (cursorIndex: number) => void;
-	onLinePreferenceChanged: (linePreference: InsertionLinePreference) => void;
-	onClose: () => void;
-}
+const MIN_POINT_DISTANCE_SQ = 0.35;
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
@@ -60,178 +42,19 @@ export interface InkDiagnosticResult {
 	detail: string;
 }
 
-interface PencilTimingDiagnostics {
-	downCount: number;
-	upCount: number;
-	cancelCount: number;
-	lostCaptureCount: number;
-	recoveredOnDownCount: number;
-	staleSameIdDownCount: number;
-	crossIdFinalizeCount: number;
-	moveStartCount: number;
-	rawStartCount: number;
-	inferredStartCount: number;
-	upOnlyStartCount: number;
-	upBufferedStartCount: number;
-	windowStartCount: number;
-	touchFallbackStartCount: number;
-	upAddedPointCount: number;
-	zeroPointFinishCount: number;
-	penLikeDownCount: number;
-	touchDownCount: number;
-	otherDownCount: number;
-	observedCanvasDownPenCount: number;
-	observedCanvasMovePenCount: number;
-	observedCanvasRawPenCount: number;
-	observedCanvasUpPenCount: number;
-	observedDocumentDownPenInCanvasCount: number;
-	observedWindowDownPenInCanvasCount: number;
-	observedWindowMovePenInCanvasCount: number;
-	observedWindowUpPenInCanvasCount: number;
-	observedCanvasPointer: PointerStageObservation;
-	observedDocumentPointerInCanvas: PointerStageObservation;
-	observedWindowPointerInCanvas: PointerStageObservation;
-	observedCanvasTouch: TouchStageObservation;
-	observedDocumentTouchInCanvas: TouchStageObservation;
-	observedWindowTouchInCanvas: TouchStageObservation;
-	touchFallback: TouchFallbackObservation;
-	touchMetadata: TouchMetadataObservation;
-	downToUpMs: number[];
-	upToDownMs: number[];
-	finishStrokeMs: number[];
+export interface DrawerSession {
+	key: string;
+	doc: InkDocument;
+	onContentChanged: () => void;
+	onCursorChanged: () => void;
+	onClose: () => void;
 }
 
-interface PointerTypeObservation {
-	total: number;
-	pen: number;
-	touch: number;
-	mouse: number;
-	other: number;
-}
-
-interface PointerStageObservation {
-	down: PointerTypeObservation;
-	move: PointerTypeObservation;
-	up: PointerTypeObservation;
-}
-
-interface TouchStageObservation {
-	start: number;
-	move: number;
-	end: number;
-	cancel: number;
-}
-
-interface TouchFallbackObservation {
-	startObservedCount: number;
-	startBlockedModeOffCount: number;
-	startBlockedActivePointerCount: number;
-	startBlockedActiveTouchCount: number;
-	startMissingChangedTouchCount: number;
-	startPendingSetCount: number;
-	moveObservedCount: number;
-	moveBlockedModeOffCount: number;
-	moveBlockedActivePointerCount: number;
-	moveBlockedNoPendingCount: number;
-	moveBlockedPendingNotFoundCount: number;
-	moveActivatedCount: number;
-	moveContinueCount: number;
-	moveContinueMissingTouchCount: number;
-	moveContinueMissingStrokeCount: number;
-	endObservedCount: number;
-	endFinalizeWithActiveCount: number;
-	endPendingClearedCount: number;
-	cancelObservedCount: number;
-	cancelFinalizeWithActiveCount: number;
-	cancelPendingClearedCount: number;
-}
-
-interface TouchMetadataObservation {
-	sampledCount: number;
-	typeStylusCount: number;
-	typeDirectCount: number;
-	typeUnknownCount: number;
-	stylusLikeHeuristicCount: number;
-	directLikeHeuristicCount: number;
-	forcePositiveCount: number;
-	smallRadiusCount: number;
-	largeRadiusCount: number;
-	maxForceSeen: number;
-}
-
-interface DownlessPenMotionSample {
-	clientX: number;
-	clientY: number;
+interface ActivePoint {
+	x: number; // canvas css px
+	y: number; // canvas css px
 	pressure: number;
 	time: number;
-}
-
-function createPointerTypeObservation(): PointerTypeObservation {
-	return {
-		total: 0,
-		pen: 0,
-		touch: 0,
-		mouse: 0,
-		other: 0,
-	};
-}
-
-function createPointerStageObservation(): PointerStageObservation {
-	return {
-		down: createPointerTypeObservation(),
-		move: createPointerTypeObservation(),
-		up: createPointerTypeObservation(),
-	};
-}
-
-function createTouchStageObservation(): TouchStageObservation {
-	return {
-		start: 0,
-		move: 0,
-		end: 0,
-		cancel: 0,
-	};
-}
-
-function createTouchFallbackObservation(): TouchFallbackObservation {
-	return {
-		startObservedCount: 0,
-		startBlockedModeOffCount: 0,
-		startBlockedActivePointerCount: 0,
-		startBlockedActiveTouchCount: 0,
-		startMissingChangedTouchCount: 0,
-		startPendingSetCount: 0,
-		moveObservedCount: 0,
-		moveBlockedModeOffCount: 0,
-		moveBlockedActivePointerCount: 0,
-		moveBlockedNoPendingCount: 0,
-		moveBlockedPendingNotFoundCount: 0,
-		moveActivatedCount: 0,
-		moveContinueCount: 0,
-		moveContinueMissingTouchCount: 0,
-		moveContinueMissingStrokeCount: 0,
-		endObservedCount: 0,
-		endFinalizeWithActiveCount: 0,
-		endPendingClearedCount: 0,
-		cancelObservedCount: 0,
-		cancelFinalizeWithActiveCount: 0,
-		cancelPendingClearedCount: 0,
-	};
-}
-
-function createTouchMetadataObservation(): TouchMetadataObservation {
-	return {
-		sampledCount: 0,
-		typeStylusCount: 0,
-		typeDirectCount: 0,
-		typeUnknownCount: 0,
-		stylusLikeHeuristicCount: 0,
-		directLikeHeuristicCount: 0,
-		forcePositiveCount: 0,
-		smallRadiusCount: 0,
-		largeRadiusCount: 0,
-		maxForceSeen: 0,
-	};
 }
 
 export class InkDrawer {
@@ -239,75 +62,18 @@ export class InkDrawer {
 	private readonly rootEl: HTMLDivElement;
 	private readonly sheetEl: HTMLDivElement;
 	private readonly canvasEl: HTMLCanvasElement;
+	private readonly statusEl: HTMLDivElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
 	private readonly closeButtonEl: HTMLButtonElement;
-	private readonly statusEl: HTMLDivElement;
 
 	private session: DrawerSession | null = null;
+	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
-	private activeStroke: InkStroke | null = null;
-	private hasPenInSession = false;
+	private scrollX = 0;
+	private scrollY = 0;
 	private redrawQueued = false;
-	private lastLocalX: number | null = null;
-	private pendingAdvanceOnRelease = false;
-	private idleAdvanceTimer = 0;
-	private releaseAdvanceTimer = 0;
-	private snapNextStrokeToCursor = false;
-	private pendingSnapAnchorX: number | null = null;
-	private lastPenLikeEventAt = 0;
-	private lastPointerDownAt = 0;
-	private lastPointerUpAt = 0;
-	private pendingTouchId: number | null = null;
-	private activeTouchId: number | null = null;
-	private pendingInferredPenPointerId: number | null = null;
-	private pendingInferredPenClientX = 0;
-	private pendingInferredPenClientY = 0;
-	private pendingInferredPenAt = 0;
-	private inferredStartArmedPointerId: number | null = null;
-	private inferredStartArmedAt = 0;
-	private downlessPenBuffer: DownlessPenMotionSample[] = [];
-	private lastPointerDownSignature = '';
-	private readonly pencilTiming: PencilTimingDiagnostics = {
-		downCount: 0,
-		upCount: 0,
-		cancelCount: 0,
-		lostCaptureCount: 0,
-		recoveredOnDownCount: 0,
-		staleSameIdDownCount: 0,
-		crossIdFinalizeCount: 0,
-		moveStartCount: 0,
-		rawStartCount: 0,
-		inferredStartCount: 0,
-		upOnlyStartCount: 0,
-		upBufferedStartCount: 0,
-		windowStartCount: 0,
-		touchFallbackStartCount: 0,
-		upAddedPointCount: 0,
-		zeroPointFinishCount: 0,
-		penLikeDownCount: 0,
-		touchDownCount: 0,
-		otherDownCount: 0,
-		observedCanvasDownPenCount: 0,
-		observedCanvasMovePenCount: 0,
-		observedCanvasRawPenCount: 0,
-		observedCanvasUpPenCount: 0,
-		observedDocumentDownPenInCanvasCount: 0,
-		observedWindowDownPenInCanvasCount: 0,
-		observedWindowMovePenInCanvasCount: 0,
-		observedWindowUpPenInCanvasCount: 0,
-		observedCanvasPointer: createPointerStageObservation(),
-		observedDocumentPointerInCanvas: createPointerStageObservation(),
-		observedWindowPointerInCanvas: createPointerStageObservation(),
-		observedCanvasTouch: createTouchStageObservation(),
-		observedDocumentTouchInCanvas: createTouchStageObservation(),
-		observedWindowTouchInCanvas: createTouchStageObservation(),
-		touchFallback: createTouchFallbackObservation(),
-		touchMetadata: createTouchMetadataObservation(),
-		downToUpMs: [],
-		upToDownMs: [],
-		finishStrokeMs: [],
-	};
+	private lastInteractionAt = 0;
 
 	constructor(getRuntimeConfig: () => DrawerRuntimeConfig) {
 		this.getRuntimeConfig = getRuntimeConfig;
@@ -355,14 +121,11 @@ export class InkDrawer {
 		activeDocument.body.appendChild(this.rootEl);
 
 		this.attachListeners();
-		this.updateToolUi();
 	}
 
 	destroy(): void {
 		this.close();
 		this.detachListeners();
-		this.clearIdleAdvanceTimer();
-		this.clearReleaseAdvanceTimer();
 		this.rootEl.remove();
 	}
 
@@ -370,1622 +133,76 @@ export class InkDrawer {
 		this.requestDraw();
 	}
 
-	runBasicDiagnostics(): InkDiagnosticResult[] {
-		const lineHeight = 180;
-		const y1 = lineHeight;
-		const y2 = lineHeight * 2;
-		const y3 = lineHeight * 3;
-		const now = Date.now();
-		const epsilon = 0.01;
-		const results: InkDiagnosticResult[] = [];
-
-		const makeStroke = (id: string, minX: number, maxX: number, y: number): InkStroke => ({
-			id,
-			tool: 'pen',
-			color: '#111827',
-			width: 3,
-			points: [
-				{ x: minX, y, pressure: 0.5, time: now },
-				{ x: maxX, y, pressure: 0.5, time: now + 1 },
-			],
-		});
-		const approx = (value: number, expected: number): boolean =>
-			Math.abs(value - expected) <= epsilon;
-		const centerY = (stroke: InkStroke | undefined): number | null => {
-			if (!stroke) {
-				return null;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			return bounds ? bounds.centerY : null;
-		};
-		const createSession = (doc: InkDocument): DrawerSession => ({
-			key: 'diagnostic',
-			doc,
-			viewport: {
-				viewportX: 0,
-				lineOffsetY: lineHeight,
-			},
-			cursorIndex: 0,
-			linePreference: 'auto',
-			onDocumentChanged: () => {
-				/* noop */
-			},
-			onViewportChanged: () => {
-				/* noop */
-			},
-			onCursorChanged: () => {
-				/* noop */
-			},
-			onLinePreferenceChanged: () => {
-				/* noop */
-			},
-			onClose: () => {
-				/* noop */
-			},
-		});
-		const createDoc = (strokes: InkStroke[]): InkDocument => ({
-			version: 1,
-			meta: {
-				lineHeight,
-				cursor: {
-					index: strokes.length,
-					linePreference: 'auto',
-					updatedAt: 0,
-				},
-				lastStructuralOp: null,
-			},
-			strokes,
-		});
-
-		const emptyDoc = createDoc([]);
-		const emptyIndex = this.resolveNewlineInsertionIndex(
-			emptyDoc,
-			0,
-			y1,
-			NEW_LINE_START_PADDING,
-			lineHeight,
-		);
-		const emptyChanged = this.applyCarriageReturnAtCursor(
-			createSession(emptyDoc),
-			emptyIndex,
-			y1,
-			y2,
-			NEW_LINE_START_PADDING,
-			NEW_LINE_START_PADDING,
-			lineHeight,
-		);
-		results.push({
-			name: 'Empty block newline baseline',
-			pass: emptyIndex === 0 && !emptyChanged && emptyDoc.strokes.length === 0,
-			detail: `index=${emptyIndex}, moved=${emptyChanged ? 'yes' : 'no'}, strokes=${emptyDoc.strokes.length}`,
-		});
-
-		const eolDoc = createDoc([
-			makeStroke('eol-a', 40, 75, y1),
-			makeStroke('eol-b', 95, 132, y1),
-			makeStroke('eol-c', 155, 190, y1),
-		]);
-		const eolIndex = this.resolveNewlineInsertionIndex(
-			eolDoc,
-			eolDoc.strokes.length,
-			y1,
-			220,
-			lineHeight,
-		);
-		const eolLastBefore = centerY(eolDoc.strokes[eolDoc.strokes.length - 1]);
-		const eolChanged = this.applyCarriageReturnAtCursor(
-			createSession(eolDoc),
-			eolIndex,
-			y1,
-			y2,
-			NEW_LINE_START_PADDING,
-			220,
-			lineHeight,
-		);
-		const eolLastAfter = centerY(eolDoc.strokes[eolDoc.strokes.length - 1]);
-		results.push({
-			name: 'End-of-line newline keeps trailing stroke',
-			pass:
-				eolIndex === eolDoc.strokes.length &&
-				!eolChanged &&
-				typeof eolLastBefore === 'number' &&
-				typeof eolLastAfter === 'number' &&
-				approx(eolLastBefore, eolLastAfter),
-			detail: `index=${eolIndex}, moved=${eolChanged ? 'yes' : 'no'}, lastYBefore=${eolLastBefore ?? 'n/a'}, lastYAfter=${eolLastAfter ?? 'n/a'}`,
-		});
-
-		const splitDoc = createDoc([
-			makeStroke('split-a', 38, 70, y1),
-			makeStroke('split-b', 95, 124, y1),
-			makeStroke('split-c', 145, 178, y1),
-			makeStroke('split-d', 44, 86, y2),
-		]);
-		const splitIndex = this.resolveNewlineInsertionIndex(splitDoc, 1, y1, 90, lineHeight);
-		const splitChanged = this.applyCarriageReturnAtCursor(
-			createSession(splitDoc),
-			splitIndex,
-			y1,
-			y2,
-			NEW_LINE_START_PADDING,
-			90,
-			lineHeight,
-		);
-		const splitA = splitDoc.strokes.find((stroke) => stroke.id === 'split-a');
-		const splitB = splitDoc.strokes.find((stroke) => stroke.id === 'split-b');
-		const splitC = splitDoc.strokes.find((stroke) => stroke.id === 'split-c');
-		const splitD = splitDoc.strokes.find((stroke) => stroke.id === 'split-d');
-		const splitAY = centerY(splitA);
-		const splitBY = centerY(splitB);
-		const splitCY = centerY(splitC);
-		const splitDY = centerY(splitD);
-		results.push({
-			name: 'Mid-line newline shifts trailing and downstream lines',
-			pass:
-				splitIndex === 1 &&
-				splitChanged &&
-				typeof splitAY === 'number' &&
-				typeof splitBY === 'number' &&
-				typeof splitCY === 'number' &&
-				typeof splitDY === 'number' &&
-				approx(splitAY, y1) &&
-				approx(splitBY, y2) &&
-				approx(splitCY, y2) &&
-				approx(splitDY, y3),
-			detail: `index=${splitIndex}, moved=${splitChanged ? 'yes' : 'no'}, y=[a:${splitAY ?? 'n/a'}, b:${splitBY ?? 'n/a'}, c:${splitCY ?? 'n/a'}, d:${splitDY ?? 'n/a'}]`,
-		});
-
-		const markerDoc = createDoc([
-			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
-			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y3),
-		]);
-		const markerPruned = this.pruneLineBreakMarkersIfNoVisibleStrokes(markerDoc);
-		results.push({
-			name: 'Marker-only block cleanup after erase',
-			pass: markerPruned && markerDoc.strokes.length === 0,
-			detail: `pruned=${markerPruned ? 'yes' : 'no'}, remaining=${markerDoc.strokes.length}`,
-		});
-
-		const eraseAfterMarkerDoc = createDoc([
-			makeStroke('erase-after-a', 38, 74, y1),
-			makeStroke('erase-after-b', 96, 132, y1),
-			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
-		]);
-		const eraseAfterSession = createSession(eraseAfterMarkerDoc);
-		eraseAfterSession.cursorIndex = eraseAfterMarkerDoc.strokes.length;
-		eraseAfterSession.linePreference = 'next';
-		eraseAfterSession.viewport = {
-			viewportX: 0,
-			lineOffsetY: y2,
-		};
-		this.session = eraseAfterSession;
-		this.activePointerId = null;
-		this.eraseLastStroke();
-		const eraseAfterIds = eraseAfterMarkerDoc.strokes.map((stroke) => stroke.id);
-		const eraseAfterMarkerRemaining = eraseAfterIds.some((id) =>
-			id.startsWith(INK_LINE_BREAK_MARKER_PREFIX),
-		);
-		results.push({
-			name: 'Erase newline marker at cursor-1 boundary',
-			pass:
-				eraseAfterMarkerDoc.strokes.length === 2 &&
-				eraseAfterSession.cursorIndex === 2 &&
-				String(eraseAfterSession.linePreference) === 'prev' &&
-				eraseAfterSession.viewport.lineOffsetY === y1 &&
-				!eraseAfterMarkerRemaining,
-			detail: `count=${eraseAfterMarkerDoc.strokes.length}, cursor=${eraseAfterSession.cursorIndex}, linePref=${eraseAfterSession.linePreference}, lineOffsetY=${eraseAfterSession.viewport.lineOffsetY}, markerRemaining=${eraseAfterMarkerRemaining ? 'yes' : 'no'}`,
-		});
-
-		const eraseAtCursorDoc = createDoc([
-			makeStroke('erase-cursor-a', 42, 76, y1),
-			makeStroke('erase-cursor-b', 98, 136, y1),
-			this.createLineBreakMarkerStroke(NEW_LINE_START_PADDING, y2),
-		]);
-		const eraseAtCursorSession = createSession(eraseAtCursorDoc);
-		eraseAtCursorSession.cursorIndex = 2;
-		eraseAtCursorSession.linePreference = 'prev';
-		eraseAtCursorSession.viewport = {
-			viewportX: 0,
-			lineOffsetY: y1,
-		};
-		this.session = eraseAtCursorSession;
-		this.activePointerId = null;
-		this.eraseLastStroke();
-		const eraseAtCursorIds = eraseAtCursorDoc.strokes.map((stroke) => stroke.id);
-		const eraseAtCursorMarkerRemaining = eraseAtCursorIds.some((id) =>
-			id.startsWith(INK_LINE_BREAK_MARKER_PREFIX),
-		);
-		results.push({
-			name: 'Erase newline marker at cursor boundary',
-			pass:
-				eraseAtCursorDoc.strokes.length === 2 &&
-				eraseAtCursorSession.cursorIndex === 2 &&
-				String(eraseAtCursorSession.linePreference) === 'prev' &&
-				eraseAtCursorSession.viewport.lineOffsetY === y1 &&
-				!eraseAtCursorMarkerRemaining,
-			detail: `count=${eraseAtCursorDoc.strokes.length}, cursor=${eraseAtCursorSession.cursorIndex}, linePref=${eraseAtCursorSession.linePreference}, lineOffsetY=${eraseAtCursorSession.viewport.lineOffsetY}, markerRemaining=${eraseAtCursorMarkerRemaining ? 'yes' : 'no'}`,
-		});
-
-		this.session = null;
-		this.activePointerId = null;
-
-		return results;
-	}
-
-	getPencilTimingSummary(): string {
-		const downToUp = this.formatTimingSeries(this.pencilTiming.downToUpMs);
-		const upToDown = this.formatTimingSeries(this.pencilTiming.upToDownMs);
-		const finishStroke = this.formatTimingSeries(this.pencilTiming.finishStrokeMs);
-		const captureMode = this.getRuntimeConfig().usePointerCapture ? 'on' : 'off';
-
-		return [
-			`capture=${captureMode}`,
-			`down=${this.pencilTiming.downCount} (pen-like=${this.pencilTiming.penLikeDownCount}, touch=${this.pencilTiming.touchDownCount}, other=${this.pencilTiming.otherDownCount})`,
-			`up=${this.pencilTiming.upCount}, cancel=${this.pencilTiming.cancelCount}, lost=${this.pencilTiming.lostCaptureCount}, recover=${this.pencilTiming.recoveredOnDownCount}, staleSameId=${this.pencilTiming.staleSameIdDownCount}, crossIdFinalize=${this.pencilTiming.crossIdFinalizeCount}, moveStart=${this.pencilTiming.moveStartCount}, rawStart=${this.pencilTiming.rawStartCount}, inferredStart=${this.pencilTiming.inferredStartCount}, upOnlyStart=${this.pencilTiming.upOnlyStartCount}, upBufferedStart=${this.pencilTiming.upBufferedStartCount}, windowStart=${this.pencilTiming.windowStartCount}, touchStart=${this.pencilTiming.touchFallbackStartCount}, upAdded=${this.pencilTiming.upAddedPointCount}, zeroFinish=${this.pencilTiming.zeroPointFinishCount}`,
-			`obs penDown(canvas/doc/win)=${this.pencilTiming.observedCanvasDownPenCount}/${this.pencilTiming.observedDocumentDownPenInCanvasCount}/${this.pencilTiming.observedWindowDownPenInCanvasCount}, penUp(canvas/win)=${this.pencilTiming.observedCanvasUpPenCount}/${this.pencilTiming.observedWindowUpPenInCanvasCount}`,
-			`up->down ${upToDown}`,
-			`down->up ${downToUp}`,
-			`finish ${finishStroke}`,
-		].join(' | ');
-	}
-
-	resetPencilTimingDiagnostics(): void {
-		this.pencilTiming.downCount = 0;
-		this.pencilTiming.upCount = 0;
-		this.pencilTiming.cancelCount = 0;
-		this.pencilTiming.lostCaptureCount = 0;
-		this.pencilTiming.recoveredOnDownCount = 0;
-		this.pencilTiming.staleSameIdDownCount = 0;
-		this.pencilTiming.crossIdFinalizeCount = 0;
-		this.pencilTiming.moveStartCount = 0;
-		this.pencilTiming.rawStartCount = 0;
-		this.pencilTiming.inferredStartCount = 0;
-		this.pencilTiming.upOnlyStartCount = 0;
-		this.pencilTiming.upBufferedStartCount = 0;
-		this.pencilTiming.windowStartCount = 0;
-		this.pencilTiming.touchFallbackStartCount = 0;
-		this.pencilTiming.upAddedPointCount = 0;
-		this.pencilTiming.zeroPointFinishCount = 0;
-		this.pencilTiming.penLikeDownCount = 0;
-		this.pencilTiming.touchDownCount = 0;
-		this.pencilTiming.otherDownCount = 0;
-		this.pencilTiming.observedCanvasDownPenCount = 0;
-		this.pencilTiming.observedCanvasMovePenCount = 0;
-		this.pencilTiming.observedCanvasRawPenCount = 0;
-		this.pencilTiming.observedCanvasUpPenCount = 0;
-		this.pencilTiming.observedDocumentDownPenInCanvasCount = 0;
-		this.pencilTiming.observedWindowDownPenInCanvasCount = 0;
-		this.pencilTiming.observedWindowMovePenInCanvasCount = 0;
-		this.pencilTiming.observedWindowUpPenInCanvasCount = 0;
-		this.resetPointerStageObservation(this.pencilTiming.observedCanvasPointer);
-		this.resetPointerStageObservation(this.pencilTiming.observedDocumentPointerInCanvas);
-		this.resetPointerStageObservation(this.pencilTiming.observedWindowPointerInCanvas);
-		this.resetTouchStageObservation(this.pencilTiming.observedCanvasTouch);
-		this.resetTouchStageObservation(this.pencilTiming.observedDocumentTouchInCanvas);
-		this.resetTouchStageObservation(this.pencilTiming.observedWindowTouchInCanvas);
-		this.resetTouchFallbackObservation(this.pencilTiming.touchFallback);
-		this.resetTouchMetadataObservation(this.pencilTiming.touchMetadata);
-		this.pencilTiming.downToUpMs.length = 0;
-		this.pencilTiming.upToDownMs.length = 0;
-		this.pencilTiming.finishStrokeMs.length = 0;
-		this.lastPointerDownAt = 0;
-		this.lastPointerUpAt = 0;
-		this.pendingTouchId = null;
-		this.activeTouchId = null;
-		this.clearInferredPenStart();
-		this.clearDownlessPenBuffer();
-	}
-
 	open(session: DrawerSession): void {
 		if (this.session && this.session.key !== session.key) {
 			this.close();
 		}
-
 		this.session = session;
-		const canonicalCursor = readCanonicalCursor(
-			this.session.doc,
-			this.session.cursorIndex,
-			this.session.linePreference ?? 'auto',
-		);
-		this.session.cursorIndex = canonicalCursor.index;
-		this.session.linePreference = canonicalCursor.linePreference;
-		writeCanonicalCursor(this.session.doc, this.session.cursorIndex, this.session.linePreference);
-		this.session.onCursorChanged(this.session.cursorIndex);
-		this.session.onLinePreferenceChanged(this.session.linePreference);
-		this.activePointerId = null;
-		this.pendingTouchId = null;
-		this.activeTouchId = null;
-		this.clearInferredPenStart();
-		this.clearDownlessPenBuffer();
+		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		this.activeStroke = null;
-		this.hasPenInSession = false;
-		this.lastPenLikeEventAt = 0;
-		this.lastLocalX = null;
-		this.snapNextStrokeToCursor = true;
-		this.pendingSnapAnchorX = null;
-		this.pendingAdvanceOnRelease = false;
-		this.clearIdleAdvanceTimer();
-		this.clearReleaseAdvanceTimer();
-		this.updateToolUi();
-
+		this.activePointerId = null;
 		this.rootEl.classList.add('is-open');
-		this.recenterViewportForCursor(this.session);
-		this.session.onViewportChanged(this.session.viewport);
+		this.updateScrollToCursor();
 		this.requestDraw();
 	}
 
-	updateCursor(
-		sessionKey: string,
-		cursorIndex: number,
-		linePreference: InsertionLinePreference,
-	): void {
-		if (!this.session || this.session.key !== sessionKey) {
+	updateCursor(sessionKey: string, cursor: InkCursor): void {
+		if (!this.session || this.session.key !== sessionKey || this.activePointerId !== null) {
 			return;
 		}
-		if (this.activePointerId !== null) {
-			return;
-		}
-
-		this.clearIdleAdvanceTimer();
-		this.clearReleaseAdvanceTimer();
-		this.pendingAdvanceOnRelease = false;
-		this.session.cursorIndex = this.clampCursorIndex(cursorIndex, this.session.doc.strokes.length);
-		this.session.linePreference = linePreference;
-		writeCanonicalCursor(this.session.doc, this.session.cursorIndex, this.session.linePreference);
-		this.snapNextStrokeToCursor = true;
-		this.pendingSnapAnchorX = null;
-		this.recenterViewportForCursor(this.session);
-		this.session.onCursorChanged(this.session.cursorIndex);
-		this.session.onLinePreferenceChanged(this.session.linePreference);
-		this.session.onViewportChanged(this.session.viewport);
+		this.session.doc.meta.cursor = clampCursor(cursor, this.session.doc.lines);
+		this.session.doc.meta.selection = null;
+		this.updateScrollToCursor();
+		this.session.onCursorChanged();
 		this.requestDraw();
-	}
-
-	private recenterViewportForCursor(session: DrawerSession): void {
-		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-		const cursorAnchor = this.getCursorAnchorPoint(session);
-		if (!cursorAnchor) {
-			session.viewport = {
-				viewportX: 0,
-				lineOffsetY: lineHeight,
-			};
-			return;
-		}
-
-		const runtime = this.getRuntimeConfig();
-		const drawerWidth =
-			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || runtime.wrapWidth;
-		session.viewport = {
-			viewportX: Math.max(0, cursorAnchor.x - drawerWidth * 0.3),
-			lineOffsetY: this.quantizeLineOffset(cursorAnchor.y, lineHeight),
-		};
 	}
 
 	close(): void {
 		if (!this.session) {
 			return;
 		}
-		this.clearIdleAdvanceTimer();
-		this.clearReleaseAdvanceTimer();
-		this.finishStroke(false);
-		const closingSession = this.session;
-		this.snapNextStrokeToCursor = false;
-		this.pendingSnapAnchorX = null;
+		this.finishStroke();
+		const closing = this.session;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
-		closingSession.onClose();
+		closing.onClose();
 	}
 
-	private attachListeners(): void {
-		this.canvasEl.addEventListener('pointerdown', this.onPointerDown);
-		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
-		this.canvasEl.addEventListener('pointerrawupdate', this.onPointerRawUpdate);
-		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
-		this.canvasEl.addEventListener('pointercancel', this.onPointerCancel);
-		this.canvasEl.addEventListener('lostpointercapture', this.onLostPointerCapture);
-		this.canvasEl.addEventListener('touchstart', this.onTouchStart, { passive: false });
-		this.canvasEl.addEventListener('touchmove', this.onTouchMove, { passive: false });
-		this.canvasEl.addEventListener('touchend', this.onTouchEnd, { passive: false });
-		this.canvasEl.addEventListener('touchcancel', this.onTouchCancel, { passive: false });
-		activeDocument.addEventListener('pointerdown', this.onDocumentPointerDownObserved, true);
-		activeDocument.addEventListener('pointermove', this.onDocumentPointerMoveObserved, true);
-		activeDocument.addEventListener('pointerup', this.onDocumentPointerUpObserved, true);
-		activeDocument.addEventListener('touchstart', this.onDocumentTouchStartObserved, true);
-		activeDocument.addEventListener('touchmove', this.onDocumentTouchMoveObserved, true);
-		activeDocument.addEventListener('touchend', this.onDocumentTouchEndObserved, true);
-		activeDocument.addEventListener('touchcancel', this.onDocumentTouchCancelObserved, true);
-		window.addEventListener('pointerdown', this.onWindowPointerDownObserved, true);
-		window.addEventListener('pointermove', this.onWindowPointerMove);
-		window.addEventListener('pointerup', this.onWindowPointerUp);
-		window.addEventListener('pointercancel', this.onWindowPointerCancel);
-		window.addEventListener('touchstart', this.onWindowTouchStartObserved, true);
-		window.addEventListener('touchmove', this.onWindowTouchMoveObserved, true);
-		window.addEventListener('touchend', this.onWindowTouchEnd, { passive: false });
-		window.addEventListener('touchcancel', this.onWindowTouchCancel, { passive: false });
-		window.addEventListener('blur', this.onWindowBlur);
-		activeDocument.addEventListener('visibilitychange', this.onDocumentVisibilityChange);
-		window.addEventListener('resize', this.onResize);
-		this.eraseButtonEl.addEventListener('click', this.onEraseLastStroke);
-		this.newLineButtonEl.addEventListener('click', this.onNewLine);
-		this.closeButtonEl.addEventListener('click', this.onClose);
-		this.rootEl.addEventListener('click', this.onBackdropClick);
-	}
+	// ----------------------------------------------------------------- layout
 
-	private detachListeners(): void {
-		this.canvasEl.removeEventListener('pointerdown', this.onPointerDown);
-		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
-		this.canvasEl.removeEventListener('pointerrawupdate', this.onPointerRawUpdate);
-		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
-		this.canvasEl.removeEventListener('pointercancel', this.onPointerCancel);
-		this.canvasEl.removeEventListener('lostpointercapture', this.onLostPointerCapture);
-		this.canvasEl.removeEventListener('touchstart', this.onTouchStart);
-		this.canvasEl.removeEventListener('touchmove', this.onTouchMove);
-		this.canvasEl.removeEventListener('touchend', this.onTouchEnd);
-		this.canvasEl.removeEventListener('touchcancel', this.onTouchCancel);
-		activeDocument.removeEventListener('pointerdown', this.onDocumentPointerDownObserved, true);
-		activeDocument.removeEventListener('pointermove', this.onDocumentPointerMoveObserved, true);
-		activeDocument.removeEventListener('pointerup', this.onDocumentPointerUpObserved, true);
-		activeDocument.removeEventListener('touchstart', this.onDocumentTouchStartObserved, true);
-		activeDocument.removeEventListener('touchmove', this.onDocumentTouchMoveObserved, true);
-		activeDocument.removeEventListener('touchend', this.onDocumentTouchEndObserved, true);
-		activeDocument.removeEventListener('touchcancel', this.onDocumentTouchCancelObserved, true);
-		window.removeEventListener('pointerdown', this.onWindowPointerDownObserved, true);
-		window.removeEventListener('pointermove', this.onWindowPointerMove);
-		window.removeEventListener('pointerup', this.onWindowPointerUp);
-		window.removeEventListener('pointercancel', this.onWindowPointerCancel);
-		window.removeEventListener('touchstart', this.onWindowTouchStartObserved, true);
-		window.removeEventListener('touchmove', this.onWindowTouchMoveObserved, true);
-		window.removeEventListener('touchend', this.onWindowTouchEnd);
-		window.removeEventListener('touchcancel', this.onWindowTouchCancel);
-		window.removeEventListener('blur', this.onWindowBlur);
-		activeDocument.removeEventListener('visibilitychange', this.onDocumentVisibilityChange);
-		window.removeEventListener('resize', this.onResize);
-		this.eraseButtonEl.removeEventListener('click', this.onEraseLastStroke);
-		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
-		this.closeButtonEl.removeEventListener('click', this.onClose);
-		this.rootEl.removeEventListener('click', this.onBackdropClick);
-	}
-
-	private onResize = (): void => {
-		this.requestDraw();
-	};
-
-	private onBackdropClick = (event: MouseEvent): void => {
-		if (event.target !== this.rootEl) {
-			return;
-		}
-		if (this.activePointerId !== null || this.activeTouchId !== null || this.activeStroke) {
-			return;
-		}
-		const now = performance.now();
-		const recentInteractionAt = Math.max(
-			this.lastPenLikeEventAt,
-			this.lastPointerDownAt,
-			this.lastPointerUpAt,
-		);
-		if (recentInteractionAt > 0 && now - recentInteractionAt < BACKDROP_CLOSE_GUARD_MS) {
-			return;
-		}
-		this.close();
-	};
-
-	private onEraseLastStroke = (): void => {
-		this.clearIdleAdvanceTimer();
-		this.clearReleaseAdvanceTimer();
-		this.eraseLastStroke();
-	};
-
-	private onNewLine = (): void => {
+	private drawerLayout(): LayoutResult | null {
 		const session = this.session;
 		if (!session) {
-			return;
+			return null;
 		}
-		this.clearIdleAdvanceTimer();
-		this.clearReleaseAdvanceTimer();
-		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-		const cursorAnchor = this.getCursorAnchorPoint(session);
-		const splitX = cursorAnchor?.x ?? NEW_LINE_START_PADDING;
-		const requestedIndex = this.resolveEffectiveInsertionIndex(session);
-		const anchorY =
-			typeof cursorAnchor?.y === 'number' && Number.isFinite(cursorAnchor.y)
-				? Math.max(cursorAnchor.y, session.viewport.lineOffsetY)
-				: session.viewport.lineOffsetY;
-		const currentLineStart = this.quantizeLineOffset(anchorY, lineHeight);
-		const targetLineStart = currentLineStart + lineHeight;
-		const nextLineStartX = NEW_LINE_START_PADDING;
-		const insertionIndex = this.resolveNewlineInsertionIndex(
-			session.doc,
-			requestedIndex,
-			currentLineStart,
-			splitX,
-			lineHeight,
-		);
-		const carriageShifts = this.applyCarriageReturnAtCursor(
-			session,
-			insertionIndex,
-			currentLineStart,
-			targetLineStart,
-			nextLineStartX,
-			splitX,
-			lineHeight,
-		);
-		const markerStroke = this.createLineBreakMarkerStroke(nextLineStartX, targetLineStart);
-		session.doc.strokes.splice(
-			insertionIndex,
-			0,
-			markerStroke,
-		);
-		// Record the structural newline operation so immediate erase can undo this deterministically.
-		const cursorAfter = writeCanonicalCursor(session.doc, insertionIndex + 1, 'next');
-		setLineBreakInsertOperation(
-			session.doc,
-			markerStroke.id,
-			requestedIndex,
-			cursorAfter,
-			carriageShifts,
-		);
-		session.cursorIndex = insertionIndex + 1;
-		session.linePreference = 'next';
-		session.viewport = {
-			viewportX: 0,
-			lineOffsetY: Math.max(lineHeight, targetLineStart),
-		};
-		session.onViewportChanged(session.viewport);
-		session.onCursorChanged(session.cursorIndex);
-		session.onLinePreferenceChanged(session.linePreference);
-		session.onDocumentChanged();
-		this.snapNextStrokeToCursor = true;
-		this.pendingSnapAnchorX = session.viewport.viewportX + nextLineStartX;
-		this.lastLocalX = null;
-		this.pendingAdvanceOnRelease = false;
-		this.requestDraw();
-	};
+		const rect = this.canvasEl.getBoundingClientRect();
+		const cssHeight = rect.height || this.canvasEl.clientHeight || 200;
+		const config = this.getRuntimeConfig();
+		const targetLineHeight = clamp(cssHeight * 0.5, 40, 240);
+		return layoutDocument(session.doc, {
+			contentWidthCss: Number.POSITIVE_INFINITY, // drawer never soft-wraps; it scrolls
+			targetLineHeightCss: targetLineHeight,
+			sourceLineHeight: session.doc.meta.lineHeight,
+			wordGapScale: config.wordGapScale,
+			strokeFillScale: 1,
+		});
+	}
 
-	private onClose = (): void => {
-		this.close();
-	};
-
-	private onTouchStart = (event: TouchEvent): void => {
-		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'start');
-		this.pencilTiming.touchFallback.startObservedCount += 1;
-		this.trackTouchMetadataFromEvent(event);
-		this.clearReleaseAdvanceTimer();
-		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
-			this.pencilTiming.touchFallback.startBlockedModeOffCount += 1;
-			return;
-		}
-		if (this.activePointerId !== null) {
-			this.pencilTiming.touchFallback.startBlockedActivePointerCount += 1;
-			// iOS can emit parallel stylus touch events while a pen pointer is active.
-			// Preventing default avoids Safari/OS gestures stealing the next stroke start.
-			event.preventDefault();
-			return;
-		}
-		if (this.activeTouchId !== null) {
-			this.pencilTiming.touchFallback.startBlockedActiveTouchCount += 1;
-			event.preventDefault();
-			return;
-		}
-		const touch = event.changedTouches[0];
-		if (!touch) {
-			this.pencilTiming.touchFallback.startMissingChangedTouchCount += 1;
-			return;
-		}
-		this.clearInferredPenStart();
-		this.pendingTouchId = touch.identifier;
-		this.pencilTiming.touchFallback.startPendingSetCount += 1;
-	};
-
-	private onTouchMove = (event: TouchEvent): void => {
-		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'move');
-		this.pencilTiming.touchFallback.moveObservedCount += 1;
-		this.trackTouchMetadataFromEvent(event);
-		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
-			this.pencilTiming.touchFallback.moveBlockedModeOffCount += 1;
-			return;
-		}
-		if (this.activePointerId !== null) {
-			this.pencilTiming.touchFallback.moveBlockedActivePointerCount += 1;
-			// Keep gesture suppression active during pointer-driven strokes.
-			event.preventDefault();
-			return;
-		}
-		const now = performance.now();
-		if (this.activeTouchId === null) {
-			if (this.pendingTouchId === null) {
-				this.pencilTiming.touchFallback.moveBlockedNoPendingCount += 1;
-				return;
-			}
-			const touch = this.findTouchById(event.changedTouches, this.pendingTouchId);
-			if (!touch) {
-				this.pencilTiming.touchFallback.moveBlockedPendingNotFoundCount += 1;
-				return;
-			}
-			this.pencilTiming.touchFallback.moveActivatedCount += 1;
-			this.activeTouchId = touch.identifier;
-			this.pendingTouchId = null;
-			this.clearInferredPenStart();
-			this.pencilTiming.touchFallbackStartCount += 1;
-			this.trackPointerDown(now, 'touch', true);
-			this.hasPenInSession = true;
-			this.lastPenLikeEventAt = now;
-			this.pendingAdvanceOnRelease = false;
-			this.activeStroke = {
-				id: createStrokeId(),
-				tool: 'pen',
-				color: DEFAULT_PEN_COLOR,
-				width: DEFAULT_PEN_WIDTH,
-				points: [],
-			};
-			this.appendTouchPoint(touch, 0.5);
-			this.requestDraw();
-			event.preventDefault();
-			return;
-		}
-
-		this.pencilTiming.touchFallback.moveContinueCount += 1;
-
-		const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
-		if (!touch) {
-			this.pencilTiming.touchFallback.moveContinueMissingTouchCount += 1;
-			return;
-		}
-		if (!this.activeStroke) {
-			this.pencilTiming.touchFallback.moveContinueMissingStrokeCount += 1;
-			return;
-		}
-		this.appendTouchPoint(touch, 0.5);
-		this.requestDraw();
-		event.preventDefault();
-	};
-
-	private onTouchEnd = (event: TouchEvent): void => {
-		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'end');
-		this.pencilTiming.touchFallback.endObservedCount += 1;
-		this.trackTouchMetadataFromEvent(event);
-		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
-			return;
-		}
-		if (this.activePointerId !== null) {
-			event.preventDefault();
-			return;
-		}
-		if (this.activeTouchId !== null) {
-			this.pencilTiming.touchFallback.endFinalizeWithActiveCount += 1;
-			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
-			if (touch && this.activeStroke) {
-				this.appendTouchPoint(touch, 0.5);
-				this.pencilTiming.upAddedPointCount += 1;
-			}
-			this.trackPointerUp(performance.now());
-			this.finishStroke(true);
-			this.activeTouchId = null;
-			this.pendingTouchId = null;
-			event.preventDefault();
-			return;
-		}
-		if (this.pendingTouchId !== null) {
-			const pendingTouch = this.findTouchById(event.changedTouches, this.pendingTouchId);
-			if (pendingTouch) {
-				this.pendingTouchId = null;
-				this.pencilTiming.touchFallback.endPendingClearedCount += 1;
-			}
-		}
-	};
-
-	private onTouchCancel = (event: TouchEvent): void => {
-		this.trackTouchObservation(this.pencilTiming.observedCanvasTouch, 'cancel');
-		this.pencilTiming.touchFallback.cancelObservedCount += 1;
-		this.trackTouchMetadataFromEvent(event);
-		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
-			return;
-		}
-		if (this.activePointerId !== null) {
-			event.preventDefault();
-			return;
-		}
-		if (this.activeTouchId !== null) {
-			this.pencilTiming.touchFallback.cancelFinalizeWithActiveCount += 1;
-			const touch = this.findTouchById(event.changedTouches, this.activeTouchId);
-			if (touch && this.activeStroke) {
-				this.appendTouchPoint(touch, 0.5);
-			}
-			this.trackPointerCancel(performance.now());
-			this.finishStroke(false);
-			this.activeTouchId = null;
-			this.pendingTouchId = null;
-			event.preventDefault();
-			return;
-		}
-		if (this.pendingTouchId !== null) {
-			const pendingTouch = this.findTouchById(event.changedTouches, this.pendingTouchId);
-			if (pendingTouch) {
-				this.pendingTouchId = null;
-				this.pencilTiming.touchFallback.cancelPendingClearedCount += 1;
-			}
-		}
-	};
-
-	private onPointerDown = (event: PointerEvent): void => {
+	private updateScrollToCursor(): void {
 		const session = this.session;
-		if (!session) {
-			return;
-		}
-		this.clearReleaseAdvanceTimer();
-		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'down', event.pointerType);
-		if (event.pointerType === 'pen') {
-			this.pencilTiming.observedCanvasDownPenCount += 1;
-		}
-		const pointerDownSignature = `${event.pointerId}:${event.timeStamp}`;
-		if (pointerDownSignature === this.lastPointerDownSignature) {
-			return;
-		}
-		this.lastPointerDownSignature = pointerDownSignature;
-		this.clearInferredPenStart();
-		this.clearDownlessPenBuffer();
-		if (this.activeTouchId !== null) {
-			return;
-		}
-		const now = performance.now();
-		if (
-			this.activePointerId !== null &&
-			event.pointerId === this.activePointerId &&
-			now - this.lastPointerDownAt <= 24
-		) {
-			return;
-		}
-		const incomingIsPenLike = this.isLikelyPenPointer(event, now);
-		this.trackPointerDown(now, event.pointerType, incomingIsPenLike);
-		if (this.activePointerId !== null) {
-			if (event.pointerId === this.activePointerId) {
-				this.pencilTiming.staleSameIdDownCount += 1;
-				this.pencilTiming.recoveredOnDownCount += 1;
-				this.finishStroke(false);
-			}
-			if (this.activePointerId !== null) {
-				const activePointerLostCapture = !this.hasCapturedPointer(this.activePointerId);
-				if (activePointerLostCapture || incomingIsPenLike) {
-					this.pencilTiming.recoveredOnDownCount += 1;
-					this.finishStroke(false);
-				}
-			}
-		}
-		if (this.activePointerId !== null) {
-			return;
-		}
-		this.clearIdleAdvanceTimer();
-		if (this.hasPenInSession && !incomingIsPenLike) {
-			return;
-		}
-		if (incomingIsPenLike) {
-			this.hasPenInSession = true;
-			this.lastPenLikeEventAt = now;
-		}
-		this.pendingTouchId = null;
-		this.activeTouchId = null;
-
-		this.activePointerId = event.pointerId;
-		this.setCapturedPointer(event.pointerId);
-		event.preventDefault();
-		this.pendingAdvanceOnRelease = false;
-
-		this.activeStroke = {
-			id: createStrokeId(),
-			tool: 'pen',
-			color: DEFAULT_PEN_COLOR,
-			width: DEFAULT_PEN_WIDTH,
-			points: [],
-		};
-		this.pushStrokePoints(event);
-		this.requestDraw();
-	};
-
-	private onPointerMove = (event: PointerEvent): void => {
-		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'move', event.pointerType);
-		if (event.pointerType === 'pen') {
-			this.pencilTiming.observedCanvasMovePenCount += 1;
-		}
-		this.handlePointerMotion(event, 'move');
-	};
-
-	private onPointerRawUpdate = (event: Event): void => {
-		if (!(event instanceof PointerEvent)) {
-			return;
-		}
-		if (event.pointerType === 'pen') {
-			this.pencilTiming.observedCanvasRawPenCount += 1;
-		}
-		this.handlePointerMotion(event, 'raw');
-	};
-
-	private handlePointerMotion(event: PointerEvent, source: 'move' | 'raw'): void {
-		const session = this.session;
-		if (!session) {
-			return;
-		}
-		if (this.activePointerId === null) {
-			const now = performance.now();
-			const penLike = this.isLikelyPenPointer(event, now);
-			if (!penLike) {
-				this.clearInferredPenStart();
-				this.clearDownlessPenBuffer();
-				return;
-			}
-			this.trackDownlessPenMotion(event, now);
-			const inContact = this.isPointerEventInContact(event);
-			if (!inContact) {
-				this.shouldInferPenStartFromMotion(event, now);
-				return;
-			}
-			const startFromInferred = this.isInferredStartArmed(event.pointerId, now);
-			if (startFromInferred) {
-				this.pencilTiming.inferredStartCount += 1;
-			} else if (source === 'raw') {
-				this.pencilTiming.rawStartCount += 1;
-			} else {
-				this.pencilTiming.moveStartCount += 1;
-			}
-			this.trackPointerDown(now, event.pointerType, penLike);
-			this.lastPenLikeEventAt = now;
-			this.hasPenInSession = true;
-			this.pendingTouchId = null;
-			this.activeTouchId = null;
-			this.clearInferredPenStart();
-			this.clearDownlessPenBuffer();
-			this.activePointerId = event.pointerId;
-			this.setCapturedPointer(event.pointerId);
-			this.pendingAdvanceOnRelease = false;
-			this.activeStroke = {
-				id: createStrokeId(),
-				tool: 'pen',
-				color: DEFAULT_PEN_COLOR,
-				width: DEFAULT_PEN_WIDTH,
-				points: [],
-			};
-			this.pushStrokePoints(event);
-			this.requestDraw();
-			return;
-		}
-		if (this.activePointerId !== event.pointerId) {
-			return;
-		}
-		if (this.isLikelyPenPointer(event)) {
-			this.lastPenLikeEventAt = performance.now();
-		}
-		event.preventDefault();
-
-		if (!this.activeStroke) {
-			return;
-		}
-
-		this.pushStrokePoints(event);
-		this.requestDraw();
-	}
-
-	private onPointerUp = (event: PointerEvent): void => {
-		this.trackPointerObservation(this.pencilTiming.observedCanvasPointer, 'up', event.pointerType);
-		if (event.pointerType === 'pen') {
-			this.pencilTiming.observedCanvasUpPenCount += 1;
-		}
-		if (this.activePointerId === null) {
-			const now = performance.now();
-			const penLike = this.isLikelyPenPointer(event, now);
-			if (!penLike) {
-				this.clearInferredPenStart();
-				this.clearDownlessPenBuffer();
-				return;
-			}
-			const startFromBufferedMotion = this.shouldStartFromDownlessPenBuffer(now);
-			const inContact = this.isPointerEventInContact(event);
-			const startFromInferred = this.isInferredStartArmed(event.pointerId, now);
-			if (!inContact && !startFromInferred && !startFromBufferedMotion) {
-				return;
-			}
-			if (startFromInferred) {
-				this.pencilTiming.inferredStartCount += 1;
-			} else if (startFromBufferedMotion) {
-				this.pencilTiming.upBufferedStartCount += 1;
-			} else {
-				this.pencilTiming.upOnlyStartCount += 1;
-			}
-			this.trackPointerDown(now, event.pointerType, penLike);
-			this.lastPenLikeEventAt = now;
-			this.hasPenInSession = true;
-			this.pendingTouchId = null;
-			this.activeTouchId = null;
-			this.clearInferredPenStart();
-			this.pendingAdvanceOnRelease = false;
-			this.activePointerId = event.pointerId;
-			this.activeStroke = {
-				id: createStrokeId(),
-				tool: 'pen',
-				color: DEFAULT_PEN_COLOR,
-				width: DEFAULT_PEN_WIDTH,
-				points: [],
-			};
-			if (startFromBufferedMotion) {
-				this.appendDownlessPenBufferPoints();
-			}
-			this.pushStrokePoints(event);
-			if (this.activeStroke.points.length === 0) {
-				this.appendSamplePoint(
-					event.clientX,
-					event.clientY,
-					event.pressure > 0 ? event.pressure : 0.5,
-				);
-			}
-		}
-		if (this.activePointerId !== event.pointerId) {
-			if (!this.shouldFinalizeCrossPointerId(event)) {
-				return;
-			}
-			this.pencilTiming.crossIdFinalizeCount += 1;
-		}
-		const pointCountBeforeUp = this.activeStroke?.points.length ?? 0;
-		if (this.activeStroke) {
-			this.pushStrokePoints(event);
-			if (this.activeStroke.points.length === 0) {
-				this.appendSamplePoint(
-					event.clientX,
-					event.clientY,
-					event.pressure > 0 ? event.pressure : 0.5,
-				);
-			}
-		}
-		const pointCountAfterUp = this.activeStroke?.points.length ?? pointCountBeforeUp;
-		if (pointCountAfterUp > pointCountBeforeUp) {
-			this.pencilTiming.upAddedPointCount += 1;
-		}
-		this.trackPointerUp(performance.now());
-		this.finishStroke(true);
-	};
-
-	private onPointerCancel = (event: PointerEvent): void => {
-		if (this.activePointerId !== event.pointerId) {
-			if (!this.shouldFinalizeCrossPointerId(event)) {
-				return;
-			}
-			this.pencilTiming.crossIdFinalizeCount += 1;
-		}
-		this.trackPointerCancel(performance.now());
-		this.finishStroke(false);
-	};
-
-	private onLostPointerCapture = (event: PointerEvent): void => {
-		this.trackLostPointerCapture();
-		if (this.activePointerId === null) {
-			return;
-		}
-		if (
-			event.pointerId !== this.activePointerId &&
-			this.hasCapturedPointer(this.activePointerId)
-		) {
-			return;
-		}
-		this.trackPointerCancel(performance.now());
-		this.finishStroke(false);
-	};
-
-	private onWindowPointerUp = (event: PointerEvent): void => {
-		if (this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			this.trackPointerObservation(this.pencilTiming.observedWindowPointerInCanvas, 'up', event.pointerType);
-			if (event.pointerType === 'pen') {
-				this.pencilTiming.observedWindowUpPenInCanvasCount += 1;
-			}
-		}
-		this.onPointerUp(event);
-	};
-
-	private onDocumentPointerDownObserved = (event: PointerEvent): void => {
-		if (!this.session) {
-			return;
-		}
-		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			return;
-		}
-		this.trackPointerObservation(this.pencilTiming.observedDocumentPointerInCanvas, 'down', event.pointerType);
-		if (event.pointerType === 'pen') {
-			this.pencilTiming.observedDocumentDownPenInCanvasCount += 1;
-		}
-	};
-
-	private onDocumentPointerMoveObserved = (event: PointerEvent): void => {
-		if (!this.session) {
-			return;
-		}
-		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			return;
-		}
-		this.trackPointerObservation(this.pencilTiming.observedDocumentPointerInCanvas, 'move', event.pointerType);
-	};
-
-	private onDocumentPointerUpObserved = (event: PointerEvent): void => {
-		if (!this.session) {
-			return;
-		}
-		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			return;
-		}
-		this.trackPointerObservation(this.pencilTiming.observedDocumentPointerInCanvas, 'up', event.pointerType);
-	};
-
-	private onWindowPointerDownObserved = (event: PointerEvent): void => {
-		if (!this.session) {
-			return;
-		}
-		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			return;
-		}
-		this.trackPointerObservation(this.pencilTiming.observedWindowPointerInCanvas, 'down', event.pointerType);
-		if (event.pointerType === 'pen') {
-			this.pencilTiming.observedWindowDownPenInCanvasCount += 1;
-		}
-	};
-
-	private onWindowPointerMove = (event: PointerEvent): void => {
-		if (this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			this.trackPointerObservation(this.pencilTiming.observedWindowPointerInCanvas, 'move', event.pointerType);
-			if (event.pointerType === 'pen') {
-				this.pencilTiming.observedWindowMovePenInCanvasCount += 1;
-			}
-		}
-		if (this.activePointerId === null) {
-			return;
-		}
-		this.handlePointerMotion(event, 'move');
-	};
-
-	private onWindowPointerCancel = (event: PointerEvent): void => {
-		this.onPointerCancel(event);
-	};
-
-	private onWindowTouchEnd = (event: TouchEvent): void => {
-		if (this.session && this.isTouchEventInsideCanvas(event)) {
-			this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'end');
-		}
-		this.onTouchEnd(event);
-	};
-
-	private onWindowTouchCancel = (event: TouchEvent): void => {
-		if (this.session && this.isTouchEventInsideCanvas(event)) {
-			this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'cancel');
-		}
-		this.onTouchCancel(event);
-	};
-
-	private onDocumentTouchStartObserved = (event: TouchEvent): void => {
-		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
-			return;
-		}
-		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'start');
-	};
-
-	private onDocumentTouchMoveObserved = (event: TouchEvent): void => {
-		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
-			return;
-		}
-		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'move');
-	};
-
-	private onDocumentTouchEndObserved = (event: TouchEvent): void => {
-		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
-			return;
-		}
-		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'end');
-	};
-
-	private onDocumentTouchCancelObserved = (event: TouchEvent): void => {
-		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
-			return;
-		}
-		this.trackTouchObservation(this.pencilTiming.observedDocumentTouchInCanvas, 'cancel');
-	};
-
-	private onWindowTouchStartObserved = (event: TouchEvent): void => {
-		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
-			return;
-		}
-		this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'start');
-	};
-
-	private onWindowTouchMoveObserved = (event: TouchEvent): void => {
-		if (!this.session || !this.isTouchEventInsideCanvas(event)) {
-			return;
-		}
-		this.trackTouchObservation(this.pencilTiming.observedWindowTouchInCanvas, 'move');
-	};
-
-	private onWindowBlur = (): void => {
-		this.cancelActiveStrokeFromLifecycle();
-	};
-
-	private onDocumentVisibilityChange = (): void => {
-		if (!activeDocument.hidden) {
-			return;
-		}
-		this.cancelActiveStrokeFromLifecycle();
-	};
-
-	private finishStroke(applyPendingAdvance: boolean): void {
-		const session = this.session;
-		if (!session) {
-			return;
-		}
-		const finishStartAt = performance.now();
-		const preFinishPointCount = this.activeStroke?.points.length ?? 0;
-		if (this.activePointerId !== null) {
-			this.releaseCapturedPointer(this.activePointerId);
-		}
-
-		let strokePeakLocalX: number | null = null;
-		if (this.activeStroke && this.activeStroke.points.length > 0) {
-			const insertionIndex = this.resolveEffectiveInsertionIndex(session);
-			const cursorAnchor = this.getCursorAnchorPoint(session);
-			const caretAnchorX =
-				typeof this.pendingSnapAnchorX === 'number' && Number.isFinite(this.pendingSnapAnchorX)
-					? this.pendingSnapAnchorX
-					: (cursorAnchor?.x ?? null);
-			if (this.snapNextStrokeToCursor) {
-				this.snapNextStrokeToCursor = false;
-				this.pendingSnapAnchorX = null;
-			}
-			const activeBounds = this.getStrokeBounds(this.activeStroke);
-			const insertionAnchorX =
-				activeBounds?.minX ??
-				(typeof caretAnchorX === 'number' && Number.isFinite(caretAnchorX)
-					? caretAnchorX
-					: null);
-			if (activeBounds) {
-				strokePeakLocalX = activeBounds.maxX - session.viewport.viewportX;
-			}
-			session.doc.strokes.splice(insertionIndex, 0, this.activeStroke);
-			clearStructuralOperation(session.doc);
-			this.shiftFollowingStrokesForInsertion(session.doc, insertionIndex, insertionAnchorX);
-			session.cursorIndex = insertionIndex + 1;
-			session.linePreference = 'prev';
-			writeCanonicalCursor(session.doc, session.cursorIndex, session.linePreference);
-			session.onCursorChanged(session.cursorIndex);
-			session.onLinePreferenceChanged(session.linePreference);
-			session.onDocumentChanged();
-		}
-
-		let didAdvanceOnRelease = false;
-		this.clearReleaseAdvanceTimer();
-		if (applyPendingAdvance && this.pendingAdvanceOnRelease) {
-			const drawerWidth =
-				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
-			if (drawerWidth > 0) {
-				const releaseDelay = Math.max(0, this.getRuntimeConfig().releaseAdvanceDelayMs);
-				if (releaseDelay <= 0) {
-					this.advanceStep(drawerWidth);
-				} else {
-					this.scheduleReleaseAdvance(releaseDelay);
-				}
-				didAdvanceOnRelease = true;
-			}
-		}
-
-		this.activePointerId = null;
-		this.activeTouchId = null;
-		this.pendingTouchId = null;
-		this.clearInferredPenStart();
-		this.clearDownlessPenBuffer();
-		this.activeStroke = null;
-		this.lastLocalX = null;
-		this.pendingAdvanceOnRelease = false;
-		this.requestDraw();
-		if (applyPendingAdvance && !didAdvanceOnRelease) {
-			this.scheduleIdleAdvance(strokePeakLocalX);
-		}
-		if (preFinishPointCount === 0) {
-			this.pencilTiming.zeroPointFinishCount += 1;
-		}
-		this.pushTimingSample(this.pencilTiming.finishStrokeMs, performance.now() - finishStartAt);
-	}
-
-	private eraseLastStroke(): void {
-		const session = this.session;
-		if (!session) {
-			return;
-		}
-
-		if (this.activePointerId !== null) {
-			return;
-		}
-
-		if (session.doc.strokes.length === 0) {
-			return;
-		}
-
-		const cursorIndex = this.resolveEffectiveInsertionIndex(session);
-		if (cursorIndex <= 0) {
-			return;
-		}
-		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-
-		// First stage erase path: if we just inserted a manual newline marker, remove that exact marker.
-		const lineBreakInsertOp = getLineBreakInsertOperation(session.doc);
-		if (lineBreakInsertOp) {
-			const trackedMarkerIndex = session.doc.strokes.findIndex(
-				(stroke) => stroke.id === lineBreakInsertOp.markerStrokeId,
-			);
-			if (trackedMarkerIndex >= 0 && Math.abs(trackedMarkerIndex - cursorIndex) <= 1) {
-				// Pass the recorded operation so erase restores the pre-newline cursor (RC1)
-				// and replays the exact inverse of the carriage-return geometry (RC2).
-				if (this.removeLineBreakMarkerAt(session, trackedMarkerIndex, lineHeight, lineBreakInsertOp)) {
-					return;
-				}
-			}
-			if (trackedMarkerIndex < 0) {
-				clearStructuralOperation(session.doc);
-			}
-		}
-
-		const previousIndex = cursorIndex - 1;
-		const previousStroke = session.doc.strokes[previousIndex];
-		if (previousStroke && isLineBreakMarkerStroke(previousStroke)) {
-			this.removeLineBreakMarkerAt(session, previousIndex, lineHeight);
-			clearStructuralOperation(session.doc);
-			return;
-		}
-
-		const currentStroke = session.doc.strokes[cursorIndex];
-		if (currentStroke && isLineBreakMarkerStroke(currentStroke)) {
-			this.removeLineBreakMarkerAt(session, cursorIndex, lineHeight);
-			clearStructuralOperation(session.doc);
-			return;
-		}
-		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
-		const wordGap = this.getInsertionWordGap(lineHeight);
-
-		let anchorIndex = cursorIndex - 1;
-		while (anchorIndex >= 0) {
-			const candidate = session.doc.strokes[anchorIndex];
-			if (!candidate) {
-				anchorIndex -= 1;
-				continue;
-			}
-			if (!isLineBreakMarkerStroke(candidate)) {
-				break;
-			}
-			anchorIndex -= 1;
-		}
-
-		if (anchorIndex < 0) {
-			const markerIndex = cursorIndex - 1;
-			const markerStroke = session.doc.strokes[markerIndex];
-			if (!markerStroke || !isLineBreakMarkerStroke(markerStroke)) {
-				return;
-			}
-			const markerBounds = this.getStrokeBounds(markerStroke);
-			session.doc.strokes.splice(markerIndex, 1);
-			if (markerBounds) {
-				this.collapseLineBreakGap(session.doc, markerIndex, markerBounds.centerY, lineHeight);
-			}
-			this.finishEraseAtIndex(session, markerIndex);
-			return;
-		}
-
-		const anchorStroke = session.doc.strokes[anchorIndex];
-		if (!anchorStroke || isLineBreakMarkerStroke(anchorStroke)) {
-			return;
-		}
-		const anchorBounds = this.getStrokeBounds(anchorStroke);
-		if (!anchorBounds) {
-			return;
-		}
-
-		const removeIndexes: number[] = [];
-		let scanIndex = anchorIndex;
-		while (scanIndex >= 0) {
-			const stroke = session.doc.strokes[scanIndex];
-			if (!stroke) {
-				scanIndex -= 1;
-				continue;
-			}
-			if (isLineBreakMarkerStroke(stroke)) {
-				break;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				scanIndex -= 1;
-				continue;
-			}
-			if (Math.abs(bounds.centerY - anchorBounds.centerY) > sameLineTolerance) {
-				break;
-			}
-			removeIndexes.push(scanIndex);
-
-			let previousIndex = scanIndex - 1;
-			while (previousIndex >= 0 && !session.doc.strokes[previousIndex]) {
-				previousIndex -= 1;
-			}
-			if (previousIndex < 0) {
-				break;
-			}
-			const previousStroke = session.doc.strokes[previousIndex];
-			if (!previousStroke || isLineBreakMarkerStroke(previousStroke)) {
-				break;
-			}
-			const previousBounds = this.getStrokeBounds(previousStroke);
-			if (!previousBounds) {
-				scanIndex = previousIndex;
-				continue;
-			}
-			if (Math.abs(previousBounds.centerY - anchorBounds.centerY) > sameLineTolerance) {
-				break;
-			}
-			const gap = bounds.minX - previousBounds.maxX;
-			if (gap > wordGap) {
-				break;
-			}
-			scanIndex = previousIndex;
-		}
-
-		if (removeIndexes.length === 0) {
-			return;
-		}
-
-		const removeStart = Math.min(...removeIndexes);
-		removeIndexes.sort((a, b) => b - a);
-		for (const index of removeIndexes) {
-			session.doc.strokes.splice(index, 1);
-		}
-
-		this.finishEraseAtIndex(session, removeStart);
-	}
-
-	private removeLineBreakMarkerAt(
-		session: DrawerSession,
-		markerIndex: number,
-		lineHeight: number,
-		op: InkLineBreakInsertOperation | null = null,
-	): boolean {
-		const markerStroke = session.doc.strokes[markerIndex];
-		if (!markerStroke || !isLineBreakMarkerStroke(markerStroke)) {
-			return false;
-		}
-		const markerBounds = this.getStrokeBounds(markerStroke);
-		session.doc.strokes.splice(markerIndex, 1);
-		if (op && op.shifts.length > 0) {
-			// Exact inverse of the carriage-return layout (RC2): undo each recorded shift
-			// by stroke id, so words return to their original X and Y.
-			this.revertStrokeShifts(session.doc, op.shifts);
-		} else if (markerBounds) {
-			// Fallback for operations without recorded shifts (e.g. loaded from disk).
-			this.collapseLineBreakGap(session.doc, markerIndex, markerBounds.centerY, lineHeight);
-		}
-		clearStructuralOperation(session.doc);
-		// Restore the cursor to where it sat before the newline was inserted (RC1).
-		// Because inserting then removing the marker is index-neutral, anchorIndexBefore
-		// maps directly onto the post-erase document.
-		const restoreCursor = op
-			? { index: op.anchorIndexBefore, linePreference: 'prev' as InsertionLinePreference }
-			: null;
-		this.finishEraseAtIndex(session, markerIndex, restoreCursor);
-		return true;
-	}
-
-	private revertStrokeShifts(doc: InkDocument, shifts: InkStrokeShift[]): void {
-		if (shifts.length === 0) {
-			return;
-		}
-		const shiftsById = new Map(shifts.map((shift) => [shift.id, shift]));
-		for (const stroke of doc.strokes) {
-			const shift = shiftsById.get(stroke.id);
-			if (!shift) {
-				continue;
-			}
-			for (const point of stroke.points) {
-				point.x -= shift.dx;
-				point.y -= shift.dy;
-			}
-		}
-	}
-
-	private finishEraseAtIndex(
-		session: DrawerSession,
-		removeIndex: number,
-		restoreCursor: { index: number; linePreference: InsertionLinePreference } | null = null,
-	): void {
-		const removedOnlyMarkers = this.pruneLineBreakMarkersIfNoVisibleStrokes(session.doc);
-		if (restoreCursor && !removedOnlyMarkers) {
-			session.cursorIndex = this.clampCursorIndex(restoreCursor.index, session.doc.strokes.length);
-			session.linePreference = restoreCursor.linePreference;
-		} else {
-			session.cursorIndex = removedOnlyMarkers
-				? 0
-				: this.clampCursorIndex(removeIndex, session.doc.strokes.length);
-			session.linePreference = 'prev';
-		}
-		writeCanonicalCursor(session.doc, session.cursorIndex, session.linePreference);
-		session.onCursorChanged(session.cursorIndex);
-		session.onLinePreferenceChanged(session.linePreference);
-
-		const drawerWidth =
-			this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 480;
-		// Anchor the viewport on the restored cursor line, not the removed marker slot.
-		const anchorIndexForViewport =
-			restoreCursor && !removedOnlyMarkers ? session.cursorIndex : removeIndex;
-		const prevStroke =
-			anchorIndexForViewport > 0 ? session.doc.strokes[anchorIndexForViewport - 1] : undefined;
-		const nextStroke =
-			anchorIndexForViewport < session.doc.strokes.length
-				? session.doc.strokes[anchorIndexForViewport]
-				: undefined;
-		const prevPoint = prevStroke?.points[prevStroke.points.length - 1];
-		const nextPoint = nextStroke?.points[0];
-		const anchorPoint = prevPoint || nextPoint;
-
-		if (!anchorPoint || removedOnlyMarkers) {
-			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-			session.viewport = {
-				viewportX: 0,
-				lineOffsetY: lineHeight,
-			};
-		} else {
-			const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-			session.viewport = {
-				viewportX: Math.max(0, anchorPoint.x - drawerWidth * 0.5),
-				lineOffsetY: this.quantizeLineOffset(anchorPoint.y, lineHeight),
-			};
-		}
-
-		session.onViewportChanged(session.viewport);
-		session.onDocumentChanged();
-		this.snapNextStrokeToCursor = true;
-		this.pendingSnapAnchorX = null;
-		this.pendingAdvanceOnRelease = false;
-		this.requestDraw();
-	}
-
-	private pushStrokePoints(event: PointerEvent): void {
-		const session = this.session;
-		if (!session || !this.activeStroke) {
-			return;
-		}
-
-		const samples =
-			typeof event.getCoalescedEvents === 'function'
-				? event.getCoalescedEvents()
-				: [event];
-		const points = samples.length > 0 ? samples : [event];
-		for (const sample of points) {
-			this.appendSamplePoint(sample.clientX, sample.clientY, sample.pressure > 0 ? sample.pressure : 0.5);
-		}
-	}
-
-	private appendTouchPoint(touch: Touch, pressure: number): void {
-		this.appendSamplePoint(touch.clientX, touch.clientY, pressure);
-	}
-
-	private appendSamplePoint(clientX: number, clientY: number, pressure: number): void {
-		const session = this.session;
-		if (!session || !this.activeStroke) {
+		const layout = this.drawerLayout();
+		if (!session || !layout) {
 			return;
 		}
 		const rect = this.canvasEl.getBoundingClientRect();
-		const localX = clientX - rect.left;
-		const localY = clientY - rect.top;
-		if (!Number.isFinite(localX) || !Number.isFinite(localY)) {
-			return;
-		}
-
-		const baselineLocalY = rect.height * INK_BASELINE_RATIO_FROM_TOP;
-		const worldX = session.viewport.viewportX + localX;
-		const worldY = session.viewport.lineOffsetY + (localY - baselineLocalY);
-		const previous = this.activeStroke.points[this.activeStroke.points.length - 1];
-		if (previous) {
-			const dx = previous.x - worldX;
-			const dy = previous.y - worldY;
-			if (dx * dx + dy * dy < 0.35) {
-				return;
-			}
-		}
-
-		this.activeStroke.points.push({
-			x: worldX,
-			y: worldY,
-			pressure: pressure > 0 ? pressure : 0.5,
-			time: Date.now(),
-		});
-
-		const rightEdgeTrigger = rect.width * 0.85;
-		if (localX >= rightEdgeTrigger) {
-			this.pendingAdvanceOnRelease = true;
-		} else if (
-			this.lastLocalX !== null &&
-			this.lastLocalX > rect.width * 0.9 &&
-			localX < rect.width * 0.15
-		) {
-			this.pendingAdvanceOnRelease = true;
-		}
-
-		this.lastLocalX = localX;
+		const width = rect.width || this.canvasEl.clientWidth || 480;
+		const height = rect.height || this.canvasEl.clientHeight || 200;
+		const caret = layout.caretRect(session.doc.meta.cursor);
+		this.scrollX = Math.max(-layout.marginX, caret.x - width * 0.32);
+		this.scrollY = caret.baselineY - height * 0.62;
 	}
 
-	private advanceStep(drawerWidth: number): void {
-		const session = this.session;
-		if (!session) {
-			return;
-		}
-		const stepWidth = Math.max(120, Math.round(drawerWidth * STEP_RATIO));
-		session.viewport = {
-			viewportX: session.viewport.viewportX + stepWidth,
-			lineOffsetY: session.viewport.lineOffsetY,
-		};
-		session.onViewportChanged(session.viewport);
-		this.requestDraw();
-	}
-
-	private scheduleIdleAdvance(strokePeakLocalX: number | null): void {
-		const session = this.session;
-		if (!session || strokePeakLocalX === null) {
-			return;
-		}
-		const delay = Math.max(500, this.getRuntimeConfig().idleAdvanceMs);
-		this.clearIdleAdvanceTimer();
-		this.idleAdvanceTimer = window.setTimeout(() => {
-			this.idleAdvanceTimer = 0;
-			if (!this.session || this.activePointerId !== null) {
-				return;
-			}
-			const drawerWidth =
-				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
-			if (drawerWidth <= 0) {
-				return;
-			}
-			const rightThreshold = drawerWidth * 0.52;
-			if (strokePeakLocalX < rightThreshold) {
-				return;
-			}
-			const targetLocalX = drawerWidth * 0.4;
-			const rawShift = strokePeakLocalX - targetLocalX;
-			if (rawShift <= drawerWidth * 0.05) {
-				return;
-			}
-			const minShift = drawerWidth * 0.1;
-			const maxShift = drawerWidth * 0.55;
-			const shift = Math.round(Math.max(minShift, Math.min(maxShift, rawShift)));
-			session.viewport = {
-				viewportX: session.viewport.viewportX + shift,
-				lineOffsetY: session.viewport.lineOffsetY,
-			};
-			session.onViewportChanged(session.viewport);
-			this.requestDraw();
-		}, delay);
-	}
-
-	private scheduleReleaseAdvance(delayMs: number): void {
-		this.clearReleaseAdvanceTimer();
-		this.releaseAdvanceTimer = window.setTimeout(() => {
-			this.releaseAdvanceTimer = 0;
-			if (!this.session || this.activePointerId !== null || this.activeTouchId !== null) {
-				return;
-			}
-			const drawerWidth =
-				this.canvasEl.getBoundingClientRect().width || this.canvasEl.clientWidth || 0;
-			if (drawerWidth <= 0) {
-				return;
-			}
-			this.advanceStep(drawerWidth);
-		}, delayMs);
-	}
-
-	private clearIdleAdvanceTimer(): void {
-		if (!this.idleAdvanceTimer) {
-			return;
-		}
-		window.clearTimeout(this.idleAdvanceTimer);
-		this.idleAdvanceTimer = 0;
-	}
-
-	private clearReleaseAdvanceTimer(): void {
-		if (!this.releaseAdvanceTimer) {
-			return;
-		}
-		window.clearTimeout(this.releaseAdvanceTimer);
-		this.releaseAdvanceTimer = 0;
-	}
+	// ----------------------------------------------------------------- drawing
 
 	private requestDraw(): void {
 		if (this.redrawQueued) {
@@ -2000,920 +217,313 @@ export class InkDrawer {
 
 	private draw(): void {
 		const session = this.session;
+		const layout = this.drawerLayout();
+		if (!session || !layout) {
+			return;
+		}
+		const rect = this.canvasEl.getBoundingClientRect();
+		const cssWidth = Math.floor(rect.width || this.canvasEl.clientWidth);
+		const cssHeight = Math.floor(rect.height || this.canvasEl.clientHeight);
+		if (cssWidth <= 0 || cssHeight <= 0) {
+			return;
+		}
+		resizeCanvasForDpr(this.canvasEl, cssWidth, cssHeight, false);
+		const ctx = this.canvasEl.getContext('2d');
+		if (!ctx) {
+			return;
+		}
+		const dpr = Math.max(1, window.devicePixelRatio || 1);
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		ctx.clearRect(0, 0, cssWidth, cssHeight);
+		ctx.fillStyle = '#ffffff';
+		ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+		// Baseline guide for the cursor's row.
+		const caret = layout.caretRect(session.doc.meta.cursor);
+		if (this.getRuntimeConfig().showWritingLine) {
+			const baselineLocalY = caret.baselineY - this.scrollY;
+			ctx.strokeStyle = '#a5b4c6';
+			ctx.lineWidth = 1.2;
+			ctx.beginPath();
+			ctx.moveTo(0, baselineLocalY);
+			ctx.lineTo(cssWidth, baselineLocalY);
+			ctx.stroke();
+		}
+
+		const widthScale = layout.cssPerSource;
+		for (const word of layout.words) {
+			for (const laid of word.strokes) {
+				const points = laid.points.map((p) => ({ x: p.x - this.scrollX, y: p.y - this.scrollY }));
+				const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
+				drawLaidStroke(ctx, points, widthPx, laid.stroke.color);
+			}
+		}
+
+		// Caret.
+		ctx.strokeStyle = '#2563eb';
+		ctx.lineWidth = 2;
+		ctx.beginPath();
+		ctx.moveTo(caret.x - this.scrollX, caret.y - this.scrollY);
+		ctx.lineTo(caret.x - this.scrollX, caret.y + caret.height - this.scrollY);
+		ctx.stroke();
+
+		// Active (in-progress) stroke, drawn raw in canvas space.
+		if (this.activeStroke && this.activeStroke.length > 0) {
+			drawLaidStroke(
+				ctx,
+				this.activeStroke.map((p) => ({ x: p.x, y: p.y })),
+				Math.max(1, 2.4),
+				'#111827',
+			);
+		}
+	}
+
+	// ----------------------------------------------------------------- input
+
+	private attachListeners(): void {
+		this.canvasEl.addEventListener('pointerdown', this.onPointerDown);
+		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
+		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
+		this.canvasEl.addEventListener('pointercancel', this.onPointerUp);
+		this.eraseButtonEl.addEventListener('click', this.onErase);
+		this.newLineButtonEl.addEventListener('click', this.onNewLine);
+		this.closeButtonEl.addEventListener('click', this.onCloseClick);
+		this.rootEl.addEventListener('pointerdown', this.onBackdropPointerDown);
+	}
+
+	private detachListeners(): void {
+		this.canvasEl.removeEventListener('pointerdown', this.onPointerDown);
+		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
+		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
+		this.canvasEl.removeEventListener('pointercancel', this.onPointerUp);
+		this.eraseButtonEl.removeEventListener('click', this.onErase);
+		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
+		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
+		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
+	}
+
+	private acceptsPointer(event: PointerEvent): boolean {
+		if (event.pointerType === 'touch') {
+			return this.getRuntimeConfig().allowAnyNonMousePointer;
+		}
+		return true;
+	}
+
+	private onPointerDown = (event: PointerEvent): void => {
+		if (!this.session || this.activePointerId !== null || !this.acceptsPointer(event)) {
+			return;
+		}
+		event.preventDefault();
+		this.lastInteractionAt = Date.now();
+		this.activePointerId = event.pointerId;
+		this.activeStroke = [];
+		if (this.getRuntimeConfig().usePointerCapture) {
+			try {
+				this.canvasEl.setPointerCapture(event.pointerId);
+			} catch {
+				/* iOS can reject capture during fast pen input */
+			}
+		}
+		this.appendActivePoint(event);
+		this.requestDraw();
+	};
+
+	private onPointerMove = (event: PointerEvent): void => {
+		if (this.activePointerId !== event.pointerId || !this.activeStroke) {
+			return;
+		}
+		event.preventDefault();
+		const samples =
+			typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
+		for (const sample of samples.length > 0 ? samples : [event]) {
+			this.appendActivePoint(sample);
+		}
+		this.requestDraw();
+	};
+
+	private onPointerUp = (event: PointerEvent): void => {
+		if (this.activePointerId !== event.pointerId) {
+			return;
+		}
+		event.preventDefault();
+		this.lastInteractionAt = Date.now();
+		if (this.getRuntimeConfig().usePointerCapture && this.canvasEl.hasPointerCapture(event.pointerId)) {
+			try {
+				this.canvasEl.releasePointerCapture(event.pointerId);
+			} catch {
+				/* ignore */
+			}
+		}
+		this.finishStroke();
+	};
+
+	private appendActivePoint(event: PointerEvent): void {
+		if (!this.activeStroke) {
+			return;
+		}
+		const rect = this.canvasEl.getBoundingClientRect();
+		const x = event.clientX - rect.left;
+		const y = event.clientY - rect.top;
+		if (!Number.isFinite(x) || !Number.isFinite(y)) {
+			return;
+		}
+		const prev = this.activeStroke[this.activeStroke.length - 1];
+		if (prev) {
+			const dx = prev.x - x;
+			const dy = prev.y - y;
+			if (dx * dx + dy * dy < MIN_POINT_DISTANCE_SQ) {
+				return;
+			}
+		}
+		this.activeStroke.push({
+			x,
+			y,
+			pressure: event.pressure > 0 ? event.pressure : 0.5,
+			time: Date.now(),
+		});
+	}
+
+	// ----------------------------------------------------------------- commit
+
+	private finishStroke(): void {
+		const session = this.session;
+		const active = this.activeStroke;
+		this.activePointerId = null;
+		this.activeStroke = null;
+		if (!session || !active || active.length === 0) {
+			this.requestDraw();
+			return;
+		}
+		const layout = this.drawerLayout();
+		if (!layout) {
+			return;
+		}
+		const cssPerSource = layout.cssPerSource || 1;
+		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
+
+		// Layout-space positions of the captured points.
+		const layoutPoints = active.map((p) => ({
+			lx: p.x + this.scrollX,
+			ly: p.y + this.scrollY,
+			pressure: p.pressure,
+			time: p.time,
+		}));
+		let strokeMinX = Infinity;
+		for (const p of layoutPoints) {
+			if (p.lx < strokeMinX) strokeMinX = p.lx;
+		}
+
+		// Decide: continue the current word, or start a new word at the cursor.
+		const currentWordLaid = layout.words.find(
+			(w) => w.line === cursor.line && w.word === cursor.word - 1,
+		);
+		const currentWord = session.doc.lines[cursor.line]?.words[cursor.word - 1];
+		const gapThreshold = layout.rowHeight * 0.6;
+		const continueWord =
+			!!currentWordLaid &&
+			!!currentWord &&
+			strokeMinX - (currentWordLaid.x + currentWordLaid.width) <= gapThreshold;
+
+		let originX: number;
+		let baselineY: number;
+		let sourceOriginX: number;
+		if (continueWord && currentWordLaid && currentWord) {
+			const bounds = wordBounds(currentWord);
+			originX = currentWordLaid.x;
+			baselineY = currentWordLaid.baselineY;
+			sourceOriginX = bounds ? bounds.minX : 0;
+		} else {
+			const caret = layout.caretRect(cursor);
+			originX = caret.x;
+			baselineY = caret.baselineY;
+			sourceOriginX = 0;
+		}
+
+		const penWidth = Math.max(0.5, 2.4 / cssPerSource);
+		const stroke: InkStroke = {
+			id: createStrokeId(),
+			width: penWidth,
+			color: '#111827',
+			points: layoutPoints.map((p) => ({
+				x: (p.lx - originX) / cssPerSource + sourceOriginX,
+				y: (p.ly - baselineY) / cssPerSource,
+				pressure: p.pressure,
+				time: p.time,
+			})),
+		};
+
+		if (continueWord) {
+			appendStrokeToCurrentWord(session.doc, stroke);
+		} else {
+			insertWordAtCursor(session.doc, wordFromStroke(stroke));
+		}
+		this.updateScrollToCursor();
+		session.onContentChanged();
+		this.requestDraw();
+	}
+
+	// ----------------------------------------------------------------- buttons
+
+	private onErase = (): void => {
+		const session = this.session;
 		if (!session) {
 			return;
 		}
-		const runtime = this.getRuntimeConfig();
-		drawDrawerCanvas(
-			this.canvasEl,
-			session.doc,
-			session.viewport.viewportX,
-			session.viewport.lineOffsetY,
-			session.cursorIndex,
-			this.activeStroke,
-			runtime.showWritingLine,
-		);
-	}
+		eraseAtCursor(session.doc);
+		this.updateScrollToCursor();
+		session.onContentChanged();
+		this.requestDraw();
+	};
 
-	private updateToolUi(): void {
-		this.eraseButtonEl.classList.remove('is-active');
-		this.statusEl.textContent = 'Pen';
-	}
-
-	private clampCursorIndex(cursorIndex: number, length: number): number {
-		if (!Number.isFinite(cursorIndex)) {
-			return Math.max(0, length);
-		}
-		const normalizedLength = Math.max(0, length);
-		return Math.max(0, Math.min(normalizedLength, Math.floor(cursorIndex)));
-	}
-
-	private shiftFollowingStrokesForInsertion(
-		doc: InkDocument,
-		insertionIndex: number,
-		insertionAnchorX: number | null,
-	): void {
-		const insertedStroke = doc.strokes[insertionIndex];
-		if (!insertedStroke) {
+	private onNewLine = (): void => {
+		const session = this.session;
+		if (!session) {
 			return;
 		}
-		const insertedBounds = this.getStrokeBounds(insertedStroke);
-		if (!insertedBounds) {
+		splitLineAtCursor(session.doc);
+		this.updateScrollToCursor();
+		session.onContentChanged();
+		this.requestDraw();
+	};
+
+	private onCloseClick = (): void => {
+		this.close();
+	};
+
+	private onBackdropPointerDown = (event: PointerEvent): void => {
+		if (event.target !== this.rootEl) {
 			return;
 		}
-
-		const lineHeight = Math.max(80, doc.meta.lineHeight);
-		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
-		const desiredGap = this.getInsertionWordGap(lineHeight);
-		const boundaryX =
-			typeof insertionAnchorX === 'number' && Number.isFinite(insertionAnchorX)
-				? insertionAnchorX
-				: insertedBounds.minX;
-		const boundaryTolerance = Math.max(4, desiredGap * 0.5);
-
-		let firstFollowingMinX = Number.POSITIVE_INFINITY;
-		for (let index = insertionIndex + 1; index < doc.strokes.length; index += 1) {
-			const stroke = doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			if (isLineBreakMarkerStroke(stroke)) {
-				continue;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (Math.abs(bounds.centerY - insertedBounds.centerY) > sameLineTolerance) {
-				continue;
-			}
-			if (bounds.maxX < boundaryX - boundaryTolerance) {
-				continue;
-			}
-			if (bounds.minX < firstFollowingMinX) {
-				firstFollowingMinX = bounds.minX;
-			}
-		}
-
-		if (!Number.isFinite(firstFollowingMinX)) {
+		if (Date.now() - this.lastInteractionAt < BACKDROP_CLOSE_GUARD_MS) {
 			return;
 		}
+		this.close();
+	};
 
-		const shiftDelta = insertedBounds.maxX + desiredGap - firstFollowingMinX;
-		if (shiftDelta <= 0) {
-			return;
-		}
+	// ----------------------------------------------------------------- diagnostics (kept for the command palette)
 
-		for (let index = insertionIndex + 1; index < doc.strokes.length; index += 1) {
-			const stroke = doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			if (isLineBreakMarkerStroke(stroke)) {
-				continue;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (Math.abs(bounds.centerY - insertedBounds.centerY) > sameLineTolerance) {
-				continue;
-			}
-			if (bounds.maxX < boundaryX - boundaryTolerance) {
-				continue;
-			}
-			for (const point of stroke.points) {
-				point.x += shiftDelta;
-			}
-		}
-	}
-
-	private applyCarriageReturnAtCursor(
-		session: DrawerSession,
-		cursorIndex: number,
-		currentLineStart: number,
-		targetLineStart: number,
-		targetStartX: number,
-		splitX: number,
-		lineHeight: number,
-	): InkStrokeShift[] {
-		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
-		const splitXTolerance = Math.max(2, lineHeight * 0.03);
-
-		let firstTrailingMinX = Number.POSITIVE_INFINITY;
-		const trailingSameLineIndexes: number[] = [];
-		const lowerLineIndexes: number[] = [];
-		for (let index = cursorIndex; index < session.doc.strokes.length; index += 1) {
-			const stroke = session.doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			const markerStroke = isLineBreakMarkerStroke(stroke);
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (Math.abs(bounds.centerY - currentLineStart) <= sameLineTolerance) {
-				if (bounds.maxX < splitX - splitXTolerance) {
-					continue;
-				}
-				trailingSameLineIndexes.push(index);
-				if (!markerStroke && bounds.minX < firstTrailingMinX) {
-					firstTrailingMinX = bounds.minX;
-				}
-			}
-		}
-
-		for (let index = 0; index < session.doc.strokes.length; index += 1) {
-			const stroke = session.doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (bounds.centerY > currentLineStart + sameLineTolerance) {
-				lowerLineIndexes.push(index);
-			}
-		}
-
-		if (trailingSameLineIndexes.length === 0 && lowerLineIndexes.length === 0) {
-			return [];
-		}
-
-		const shiftX = Number.isFinite(firstTrailingMinX) ? targetStartX - firstTrailingMinX : 0;
-		const shiftY = targetLineStart - currentLineStart;
-
-		// Record every displacement so erase can replay the exact inverse (RC2).
-		const shifts: InkStrokeShift[] = [];
-
-		for (const index of trailingSameLineIndexes) {
-			const stroke = session.doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			for (const point of stroke.points) {
-				point.x += shiftX;
-				point.y += shiftY;
-			}
-			if (shiftX !== 0 || shiftY !== 0) {
-				shifts.push({ id: stroke.id, dx: shiftX, dy: shiftY });
-			}
-		}
-
-		for (const index of lowerLineIndexes) {
-			const stroke = session.doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			for (const point of stroke.points) {
-				point.y += lineHeight;
-			}
-			shifts.push({ id: stroke.id, dx: 0, dy: lineHeight });
-		}
-
-		return shifts;
-	}
-
-	private resolveNewlineInsertionIndex(
-		doc: InkDocument,
-		requestedIndex: number,
-		currentLineStart: number,
-		splitX: number,
-		lineHeight: number,
-	): number {
-		const clampedIndex = this.clampCursorIndex(requestedIndex, doc.strokes.length);
-		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
-		const splitXTolerance = Math.max(2, lineHeight * 0.03);
-		let firstLowerIndex: number | null = null;
-
-		for (let index = clampedIndex; index < doc.strokes.length; index += 1) {
-			const stroke = doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			const markerStroke = isLineBreakMarkerStroke(stroke);
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (markerStroke) {
-				if (
-					firstLowerIndex === null &&
-					bounds.centerY > currentLineStart + sameLineTolerance
-				) {
-					firstLowerIndex = index;
-				}
-				continue;
-			}
-			if (Math.abs(bounds.centerY - currentLineStart) <= sameLineTolerance) {
-				if (bounds.maxX >= splitX - splitXTolerance) {
-					return index;
-				}
-				continue;
-			}
-			if (bounds.centerY > currentLineStart + sameLineTolerance) {
-				return firstLowerIndex ?? index;
-			}
-		}
-
-		return firstLowerIndex ?? doc.strokes.length;
-	}
-
-	private resolveEffectiveInsertionIndex(session: DrawerSession): number {
-		const canonical = readCanonicalCursor(
-			session.doc,
-			session.cursorIndex,
-			session.linePreference,
-		);
-		session.cursorIndex = canonical.index;
-		session.linePreference = canonical.linePreference;
-		return this.clampCursorIndex(session.cursorIndex, session.doc.strokes.length);
-	}
-
-	private collapseLineBreakGap(
-		doc: InkDocument,
-		fromIndex: number,
-		lineY: number,
-		lineHeight: number,
-	): void {
-		const sameLineTolerance = Math.max(10, lineHeight * 0.6);
-		for (let index = fromIndex; index < doc.strokes.length; index += 1) {
-			const stroke = doc.strokes[index];
-			if (!stroke) {
-				continue;
-			}
-			const bounds = this.getStrokeBounds(stroke);
-			if (!bounds) {
-				continue;
-			}
-			if (bounds.centerY < lineY - sameLineTolerance) {
-				continue;
-			}
-			for (const point of stroke.points) {
-				point.y -= lineHeight;
-			}
-		}
-	}
-
-	private createLineBreakMarkerStroke(x: number, y: number): InkStroke {
-		return {
-			id: `${INK_LINE_BREAK_MARKER_PREFIX}${createStrokeId()}`,
-			tool: 'pen',
-			color: 'rgba(0,0,0,0)',
-			width: 1,
-			points: [
-				{
-					x,
-					y,
-					pressure: 0,
-					time: Date.now(),
-				},
-			],
-		};
-	}
-
-	private getInsertionWordGap(lineHeight: number): number {
-		const wordGapScale = Math.max(0.8, Math.min(2.5, this.getRuntimeConfig().wordGapScale));
-		const wrapWordGapThreshold = Math.max(8, Math.min(48, lineHeight * 0.12 * wordGapScale));
-		return wrapWordGapThreshold + 6;
-	}
-
-	private alignStrokeToCursorX(stroke: InkStroke, cursorX: number): void {
-		const firstPoint = stroke.points[0];
-		if (!firstPoint) {
-			return;
-		}
-		const shiftX = cursorX - firstPoint.x;
-		if (!Number.isFinite(shiftX) || Math.abs(shiftX) < 0.5) {
-			return;
-		}
-		for (const point of stroke.points) {
-			point.x += shiftX;
-		}
-	}
-
-	private getStrokeBounds(stroke: InkStroke): {
-		minX: number;
-		maxX: number;
-		centerY: number;
-	} | null {
-		const firstPoint = stroke.points[0];
-		if (!firstPoint) {
-			return null;
-		}
-
-		let minX = firstPoint.x;
-		let maxX = firstPoint.x;
-		let minY = firstPoint.y;
-		let maxY = firstPoint.y;
-		for (const point of stroke.points) {
-			if (point.x < minX) minX = point.x;
-			if (point.x > maxX) maxX = point.x;
-			if (point.y < minY) minY = point.y;
-			if (point.y > maxY) maxY = point.y;
-		}
-
-		return {
-			minX,
-			maxX,
-			centerY: (minY + maxY) * 0.5,
-		};
-	}
-
-	private getCursorAnchorPoint(session: DrawerSession): { x: number; y: number } | null {
-		const cursorIndex = this.clampCursorIndex(session.cursorIndex, session.doc.strokes.length);
-		const lineHeight = Math.max(80, session.doc.meta.lineHeight);
-		const prevStroke = cursorIndex > 0 ? session.doc.strokes[cursorIndex - 1] : undefined;
-		const nextStroke =
-			cursorIndex < session.doc.strokes.length ? session.doc.strokes[cursorIndex] : undefined;
-		const prevBounds = prevStroke ? this.getCursorAnchorBounds(prevStroke) : null;
-		const nextBounds = nextStroke ? this.getCursorAnchorBounds(nextStroke) : null;
-
-		if (prevBounds && nextBounds) {
-			const isSameLine = Math.abs(nextBounds.centerY - prevBounds.centerY) <= lineHeight * 0.6;
-			if (!isSameLine) {
-				if (session.linePreference === 'prev') {
-					return {
-						x: prevBounds.maxX + 20,
-						y: prevBounds.centerY,
-					};
-				}
-				if (session.linePreference === 'next') {
-					return {
-						x: Math.max(0, nextBounds.minX - 24),
-						y: nextBounds.centerY,
-					};
-				}
-				// 'auto': resolve via the shared rule so the drawer and the inline
-				// renderer always agree which line the caret sits on (RC3).
-				if (resolveAutoLinePreference() === 'next') {
-					return {
-						x: Math.max(0, nextBounds.minX - 24),
-						y: nextBounds.centerY,
-					};
-				}
-				return {
-					x: prevBounds.maxX + 20,
-					y: prevBounds.centerY,
-				};
-			}
-			return {
-				x: (prevBounds.maxX + nextBounds.minX) * 0.5,
-				y: (prevBounds.centerY + nextBounds.centerY) * 0.5,
-			};
-		}
-
-		if (prevBounds) {
-			return {
-				x: prevBounds.maxX + 24,
-				y: prevBounds.centerY,
-			};
-		}
-
-		if (nextBounds) {
-			return {
-				x: Math.max(0, nextBounds.minX - 24),
-				y: nextBounds.centerY,
-			};
-		}
-
-		return null;
-	}
-
-	private getCursorAnchorBounds(stroke: InkStroke): {
-		minX: number;
-		maxX: number;
-		centerY: number;
-	} | null {
-		if (isLineBreakMarkerStroke(stroke)) {
-			const markerPoint = stroke.points[0];
-			if (!markerPoint) {
-				return null;
-			}
-			const markerX = Number.isFinite(markerPoint.x) ? markerPoint.x : NEW_LINE_START_PADDING;
-			const markerY = Number.isFinite(markerPoint.y) ? markerPoint.y : 0;
-			return {
-				minX: markerX,
-				maxX: markerX,
-				centerY: markerY,
-			};
-		}
-		return this.getStrokeBounds(stroke);
-	}
-
-	private hasCapturedPointer(pointerId: number): boolean {
-		if (!this.getRuntimeConfig().usePointerCapture) {
-			return false;
-		}
-		return this.canvasEl.hasPointerCapture(pointerId);
-	}
-
-	private setCapturedPointer(pointerId: number): void {
-		if (!this.getRuntimeConfig().usePointerCapture) {
-			return;
-		}
-		try {
-			this.canvasEl.setPointerCapture(pointerId);
-		} catch {
-			/* iOS can reject pointer capture transitions during fast pen input */
-		}
-	}
-
-	private releaseCapturedPointer(pointerId: number): void {
-		if (!this.getRuntimeConfig().usePointerCapture) {
-			return;
-		}
-		if (!this.canvasEl.hasPointerCapture(pointerId)) {
-			return;
-		}
-		try {
-			this.canvasEl.releasePointerCapture(pointerId);
-		} catch {
-			/* ignore capture-release races */
-		}
-	}
-
-	private clearInferredPenStart(): void {
-		this.pendingInferredPenPointerId = null;
-		this.pendingInferredPenClientX = 0;
-		this.pendingInferredPenClientY = 0;
-		this.pendingInferredPenAt = 0;
-		this.inferredStartArmedPointerId = null;
-		this.inferredStartArmedAt = 0;
-	}
-
-	private clearDownlessPenBuffer(): void {
-		this.downlessPenBuffer.length = 0;
-	}
-
-	private trackDownlessPenMotion(event: PointerEvent, now: number): void {
-		if (event.pointerType !== 'pen') {
-			this.clearDownlessPenBuffer();
-			return;
-		}
-		if (!this.isPointInsideCanvas(event.clientX, event.clientY)) {
-			this.clearDownlessPenBuffer();
-			return;
-		}
-		this.downlessPenBuffer.push({
-			clientX: event.clientX,
-			clientY: event.clientY,
-			pressure: event.pressure > 0 ? event.pressure : 0.5,
-			time: now,
+	runBasicDiagnostics(): InkDiagnosticResult[] {
+		const results: InkDiagnosticResult[] = [];
+		const doc = this.session?.doc;
+		results.push({
+			name: 'layout-engine',
+			pass: true,
+			detail: doc
+				? `lines=${doc.lines.length}, cursor=${doc.meta.cursor.line}:${doc.meta.cursor.word}`
+				: 'no active session',
 		});
-		while (this.downlessPenBuffer.length > 0) {
-			const first = this.downlessPenBuffer[0];
-			if (!first || now - first.time <= DOWNLESS_PEN_BUFFER_MAX_AGE_MS) {
-				break;
-			}
-			this.downlessPenBuffer.shift();
-		}
+		return results;
 	}
 
-	private shouldStartFromDownlessPenBuffer(now: number): boolean {
-		if (this.downlessPenBuffer.length < 2) {
-			return false;
-		}
-		const last = this.downlessPenBuffer[this.downlessPenBuffer.length - 1];
-		if (!last || now - last.time > DOWNLESS_PEN_BUFFER_MAX_IDLE_MS) {
-			return false;
-		}
-		let travel = 0;
-		for (let index = 1; index < this.downlessPenBuffer.length; index += 1) {
-			const previous = this.downlessPenBuffer[index - 1];
-			const current = this.downlessPenBuffer[index];
-			if (!previous || !current) {
-				continue;
-			}
-			const dx = current.clientX - previous.clientX;
-			const dy = current.clientY - previous.clientY;
-			travel += Math.sqrt(dx * dx + dy * dy);
-		}
-		return travel >= DOWNLESS_PEN_BUFFER_MIN_TRAVEL_PX;
+	getPencilTimingSummary(): string {
+		return 'Pencil timing diagnostics were removed in the flowing-text rewrite.';
 	}
 
-	private appendDownlessPenBufferPoints(): void {
-		for (const sample of this.downlessPenBuffer) {
-			this.appendSamplePoint(sample.clientX, sample.clientY, sample.pressure);
-		}
+	resetPencilTimingDiagnostics(): void {
+		/* no-op: timing diagnostics removed */
 	}
+}
 
-	private shouldInferPenStartFromMotion(event: PointerEvent, now: number): boolean {
-		if (event.pointerType !== 'pen') {
-			this.clearInferredPenStart();
-			return false;
-		}
-		if (this.lastPointerUpAt <= 0 || now - this.lastPointerUpAt > INFERRED_PEN_START_AFTER_UP_MS) {
-			this.clearInferredPenStart();
-			return false;
-		}
-		if (
-			this.pendingInferredPenPointerId !== event.pointerId ||
-			now - this.pendingInferredPenAt > INFERRED_PEN_START_MAX_AGE_MS
-		) {
-			this.pendingInferredPenPointerId = event.pointerId;
-			this.pendingInferredPenClientX = event.clientX;
-			this.pendingInferredPenClientY = event.clientY;
-			this.pendingInferredPenAt = now;
-			return false;
-		}
-
-		const dx = event.clientX - this.pendingInferredPenClientX;
-		const dy = event.clientY - this.pendingInferredPenClientY;
-		if (dx * dx + dy * dy < INFERRED_PEN_START_MOVE_PX * INFERRED_PEN_START_MOVE_PX) {
-			return false;
-		}
-		this.inferredStartArmedPointerId = event.pointerId;
-		this.inferredStartArmedAt = now;
-		this.pendingInferredPenPointerId = event.pointerId;
-		this.pendingInferredPenClientX = event.clientX;
-		this.pendingInferredPenClientY = event.clientY;
-		this.pendingInferredPenAt = now;
-		return true;
-	}
-
-	private isInferredStartArmed(pointerId: number, now: number): boolean {
-		if (this.inferredStartArmedPointerId !== pointerId) {
-			return false;
-		}
-		if (now - this.inferredStartArmedAt > INFERRED_PEN_START_AFTER_UP_MS) {
-			return false;
-		}
-		return true;
-	}
-
-	private cancelActiveStrokeFromLifecycle(): void {
-		if (this.activePointerId === null && this.activeTouchId === null) {
-			return;
-		}
-		this.trackPointerCancel(performance.now());
-		this.finishStroke(false);
-	}
-
-	private isPointInsideCanvas(clientX: number, clientY: number): boolean {
-		const rect = this.canvasEl.getBoundingClientRect();
-		return (
-			clientX >= rect.left &&
-			clientX <= rect.right &&
-			clientY >= rect.top &&
-			clientY <= rect.bottom
-		);
-	}
-
-	private isTouchListInsideCanvas(touches: TouchList): boolean {
-		for (let index = 0; index < touches.length; index += 1) {
-			const touch = touches.item(index);
-			if (!touch) {
-				continue;
-			}
-			if (this.isPointInsideCanvas(touch.clientX, touch.clientY)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private isTouchEventInsideCanvas(event: TouchEvent): boolean {
-		if (this.isTouchListInsideCanvas(event.changedTouches)) {
-			return true;
-		}
-		return this.isTouchListInsideCanvas(event.touches);
-	}
-
-	private trackPointerObservation(
-		target: PointerStageObservation,
-		stage: 'down' | 'move' | 'up',
-		pointerType: string,
-	): void {
-		const bucket = target[stage];
-		bucket.total += 1;
-		if (pointerType === 'pen') {
-			bucket.pen += 1;
-			return;
-		}
-		if (pointerType === 'touch') {
-			bucket.touch += 1;
-			return;
-		}
-		if (pointerType === 'mouse') {
-			bucket.mouse += 1;
-			return;
-		}
-		bucket.other += 1;
-	}
-
-	private trackTouchObservation(target: TouchStageObservation, stage: 'start' | 'move' | 'end' | 'cancel'): void {
-		target[stage] += 1;
-	}
-
-	private trackTouchMetadataFromEvent(event: TouchEvent): void {
-		for (let index = 0; index < event.changedTouches.length; index += 1) {
-			const touch = event.changedTouches.item(index);
-			if (!touch) {
-				continue;
-			}
-			this.trackTouchMetadataSample(touch);
-		}
-	}
-
-	private trackTouchMetadataSample(touch: Touch): void {
-		const metadata = this.pencilTiming.touchMetadata;
-		metadata.sampledCount += 1;
-
-		const touchType = this.getTouchType(touch);
-		if (touchType === 'stylus') {
-			metadata.typeStylusCount += 1;
-		} else if (touchType === 'direct') {
-			metadata.typeDirectCount += 1;
-		} else {
-			metadata.typeUnknownCount += 1;
-		}
-
-		const force = Number.isFinite(touch.force) ? touch.force : 0;
-		if (force > 0.01) {
-			metadata.forcePositiveCount += 1;
-		}
-		if (force > metadata.maxForceSeen) {
-			metadata.maxForceSeen = force;
-		}
-
-		const radiusX = Number.isFinite(touch.radiusX) ? touch.radiusX : 0;
-		const radiusY = Number.isFinite(touch.radiusY) ? touch.radiusY : 0;
-		const smallRadius = radiusX > 0 && radiusY > 0 && radiusX <= 6 && radiusY <= 6;
-		const largeRadius = radiusX >= 12 || radiusY >= 12;
-		if (smallRadius) {
-			metadata.smallRadiusCount += 1;
-		}
-		if (largeRadius) {
-			metadata.largeRadiusCount += 1;
-		}
-
-		if (touchType === 'stylus' || (smallRadius && force > 0.01)) {
-			metadata.stylusLikeHeuristicCount += 1;
-		}
-		if (touchType === 'direct' || (largeRadius && force <= 0.08)) {
-			metadata.directLikeHeuristicCount += 1;
-		}
-	}
-
-	private getTouchType(touch: Touch): string {
-		const candidate = (touch as unknown as { touchType?: string }).touchType;
-		if (typeof candidate !== 'string') {
-			return 'unknown';
-		}
-		const normalized = candidate.toLowerCase();
-		if (normalized === 'stylus' || normalized === 'direct' || normalized === 'indirect') {
-			return normalized;
-		}
-		return 'unknown';
-	}
-
-	private resetPointerTypeObservation(target: PointerTypeObservation): void {
-		target.total = 0;
-		target.pen = 0;
-		target.touch = 0;
-		target.mouse = 0;
-		target.other = 0;
-	}
-
-	private resetPointerStageObservation(target: PointerStageObservation): void {
-		this.resetPointerTypeObservation(target.down);
-		this.resetPointerTypeObservation(target.move);
-		this.resetPointerTypeObservation(target.up);
-	}
-
-	private resetTouchStageObservation(target: TouchStageObservation): void {
-		target.start = 0;
-		target.move = 0;
-		target.end = 0;
-		target.cancel = 0;
-	}
-
-	private resetTouchFallbackObservation(target: TouchFallbackObservation): void {
-		target.startObservedCount = 0;
-		target.startBlockedModeOffCount = 0;
-		target.startBlockedActivePointerCount = 0;
-		target.startBlockedActiveTouchCount = 0;
-		target.startMissingChangedTouchCount = 0;
-		target.startPendingSetCount = 0;
-		target.moveObservedCount = 0;
-		target.moveBlockedModeOffCount = 0;
-		target.moveBlockedActivePointerCount = 0;
-		target.moveBlockedNoPendingCount = 0;
-		target.moveBlockedPendingNotFoundCount = 0;
-		target.moveActivatedCount = 0;
-		target.moveContinueCount = 0;
-		target.moveContinueMissingTouchCount = 0;
-		target.moveContinueMissingStrokeCount = 0;
-		target.endObservedCount = 0;
-		target.endFinalizeWithActiveCount = 0;
-		target.endPendingClearedCount = 0;
-		target.cancelObservedCount = 0;
-		target.cancelFinalizeWithActiveCount = 0;
-		target.cancelPendingClearedCount = 0;
-	}
-
-	private resetTouchMetadataObservation(target: TouchMetadataObservation): void {
-		target.sampledCount = 0;
-		target.typeStylusCount = 0;
-		target.typeDirectCount = 0;
-		target.typeUnknownCount = 0;
-		target.stylusLikeHeuristicCount = 0;
-		target.directLikeHeuristicCount = 0;
-		target.forcePositiveCount = 0;
-		target.smallRadiusCount = 0;
-		target.largeRadiusCount = 0;
-		target.maxForceSeen = 0;
-	}
-
-	private trackPointerDown(now: number, pointerType: string, penLike: boolean): void {
-		this.pencilTiming.downCount += 1;
-		if (pointerType === 'touch') {
-			this.pencilTiming.touchDownCount += 1;
-		} else if (pointerType === 'pen') {
-			this.pencilTiming.penLikeDownCount += 1;
-		} else {
-			this.pencilTiming.otherDownCount += 1;
-		}
-		if (penLike && pointerType !== 'pen') {
-			this.pencilTiming.penLikeDownCount += 1;
-		}
-		if (this.lastPointerUpAt > 0) {
-			this.pushTimingSample(this.pencilTiming.upToDownMs, now - this.lastPointerUpAt);
-		}
-		this.lastPointerDownAt = now;
-	}
-
-	private trackPointerUp(now: number): void {
-		this.pencilTiming.upCount += 1;
-		if (this.lastPointerDownAt > 0) {
-			this.pushTimingSample(this.pencilTiming.downToUpMs, now - this.lastPointerDownAt);
-		}
-		this.lastPointerUpAt = now;
-	}
-
-	private trackPointerCancel(now: number): void {
-		this.pencilTiming.cancelCount += 1;
-		if (this.lastPointerDownAt > 0) {
-			this.pushTimingSample(this.pencilTiming.downToUpMs, now - this.lastPointerDownAt);
-		}
-		this.lastPointerUpAt = now;
-	}
-
-	private trackLostPointerCapture(): void {
-		this.pencilTiming.lostCaptureCount += 1;
-	}
-
-	private pushTimingSample(target: number[], value: number): void {
-		if (!Number.isFinite(value) || value < 0) {
-			return;
-		}
-		target.push(value);
-		if (target.length > 48) {
-			target.splice(0, target.length - 48);
-		}
-	}
-
-	private formatTimingSeries(samples: number[]): string {
-		if (samples.length === 0) {
-			return 'n=0';
-		}
-		const sorted = [...samples].sort((a, b) => a - b);
-		const median = this.quantileSorted(sorted, 0.5);
-		const p90 = this.quantileSorted(sorted, 0.9);
-		const max = sorted[sorted.length - 1] ?? median;
-		return `n=${samples.length}, med=${median.toFixed(1)}ms, p90=${p90.toFixed(1)}ms, max=${max.toFixed(1)}ms`;
-	}
-
-	private quantileSorted(values: number[], q: number): number {
-		const first = values[0] ?? 0;
-		if (values.length <= 1) {
-			return first;
-		}
-		const clampedQ = Math.max(0, Math.min(1, q));
-		const rawIndex = clampedQ * (values.length - 1);
-		const lowerIndex = Math.floor(rawIndex);
-		const upperIndex = Math.ceil(rawIndex);
-		const lower = values[lowerIndex] ?? first;
-		const upper = values[upperIndex] ?? lower;
-		if (upperIndex === lowerIndex) {
-			return lower;
-		}
-		const ratio = rawIndex - lowerIndex;
-		return lower + (upper - lower) * ratio;
-	}
-
-	private isPointerInContact(event: PointerEvent): boolean {
-		if (event.pressure > 0.01) {
-			return true;
-		}
-		return event.buttons === 1;
-	}
-
-	private isPointerEventInContact(event: PointerEvent): boolean {
-		if (this.isPointerInContact(event)) {
-			return true;
-		}
-		let coalesced: PointerEvent[];
-		try {
-			coalesced = event.getCoalescedEvents();
-		} catch {
-			return false;
-		}
-		if (!coalesced || coalesced.length === 0) {
-			return false;
-		}
-		for (const sample of coalesced) {
-			if (this.isPointerInContact(sample)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private findTouchById(touchList: TouchList, id: number): Touch | null {
-		for (let index = 0; index < touchList.length; index += 1) {
-			const touch = touchList.item(index);
-			if (!touch) {
-				continue;
-			}
-			if (touch.identifier === id) {
-				return touch;
-			}
-		}
-		return null;
-	}
-
-	private shouldFinalizeCrossPointerId(event: PointerEvent): boolean {
-		if (this.activePointerId === null) {
-			return false;
-		}
-		if (!this.getRuntimeConfig().allowAnyNonMousePointer) {
-			return false;
-		}
-		return event.pointerType !== 'mouse';
-	}
-
-	private isLikelyPenPointer(event: PointerEvent, now = performance.now()): boolean {
-		if (event.pointerType === 'pen') {
-			return true;
-		}
-		if (event.pointerType === 'mouse') {
-			return false;
-		}
-		if (this.getRuntimeConfig().allowAnyNonMousePointer) {
-			return true;
-		}
-		if (this.hasPenInSession && now - this.lastPenLikeEventAt <= 2000) {
-			return true;
-		}
-		if (event.pointerType !== 'touch') {
-			return false;
-		}
-		if (event.pressure > 0.08) {
-			return true;
-		}
-		return event.width <= 6 && event.height <= 6;
-	}
-
-	private pruneLineBreakMarkersIfNoVisibleStrokes(doc: InkDocument): boolean {
-		if (doc.strokes.length === 0) {
-			return false;
-		}
-		const hasVisibleStroke = doc.strokes.some((stroke) => !isLineBreakMarkerStroke(stroke));
-		if (hasVisibleStroke) {
-			return false;
-		}
-		doc.strokes.splice(0, doc.strokes.length);
-		return true;
-	}
-
-	private quantizeLineOffset(y: number, lineHeight: number): number {
-		if (!Number.isFinite(y)) {
-			return lineHeight;
-		}
-		return Math.max(lineHeight, Math.round(y / lineHeight) * lineHeight);
-	}
+function clamp(value: number, min: number, max: number): number {
+	return value < min ? min : value > max ? max : value;
 }

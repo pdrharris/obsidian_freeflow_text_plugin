@@ -6,21 +6,13 @@ import {
 } from 'obsidian';
 import { InkDrawer } from './drawer';
 import {
-	DEFAULT_INK_DOCUMENT,
 	INK_CODE_BLOCK_LANGUAGE,
-	InkCanonicalCursor,
 	InkDocument,
-	InkViewport,
-	isLineBreakMarkerStroke,
+	clampCursor,
 	parseInkDocument,
 	serializeInkDocument,
-} from './model';
-import { readCanonicalCursor, writeCanonicalCursor } from './cursor';
-import {
-	drawInlineCanvas,
-	findInlineInsertionSelection,
-	type InsertionLinePreference,
-} from './render';
+} from './doc';
+import { drawInlineCanvas, inlineLayout, InlineRenderOptions } from './render';
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
@@ -71,6 +63,16 @@ export class InkBlockRegistry {
 		);
 	}
 
+	private renderOptions(): InlineRenderOptions {
+		return {
+			wrapWidth: this.getWrapWidthWorld(),
+			wordGapScale: this.getWordGapScale(),
+			renderLineHeightScale: this.getRenderLineHeightScale(),
+			renderStrokeFillScale: this.getRenderStrokeFillScale(),
+			showWritingLine: this.getShowWritingLine(),
+		};
+	}
+
 	private mountBlock(
 		source: string,
 		el: HTMLElement,
@@ -97,11 +99,8 @@ export class InkBlockRegistry {
 			return;
 		}
 
-		let documentModel = parsed;
-		const initialCursor = readCanonicalCursor(documentModel, documentModel.strokes.length, 'auto');
-		let viewport = initialViewportFor(documentModel, this.getWrapWidthWorld());
-		let cursorIndex = initialCursor.index;
-		let cursorLinePreference: InsertionLinePreference = initialCursor.linePreference;
+		const documentModel = parsed;
+		documentModel.meta.cursor = clampCursor(documentModel.meta.cursor, documentModel.lines);
 		let showInlineCaret = false;
 		let saveTimeout = 0;
 		let isDisposed = false;
@@ -126,32 +125,12 @@ export class InkBlockRegistry {
 			drawInlineCanvas(
 				canvasEl,
 				documentModel,
-				this.getWrapWidthWorld(),
-				this.getWordGapScale(),
-				this.getRenderLineHeightScale(),
-				this.getRenderStrokeFillScale(),
-				this.getShowWritingLine(),
-				showInlineCaret ? cursorIndex : null,
-				cursorLinePreference,
+				this.renderOptions(),
+				showInlineCaret ? documentModel.meta.cursor : null,
+				documentModel.meta.selection,
 			);
 		};
 		renderInline();
-
-		const syncCursorFromDocument = (): InkCanonicalCursor => {
-			// Canonical cursor lives in document metadata and is the source of truth for both views.
-			const canonical = readCanonicalCursor(documentModel, cursorIndex, cursorLinePreference);
-			cursorIndex = canonical.index;
-			cursorLinePreference = canonical.linePreference;
-			return canonical;
-		};
-
-		const writeCursorToDocument = (): InkCanonicalCursor => {
-			// Keep metadata synchronized when inline interactions move the cursor.
-			const canonical = writeCanonicalCursor(documentModel, cursorIndex, cursorLinePreference);
-			cursorIndex = canonical.index;
-			cursorLinePreference = canonical.linePreference;
-			return canonical;
-		};
 
 		const flushSave = async (): Promise<void> => {
 			if (isDisposed) {
@@ -198,8 +177,9 @@ export class InkBlockRegistry {
 			}, SAVE_DEBOUNCE_MS);
 		};
 
-		const onDocumentChanged = (): void => {
-			syncCursorFromDocument();
+		// Re-render the inline view from the document; defer persistence until the drawer closes
+		// while it is the active block (avoids thrashing the vault file mid-stroke).
+		const onChanged = (): void => {
 			renderInline();
 			if (isActiveKey(blockKey)) {
 				pendingInlineRefreshWhileActive = true;
@@ -208,48 +188,14 @@ export class InkBlockRegistry {
 			scheduleSave();
 		};
 
-		const openDrawer = (nextCursorIndex?: number): void => {
-			if (typeof nextCursorIndex === 'number' && Number.isFinite(nextCursorIndex)) {
-				const nextIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
-				if (nextIndex !== cursorIndex) {
-					cursorIndex = nextIndex;
-					cursorLinePreference = 'auto';
-					writeCursorToDocument();
-				}
-			}
+		const openDrawer = (): void => {
 			showInlineCaret = true;
-
 			setActiveKey(blockKey);
 			drawer.open({
 				key: blockKey,
 				doc: documentModel,
-				viewport,
-				cursorIndex,
-				linePreference: cursorLinePreference,
-				onDocumentChanged,
-				onViewportChanged: (nextViewport) => {
-					viewport = nextViewport;
-				},
-				onCursorChanged: (nextCursorIndex) => {
-					cursorIndex = clampInsertionIndex(nextCursorIndex, documentModel.strokes.length);
-					// The drawer writes the canonical cursor (index + preference) before
-					// invoking this callback, so adopt the freshly written preference here
-					// to avoid rendering the inline caret with a stale line preference (RC4).
-					cursorLinePreference = readCanonicalCursor(
-						documentModel,
-						cursorIndex,
-						cursorLinePreference,
-					).linePreference;
-					writeCursorToDocument();
-					showInlineCaret = true;
-					renderInline();
-				},
-				onLinePreferenceChanged: (nextLinePreference) => {
-					cursorLinePreference = nextLinePreference;
-					writeCursorToDocument();
-					showInlineCaret = true;
-					renderInline();
-				},
+				onContentChanged: onChanged,
+				onCursorChanged: onChanged,
 				onClose: () => {
 					if (isActiveKey(blockKey)) {
 						setActiveKey(null);
@@ -277,35 +223,25 @@ export class InkBlockRegistry {
 				renderInline();
 				return;
 			}
-
-			const clickX = event.clientX - rect.left;
-			const clickY = event.clientY - rect.top;
-			const selection = findInlineInsertionSelection(
-				documentModel,
-				this.getWrapWidthWorld(),
-				this.getWordGapScale(),
-				this.getRenderLineHeightScale(),
-				this.getRenderStrokeFillScale(),
-				rect.width,
-				clickX,
-				clickY,
-			);
-			cursorIndex = selection.index;
-			cursorLinePreference = selection.linePreference;
-			writeCursorToDocument();
+			const { layout } = inlineLayout(canvasEl, documentModel, this.renderOptions());
+			const cursor = layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+			documentModel.meta.cursor = cursor;
+			documentModel.meta.selection = null;
 			showInlineCaret = true;
 			renderInline();
 			if (isActiveKey(blockKey)) {
-				drawer.updateCursor(blockKey, cursorIndex, cursorLinePreference);
+				drawer.updateCursor(blockKey, cursor);
+			} else {
+				scheduleSave();
 			}
 		};
 
 		const onCanvasDoubleClick = (): void => {
-			openDrawer(cursorIndex);
+			openDrawer();
 		};
 
 		const onActionClick = (): void => {
-			openDrawer(cursorIndex);
+			openDrawer();
 		};
 
 		canvasEl.addEventListener('click', onCanvasClick);
@@ -324,10 +260,10 @@ export class InkBlockRegistry {
 				onunload(): void {
 					isDisposed = true;
 					resizeObserver.disconnect();
-						canvasEl.removeEventListener('click', onCanvasClick);
-						canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
+					canvasEl.removeEventListener('click', onCanvasClick);
+					canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
 					canvasEl.removeEventListener('keydown', onCanvasKeyDown);
-						actionEl.removeEventListener('click', onActionClick);
+					actionEl.removeEventListener('click', onActionClick);
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
 						saveTimeout = 0;
@@ -377,78 +313,9 @@ function toSectionInfoLike(value: unknown): SectionInfoLike | null {
 	};
 }
 
-function initialViewportFor(doc: InkDocument, wrapWidth: number): InkViewport {
-	const bounds = getVisibleInkBounds(doc);
-	const lineHeight = doc.meta.lineHeight || DEFAULT_INK_DOCUMENT.meta.lineHeight;
-	const lineOffsetY = quantizeLineOffset(bounds.maxY, lineHeight);
-	return {
-		viewportX: Math.max(0, bounds.maxX - wrapWidth * 0.66),
-		lineOffsetY,
-	};
-}
-
-function clampInsertionIndex(value: number, length: number): number {
-	if (!Number.isFinite(value)) {
-		return length;
-	}
-	const normalizedLength = Math.max(0, length);
-	return Math.max(0, Math.min(normalizedLength, Math.floor(value)));
-}
-
 function formatBlockLimit(bytes: number): string {
 	if (bytes >= 1_000_000) {
 		return `${(bytes / 1_000_000).toFixed(1)} MB`;
 	}
 	return `${Math.round(bytes / 1000)} KB`;
-}
-
-function getVisibleInkBounds(doc: InkDocument): {
-	minX: number;
-	maxX: number;
-	minY: number;
-	maxY: number;
-} {
-	let minX = 0;
-	let maxX = 0;
-	let minY = 0;
-	let maxY = 0;
-	let hasPoint = false;
-
-	for (const stroke of doc.strokes) {
-		if (isLineBreakMarkerStroke(stroke)) {
-			continue;
-		}
-		for (const point of stroke.points) {
-			if (!hasPoint) {
-				minX = point.x;
-				maxX = point.x;
-				minY = point.y;
-				maxY = point.y;
-				hasPoint = true;
-				continue;
-			}
-			if (point.x < minX) minX = point.x;
-			if (point.x > maxX) maxX = point.x;
-			if (point.y < minY) minY = point.y;
-			if (point.y > maxY) maxY = point.y;
-		}
-	}
-
-	if (!hasPoint) {
-		return {
-			minX: 0,
-			maxX: 0,
-			minY: 0,
-			maxY: 0,
-		};
-	}
-
-	return { minX, maxX, minY, maxY };
-}
-
-function quantizeLineOffset(y: number, lineHeight: number): number {
-	if (!Number.isFinite(y)) {
-		return lineHeight;
-	}
-	return Math.max(lineHeight, Math.round(y / lineHeight) * lineHeight);
 }
