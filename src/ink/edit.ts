@@ -220,6 +220,91 @@ export function insertFragmentAtCursor(doc: InkDocument, fragment: InkFragment):
 	return next;
 }
 
+export interface InkStylePatch {
+	color?: string;
+	bold?: boolean;
+	underline?: boolean;
+}
+
+// Visit every stroke inside the selected word range.
+function eachSelectedStroke(
+	doc: InkDocument,
+	selection: InkSelection,
+	fn: (stroke: InkStroke) => void,
+): void {
+	const [start, end] = orderCursors(
+		clampCursorToDoc(doc, selection.anchor),
+		clampCursorToDoc(doc, selection.focus),
+	);
+	for (let lineIndex = start.line; lineIndex <= end.line; lineIndex += 1) {
+		const line = doc.lines[lineIndex];
+		if (!line) {
+			continue;
+		}
+		const from = lineIndex === start.line ? start.word : 0;
+		const to = lineIndex === end.line ? end.word : line.words.length;
+		for (let w = from; w < to; w += 1) {
+			const word = line.words[w];
+			if (!word) {
+				continue;
+			}
+			for (const stroke of word.strokes) {
+				fn(stroke);
+			}
+		}
+	}
+}
+
+// Apply a style patch to every stroke in the selection (used by the inline restyle buttons).
+export function applyStyleToSelection(
+	doc: InkDocument,
+	selection: InkSelection,
+	patch: InkStylePatch,
+): void {
+	eachSelectedStroke(doc, selection, (stroke) => {
+		if (patch.color !== undefined) {
+			stroke.color = patch.color;
+		}
+		if (patch.bold !== undefined) {
+			if (patch.bold) {
+				stroke.bold = true;
+			} else {
+				delete stroke.bold;
+			}
+		}
+		if (patch.underline !== undefined) {
+			if (patch.underline) {
+				stroke.underline = true;
+			} else {
+				delete stroke.underline;
+			}
+		}
+	});
+}
+
+// Whether the whole selection is already bold / underlined — used to decide toggle direction.
+export function selectionStyleFlags(
+	doc: InkDocument,
+	selection: InkSelection,
+): { allBold: boolean; allUnderline: boolean; count: number } {
+	let count = 0;
+	let allBold = true;
+	let allUnderline = true;
+	eachSelectedStroke(doc, selection, (stroke) => {
+		count += 1;
+		if (!stroke.bold) {
+			allBold = false;
+		}
+		if (!stroke.underline) {
+			allUnderline = false;
+		}
+	});
+	if (count === 0) {
+		return { allBold: false, allUnderline: false, count: 0 };
+	}
+	return { allBold, allUnderline, count };
+}
+
 export function deleteSelection(doc: InkDocument, selection: InkSelection): InkCursor {
 	const [start, end] = orderCursors(
 		clampCursorToDoc(doc, selection.anchor),

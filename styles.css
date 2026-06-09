@@ -52,27 +52,82 @@
 
 .freeflow-ink-meta-action {
 	appearance: none;
-	border: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
 	padding: 0;
-	background: transparent;
+	background: var(--background-primary);
 	color: var(--interactive-accent);
-	font-weight: 600;
 	cursor: pointer;
 }
 
+.freeflow-ink-meta-action .svg-icon {
+	width: 16px;
+	height: 16px;
+}
+
 .freeflow-ink-meta-action:hover {
-	text-decoration: underline;
+	background: var(--background-modifier-hover);
 }
 
 .freeflow-ink-meta-action.is-active {
-	text-decoration: underline;
-	color: var(--text-accent-hover, var(--interactive-accent));
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
 }
 
 .freeflow-ink-meta-action:disabled {
 	color: var(--text-faint);
 	cursor: default;
-	text-decoration: none;
+	background: var(--background-primary);
+	opacity: 0.5;
+}
+
+/* Colour-picker buttons (drawer + meta row): a swatch instead of an icon. */
+.freeflow-ink-color-btn-swatch {
+	display: block;
+	width: 16px;
+	height: 16px;
+	border-radius: 4px;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.freeflow-ink-color-popup {
+	position: fixed;
+	z-index: 1000;
+	padding: 8px;
+	border-radius: 8px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.freeflow-ink-color-grid {
+	display: grid;
+	grid-template-columns: repeat(6, 22px);
+	gap: 6px;
+}
+
+.freeflow-ink-color-swatch {
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border-radius: 5px;
+	border: 1px solid var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.freeflow-ink-color-swatch:hover {
+	transform: scale(1.12);
+}
+
+.freeflow-ink-color-swatch.is-current {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
 }
 
 .freeflow-ink-block.is-over-limit {

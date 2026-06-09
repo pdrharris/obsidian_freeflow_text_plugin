@@ -11,6 +11,7 @@ export interface FreeFlowInkSettings {
 	releaseAdvanceDelayMs: number;
 	advanceLinePosition: number;
 	showWritingLine: boolean;
+	velocityWidth: boolean;
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
 	showSoftLimitNotice: boolean;
@@ -26,6 +27,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	releaseAdvanceDelayMs: 260,
 	advanceLinePosition: 85,
 	showWritingLine: true,
+	velocityWidth: true,
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
 	showSoftLimitNotice: false,
@@ -213,6 +215,20 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		const advanceLineValueEl = createDiv();
 		advanceLineValueEl.addClass('freeflow-ink-settings-value');
 		advanceLineValueEl.setText(`${this.plugin.settings.advanceLinePosition}%`);
+
+		new Setting(containerEl)
+			.setName('Variable width by pen speed')
+			.setDesc(
+				'Renders faster strokes thinner and slower strokes thicker for a more natural ink look.',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.velocityWidth)
+					.onChange(async (value) => {
+						this.plugin.settings.velocityWidth = value;
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName('Show writing line')

@@ -18,11 +18,13 @@ import {
 } from '../src/ink/doc';
 import {
 	appendStrokeToCurrentWord,
+	applyStyleToSelection,
 	deleteSelection,
 	eraseAtCursor,
 	extractSelection,
 	insertFragmentAtCursor,
 	insertWordAtCursor,
+	selectionStyleFlags,
 	splitLineAtCursor,
 	wordFromStroke,
 } from '../src/ink/edit';
@@ -302,6 +304,70 @@ test('pasting the same fragment twice yields unique stroke/word ids', () => {
 		}
 	}
 	eq(ids.length, new Set(ids).size, 'all word/stroke ids must be unique after repeated paste');
+});
+
+// ---- styling (bold / underline / colour on selection) ---------------------
+
+test('applyStyleToSelection sets bold/underline/colour on the selected words only', () => {
+	const d = mkDoc([W('a'), W('b'), W('c')]);
+	const sel = { anchor: { line: 0, word: 1 }, focus: { line: 0, word: 3 } };
+	applyStyleToSelection(d, sel, { bold: true, underline: true, color: '#ef4444' });
+	const a = d.lines[0]!.words[0]!.strokes[0]!;
+	const b = d.lines[0]!.words[1]!.strokes[0]!;
+	ok(!a.bold && !a.underline, 'word a (outside selection) must be untouched');
+	ok(b.bold === true && b.underline === true, 'word b should be bold + underlined');
+	eq(b.color, '#ef4444', 'word b should be recoloured');
+});
+
+test('applyStyleToSelection bold:false removes the flag', () => {
+	const d = mkDoc([W('a')]);
+	const sel = { anchor: { line: 0, word: 0 }, focus: { line: 0, word: 1 } };
+	applyStyleToSelection(d, sel, { bold: true });
+	applyStyleToSelection(d, sel, { bold: false });
+	ok(d.lines[0]!.words[0]!.strokes[0]!.bold === undefined, 'bold flag should be cleared');
+});
+
+test('selectionStyleFlags reports all-bold only when every stroke is bold', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	const sel = { anchor: { line: 0, word: 0 }, focus: { line: 0, word: 2 } };
+	eq(selectionStyleFlags(d, sel).allBold, false);
+	applyStyleToSelection(d, sel, { bold: true });
+	eq(selectionStyleFlags(d, sel).allBold, true);
+	eq(selectionStyleFlags(d, sel).count, 2);
+});
+
+// ---- velocity width -------------------------------------------------------
+
+test('velocityWidth attaches per-point widths; off leaves them undefined', () => {
+	// Stroke with varying inter-point timing so speed (and width) varies.
+	const s: InkStroke = {
+		id: 's',
+		width: 3,
+		color: '#111827',
+		points: [
+			{ x: 0, y: 0, pressure: 0.5, time: 0 },
+			{ x: 10, y: 0, pressure: 0.5, time: 10 },
+			{ x: 200, y: 0, pressure: 0.5, time: 20 },
+			{ x: 210, y: 0, pressure: 0.5, time: 120 },
+		],
+	};
+	const cfg = {
+		contentWidthCss: Number.POSITIVE_INFINITY,
+		targetLineHeightCss: 30,
+		sourceLineHeight: 180,
+		wordGapScale: 1,
+		strokeFillScale: 1,
+	};
+	const d = mkDoc([word('w', s)]);
+	const off = layoutDocument(d, cfg);
+	ok(
+		off.words[0]!.strokes[0]!.points.every((p) => p.w === undefined),
+		'no per-point widths when velocity is off',
+	);
+	const on = layoutDocument(d, { ...cfg, velocityWidth: true });
+	const widths = on.words[0]!.strokes[0]!.points.map((p) => p.w ?? 0);
+	ok(widths.every((w) => w > 0), 'every point should get a width when velocity is on');
+	ok(Math.max(...widths) > Math.min(...widths), 'a varying-speed stroke should vary in width');
 });
 
 // ---- layout.ts ------------------------------------------------------------

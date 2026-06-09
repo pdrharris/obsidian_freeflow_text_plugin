@@ -70,6 +70,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.getRenderLineHeightScale(),
 			() => this.getRenderStrokeFillScale(),
 			() => this.settings.showWritingLine,
+			() => this.settings.velocityWidth,
 			() => this.getSoftBlockLimitBytes(),
 			() => this.getHardBlockLimitBytes(),
 			() => this.settings.showSoftLimitNotice,
@@ -110,6 +111,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			releaseAdvanceDelayMs: this.settings.releaseAdvanceDelayMs,
 			advanceTriggerRatio: clamp(this.settings.advanceLinePosition, 50, 95) / 100,
 			showWritingLine: this.settings.showWritingLine,
+			velocityWidth: this.settings.velocityWidth,
 			usePointerCapture: !iosLike,
 			allowAnyNonMousePointer: iosLike,
 		};

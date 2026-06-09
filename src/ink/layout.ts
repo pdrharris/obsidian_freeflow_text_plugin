@@ -39,11 +39,17 @@ export interface LayoutConfig {
 	wordGapScale: number;
 	strokeFillScale: number;
 	marginXCss?: number;
+	// When true, each laid point carries a per-point width (`LaidPoint.w`) derived from pen
+	// speed so fast strokes render thinner and slow strokes thicker.
+	velocityWidth?: boolean;
 }
 
 export interface LaidPoint {
 	x: number;
 	y: number;
+	// Per-point stroke width in css px (only set when velocity width is enabled); when absent,
+	// the renderer uses a single width for the whole stroke.
+	w?: number;
 }
 
 export interface LaidStroke {
@@ -193,7 +199,16 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 			}
 
 			const baselineY = visualRow * rowHeight + baselineOffset;
-			const placed = placeWord(word, bounds, leftCss, baselineY, cssPerSource, wordWidth, rowHeight);
+			const placed = placeWord(
+				word,
+				bounds,
+				leftCss,
+				baselineY,
+				cssPerSource,
+				wordWidth,
+				rowHeight,
+				config.velocityWidth === true,
+			);
 			placed.line = lineIndex;
 			placed.word = wordIndex;
 			placed.visualRow = visualRow;
@@ -238,15 +253,25 @@ function placeWord(
 	cssPerSource: number,
 	wordWidth: number,
 	rowHeight: number,
+	velocityWidth: boolean,
 ): LaidWord {
 	const originX = bounds ? bounds.minX : 0;
-	const strokes: LaidStroke[] = word.strokes.map((stroke) => ({
-		stroke,
-		points: stroke.points.map((p) => ({
-			x: leftCss + (p.x - originX) * cssPerSource,
-			y: baselineY + p.y * cssPerSource,
-		})),
-	}));
+	const strokes: LaidStroke[] = word.strokes.map((stroke) => {
+		const widths = velocityWidth ? velocityWidths(stroke, cssPerSource) : null;
+		return {
+			stroke,
+			points: stroke.points.map((p, i) => {
+				const laid: LaidPoint = {
+					x: leftCss + (p.x - originX) * cssPerSource,
+					y: baselineY + p.y * cssPerSource,
+				};
+				if (widths) {
+					laid.w = widths[i];
+				}
+				return laid;
+			}),
+		};
+	});
 	const top = bounds ? baselineY + bounds.minY * cssPerSource : baselineY - rowHeight * 0.6;
 	const bottom = bounds ? baselineY + bounds.maxY * cssPerSource : baselineY;
 	return {
@@ -259,6 +284,57 @@ function placeWord(
 		height: Math.max(rowHeight * 0.3, bottom - top),
 		strokes,
 	};
+}
+
+// Per-point widths from pen speed. Self-normalising per stroke (relative to the stroke's own
+// median speed) so it needs no absolute calibration: points drawn faster than the stroke's
+// typical speed get thinner, slower points thicker. Returns css-px widths, bold baked in.
+const VELOCITY_MIN_FACTOR = 0.55;
+const VELOCITY_MAX_FACTOR = 1.75;
+function velocityWidths(stroke: InkStroke, cssPerSource: number): number[] {
+	const pts = stroke.points;
+	const n = pts.length;
+	const base = Math.max(0.6, stroke.width * cssPerSource * (stroke.bold ? 1.7 : 1));
+	if (n < 2) {
+		return [base];
+	}
+	const segSpeed: number[] = [];
+	for (let i = 1; i < n; i += 1) {
+		const a = pts[i - 1];
+		const b = pts[i];
+		if (!a || !b) {
+			segSpeed.push(0);
+			continue;
+		}
+		const dist = Math.hypot(b.x - a.x, b.y - a.y);
+		const dt = Math.max(1, b.time - a.time);
+		segSpeed.push(dist / dt);
+	}
+	const sorted = [...segSpeed].filter((s) => s > 0).sort((a, b) => a - b);
+	const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] ?? 0 : 0;
+	if (median <= 0) {
+		return new Array<number>(n).fill(base);
+	}
+	const widthAt = (speed: number): number => {
+		const ratio = median / Math.max(speed, median * 0.05);
+		const factor = clamp(Math.sqrt(ratio), VELOCITY_MIN_FACTOR, VELOCITY_MAX_FACTOR);
+		return base * factor;
+	};
+	const raw: number[] = new Array<number>(n);
+	raw[0] = widthAt(segSpeed[0] ?? median);
+	for (let i = 1; i < n - 1; i += 1) {
+		raw[i] = widthAt(((segSpeed[i - 1] ?? median) + (segSpeed[i] ?? median)) / 2);
+	}
+	raw[n - 1] = widthAt(segSpeed[n - 2] ?? median);
+	// Light smoothing so the ribbon doesn't jitter point-to-point.
+	const out: number[] = new Array<number>(n);
+	for (let i = 0; i < n; i += 1) {
+		const prev = raw[i - 1] ?? raw[i] ?? base;
+		const cur = raw[i] ?? base;
+		const next = raw[i + 1] ?? raw[i] ?? base;
+		out[i] = (prev + cur * 2 + next) / 4;
+	}
+	return out;
 }
 
 function cursorFromPoint(rows: RowInfo[], rowHeight: number, x: number, y: number): InkCursor {

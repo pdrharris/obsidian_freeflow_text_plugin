@@ -4,6 +4,7 @@ import {
 	MarkdownView,
 	Notice,
 	Plugin,
+	setIcon,
 } from 'obsidian';
 import { InkDrawer } from './drawer';
 import {
@@ -15,9 +16,16 @@ import {
 	selectionIsEmpty,
 	serializeInkDocument,
 } from './doc';
-import { deleteSelection, extractSelection, insertFragmentAtCursor } from './edit';
+import {
+	applyStyleToSelection,
+	deleteSelection,
+	extractSelection,
+	insertFragmentAtCursor,
+	selectionStyleFlags,
+} from './edit';
 import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions } from './render';
+import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
@@ -30,6 +38,7 @@ export class InkBlockRegistry {
 	private readonly getRenderLineHeightScale: () => number;
 	private readonly getRenderStrokeFillScale: () => number;
 	private readonly getShowWritingLine: () => boolean;
+	private readonly getVelocityWidth: () => boolean;
 	private readonly getSoftBlockLimitBytes: () => number;
 	private readonly getHardBlockLimitBytes: () => number;
 	private readonly getShowSoftLimitNotice: () => boolean;
@@ -43,6 +52,7 @@ export class InkBlockRegistry {
 		getRenderLineHeightScale: () => number,
 		getRenderStrokeFillScale: () => number,
 		getShowWritingLine: () => boolean,
+		getVelocityWidth: () => boolean,
 		getSoftBlockLimitBytes: () => number,
 		getHardBlockLimitBytes: () => number,
 		getShowSoftLimitNotice: () => boolean,
@@ -54,6 +64,7 @@ export class InkBlockRegistry {
 		this.getRenderLineHeightScale = getRenderLineHeightScale;
 		this.getRenderStrokeFillScale = getRenderStrokeFillScale;
 		this.getShowWritingLine = getShowWritingLine;
+		this.getVelocityWidth = getVelocityWidth;
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
 		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
 		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
@@ -75,6 +86,7 @@ export class InkBlockRegistry {
 			renderLineHeightScale: this.getRenderLineHeightScale(),
 			renderStrokeFillScale: this.getRenderStrokeFillScale(),
 			showWritingLine: this.getShowWritingLine(),
+			velocityWidth: this.getVelocityWidth(),
 		};
 	}
 
@@ -114,6 +126,8 @@ export class InkBlockRegistry {
 		let showInlineCaret = false;
 		let selectMode = false;
 		let selecting = false;
+		let colorPopup: ColorPopupHandle | null = null;
+		let lastSelectionColor = DEFAULT_INK_COLOR;
 		let saveTimeout = 0;
 		let isDisposed = false;
 		let pendingInlineRefreshWhileActive = false;
@@ -126,24 +140,48 @@ export class InkBlockRegistry {
 			attr: { role: 'button', 'aria-label': 'Open freeflow ink drawer' },
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
-		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor' });
-		const makeMetaButton = (label: string): HTMLButtonElement => {
-			const btn = metaRowEl.createEl('button', { cls: 'freeflow-ink-meta-action', text: label });
+		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor', cls: 'freeflow-ink-meta-hint' });
+		const makeMetaButton = (icon: string, label: string): HTMLButtonElement => {
+			const btn = metaRowEl.createEl('button', { cls: 'freeflow-ink-meta-action' });
 			btn.type = 'button';
+			btn.setAttribute('aria-label', label);
+			btn.title = label;
+			setIcon(btn, icon);
 			return btn;
 		};
-		const selectButtonEl = makeMetaButton('Select');
-		const copyButtonEl = makeMetaButton('Copy');
-		const cutButtonEl = makeMetaButton('Cut');
-		const pasteButtonEl = makeMetaButton('Paste');
-		const actionEl = makeMetaButton('Open');
+		const selectButtonEl = makeMetaButton('box-select', 'Select words');
+		const boldButtonEl = makeMetaButton('bold', 'Bold selection');
+		const underlineButtonEl = makeMetaButton('underline', 'Underline selection');
+		const colorButtonEl = metaRowEl.createEl('button', {
+			cls: 'freeflow-ink-meta-action freeflow-ink-color-btn',
+		});
+		colorButtonEl.type = 'button';
+		colorButtonEl.setAttribute('aria-label', 'Recolour selection');
+		colorButtonEl.title = 'Recolour selection';
+		const colorSwatchEl = colorButtonEl.createSpan({ cls: 'freeflow-ink-color-btn-swatch' });
+		colorSwatchEl.style.backgroundColor = lastSelectionColor;
+		const copyButtonEl = makeMetaButton('copy', 'Copy');
+		const cutButtonEl = makeMetaButton('scissors', 'Cut');
+		const pasteButtonEl = makeMetaButton('clipboard-paste', 'Paste');
+		const actionEl = makeMetaButton('pencil', 'Open drawer');
 
 		const updateMetaButtons = (): void => {
 			const hasSelection = !selectionIsEmpty(documentModel.meta.selection);
 			selectButtonEl.classList.toggle('is-active', selectMode);
 			copyButtonEl.disabled = !hasSelection;
 			cutButtonEl.disabled = !hasSelection;
+			boldButtonEl.disabled = !hasSelection;
+			underlineButtonEl.disabled = !hasSelection;
+			colorButtonEl.disabled = !hasSelection;
 			pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
+			if (hasSelection) {
+				const flags = selectionStyleFlags(documentModel, documentModel.meta.selection!);
+				boldButtonEl.classList.toggle('is-active', flags.allBold);
+				underlineButtonEl.classList.toggle('is-active', flags.allUnderline);
+			} else {
+				boldButtonEl.classList.remove('is-active');
+				underlineButtonEl.classList.remove('is-active');
+			}
 			hintEl.textContent = selectMode ? 'Drag to select words' : 'Tap to place cursor';
 		};
 
@@ -339,6 +377,47 @@ export class InkBlockRegistry {
 			applyInlineEdit();
 		};
 
+		const onBold = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			const flags = selectionStyleFlags(documentModel, documentModel.meta.selection!);
+			applyStyleToSelection(documentModel, documentModel.meta.selection!, { bold: !flags.allBold });
+			applyInlineEdit();
+		};
+
+		const onUnderline = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			const flags = selectionStyleFlags(documentModel, documentModel.meta.selection!);
+			applyStyleToSelection(documentModel, documentModel.meta.selection!, {
+				underline: !flags.allUnderline,
+			});
+			applyInlineEdit();
+		};
+
+		const onColor = (): void => {
+			if (selectionIsEmpty(documentModel.meta.selection)) {
+				return;
+			}
+			if (colorPopup) {
+				colorPopup.close();
+				colorPopup = null;
+				return;
+			}
+			colorPopup = openColorPopup(colorButtonEl, lastSelectionColor, (color) => {
+				colorPopup = null;
+				lastSelectionColor = color;
+				colorSwatchEl.style.backgroundColor = color;
+				if (selectionIsEmpty(documentModel.meta.selection)) {
+					return;
+				}
+				applyStyleToSelection(documentModel, documentModel.meta.selection!, { color });
+				applyInlineEdit();
+			});
+		};
+
 		const onCanvasClick = (event: MouseEvent): void => {
 			if (selectMode) {
 				return; // selection is handled by the pointer drag handlers
@@ -378,6 +457,9 @@ export class InkBlockRegistry {
 		canvasEl.addEventListener('pointerup', onCanvasPointerUp);
 		canvasEl.addEventListener('pointercancel', onCanvasPointerUp);
 		selectButtonEl.addEventListener('click', onToggleSelect);
+		boldButtonEl.addEventListener('click', onBold);
+		underlineButtonEl.addEventListener('click', onUnderline);
+		colorButtonEl.addEventListener('click', onColor);
 		copyButtonEl.addEventListener('click', onCopy);
 		cutButtonEl.addEventListener('click', onCut);
 		pasteButtonEl.addEventListener('click', onPaste);
@@ -402,10 +484,15 @@ export class InkBlockRegistry {
 					canvasEl.removeEventListener('pointerup', onCanvasPointerUp);
 					canvasEl.removeEventListener('pointercancel', onCanvasPointerUp);
 					selectButtonEl.removeEventListener('click', onToggleSelect);
+					boldButtonEl.removeEventListener('click', onBold);
+					underlineButtonEl.removeEventListener('click', onUnderline);
+					colorButtonEl.removeEventListener('click', onColor);
 					copyButtonEl.removeEventListener('click', onCopy);
 					cutButtonEl.removeEventListener('click', onCut);
 					pasteButtonEl.removeEventListener('click', onPaste);
 					actionEl.removeEventListener('click', onActionClick);
+					colorPopup?.close();
+					colorPopup = null;
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
 						saveTimeout = 0;

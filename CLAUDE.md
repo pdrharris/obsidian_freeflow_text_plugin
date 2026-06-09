@@ -64,9 +64,10 @@ Every edit is a **tree splice** followed by a relayout — there is no coordinat
 | `src/ink/doc.ts` | v2 model types, `parseInkDocument`/`serializeInkDocument`, geometry + cursor/selection helpers |
 | `src/ink/layout.ts` | `layoutDocument` — pure layout engine + hit-testing (the single geometry source of truth) |
 | `src/ink/edit.ts` | Logical editing operations (tree splices) shared by the drawer |
-| `src/ink/render.ts` | Canvas painting: `drawInlineCanvas`, `inlineLayout` (shared by render + click hit-testing), `drawLaidStroke` |
-| `src/ink/drawer.ts` | `InkDrawer` — the floating writing panel; pointer/touch input, stroke capture → source coords → `edit.ts` |
+| `src/ink/render.ts` | Canvas painting: `drawInlineCanvas`, `inlineLayout` (shared by render + click hit-testing), `drawLaidStroke` (variable-width when points carry `w`), `wordUnderline`/`drawUnderline` |
+| `src/ink/drawer.ts` | `InkDrawer` — the floating writing panel; pointer/touch input, stroke capture → source coords → `edit.ts`; holds the current pen style (colour/bold/underline) |
 | `src/ink/blocks.ts` | `InkBlockRegistry` — registers the `fii-ink` processor, mounts inline canvases, bridges to the singleton drawer |
+| `src/ink/palette.ts` | `INK_PALETTE` (swatch colours) + `openColorPopup` — the floating colour picker shared by the drawer pen and inline recolour |
 | `src/ink/storage.ts` | `persistInkCodeBlock` — serializes and splices the updated JSON back into the vault file |
 
 ### Key design decisions
@@ -78,6 +79,14 @@ onContentChanged, onCursorChanged, onClose}`) associates it with the active bloc
 (via `inlineLayout` + `cursorFromPoint`); double-click / Open launches the drawer overlay. The
 drawer renders the laid-out document scrolled to follow the caret, captures strokes, converts
 them to source coordinates, and inserts them via `edit.ts`. On close it re-renders and saves.
+
+**Styling**: `InkStroke` carries `color`, `bold?`, `underline?`. The drawer holds a current
+**pen** (colour/bold/underline) applied to new strokes; the inline meta row restyles the active
+selection retroactively via `applyStyleToSelection`/`selectionStyleFlags` (`edit.ts`). Bold is a
+render-time width multiplier; underline is drawn per word under its underlined strokes. **Velocity
+width** is render-time and toggleable (`settings.velocityWidth`): when on, `layoutDocument`
+attaches a per-point width (`LaidPoint.w`) derived from pen speed (self-normalised per stroke) and
+`drawLaidStroke` draws a width-varying ribbon. No model change is needed for any of these.
 
 **Saving**: `storage.ts` uses `SectionInfo` line numbers for a precise splice, with a fallback
 regex search. Saves are blocked above `hardBlockLimitKb`. Persistence is format-agnostic — it

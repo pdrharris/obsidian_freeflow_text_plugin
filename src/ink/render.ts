@@ -4,7 +4,7 @@
 // never disagree.
 
 import { InkCursor, InkDocument, InkSelection, selectionIsEmpty } from './doc';
-import { LaidPoint, LayoutResult, layoutDocument } from './layout';
+import { LaidPoint, LaidWord, LayoutResult, layoutDocument } from './layout';
 
 const INLINE_MIN_HEIGHT = 140;
 const INLINE_BASE_LINE_HEIGHT_PX = 28;
@@ -19,6 +19,7 @@ export interface InlineRenderOptions {
 	renderLineHeightScale: number;
 	renderStrokeFillScale: number;
 	showWritingLine: boolean;
+	velocityWidth: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -60,6 +61,7 @@ export function inlineLayout(
 		sourceLineHeight: doc.meta.lineHeight,
 		wordGapScale: options.wordGapScale,
 		strokeFillScale: options.renderStrokeFillScale,
+		velocityWidth: options.velocityWidth,
 	});
 	const cssHeight = Math.max(INLINE_MIN_HEIGHT, Math.ceil(layout.height + targetLineHeight));
 	return { layout, cssWidth, cssHeight };
@@ -104,6 +106,10 @@ export function drawInlineCanvas(
 
 	const widthScale = layout.cssPerSource;
 	for (const word of layout.words) {
+		const underline = wordUnderline(word);
+		if (underline) {
+			drawUnderline(ctx, underline.minX, underline.maxX, underline.baselineY, underline.color, widthScale);
+		}
 		for (const laid of word.strokes) {
 			const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
 			drawLaidStroke(ctx, laid.points, widthPx, laid.stroke.color);
@@ -122,6 +128,8 @@ export function drawInlineCanvas(
 }
 
 // Paint a single laid-out stroke (points already in CSS px). Shared by inline + drawer.
+// If the points carry per-point widths (`w`, from velocity), the stroke is drawn as a series
+// of width-varying segments; otherwise it's one smooth quadratic path at `widthPx`.
 export function drawLaidStroke(
 	ctx: CanvasRenderingContext2D,
 	points: LaidPoint[],
@@ -136,15 +144,33 @@ export function drawLaidStroke(
 	ctx.fillStyle = color;
 	ctx.lineCap = 'round';
 	ctx.lineJoin = 'round';
-	ctx.lineWidth = widthPx;
 
 	if (points.length === 1) {
+		const r = Math.max(1, (first.w ?? widthPx) / 2);
 		ctx.beginPath();
-		ctx.arc(first.x, first.y, Math.max(1, widthPx / 2), 0, Math.PI * 2);
+		ctx.arc(first.x, first.y, r, 0, Math.PI * 2);
 		ctx.fill();
 		return;
 	}
 
+	const hasPerPoint = points.some((p) => typeof p.w === 'number');
+	if (hasPerPoint) {
+		for (let i = 1; i < points.length; i += 1) {
+			const prev = points[i - 1];
+			const curr = points[i];
+			if (!prev || !curr) {
+				continue;
+			}
+			ctx.lineWidth = Math.max(0.6, ((prev.w ?? widthPx) + (curr.w ?? widthPx)) / 2);
+			ctx.beginPath();
+			ctx.moveTo(prev.x, prev.y);
+			ctx.lineTo(curr.x, curr.y);
+			ctx.stroke();
+		}
+		return;
+	}
+
+	ctx.lineWidth = widthPx;
 	ctx.beginPath();
 	ctx.moveTo(first.x, first.y);
 	for (let i = 1; i < points.length; i += 1) {
@@ -161,5 +187,50 @@ export function drawLaidStroke(
 	if (last) {
 		ctx.lineTo(last.x, last.y);
 	}
+	ctx.stroke();
+}
+
+// The underline span for a laid word: the x-extent (in css px) covered by its underlined
+// strokes, the baseline to sit under, and the colour to use. Null when nothing is underlined.
+export function wordUnderline(
+	word: LaidWord,
+): { minX: number; maxX: number; baselineY: number; color: string } | null {
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let color = '#111827';
+	let found = false;
+	for (const laid of word.strokes) {
+		if (!laid.stroke.underline) {
+			continue;
+		}
+		found = true;
+		color = laid.stroke.color;
+		for (const p of laid.points) {
+			if (p.x < minX) minX = p.x;
+			if (p.x > maxX) maxX = p.x;
+		}
+	}
+	if (!found || minX === Infinity) {
+		return null;
+	}
+	return { minX, maxX, baselineY: word.baselineY, color };
+}
+
+// Draw an underline beneath a word span, just below the baseline.
+export function drawUnderline(
+	ctx: CanvasRenderingContext2D,
+	minX: number,
+	maxX: number,
+	baselineY: number,
+	color: string,
+	widthScale: number,
+): void {
+	const y = baselineY + Math.max(2, widthScale * 14);
+	ctx.strokeStyle = color;
+	ctx.lineWidth = Math.max(1.2, widthScale * 6);
+	ctx.lineCap = 'round';
+	ctx.beginPath();
+	ctx.moveTo(minX, y);
+	ctx.lineTo(maxX, y);
 	ctx.stroke();
 }

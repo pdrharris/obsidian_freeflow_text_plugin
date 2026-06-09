@@ -27,7 +27,8 @@ import {
 	wordFromStroke,
 } from './edit';
 import { LayoutResult, layoutDocument } from './layout';
-import { drawLaidStroke, resizeCanvasForDpr } from './render';
+import { drawLaidStroke, drawUnderline, resizeCanvasForDpr, wordUnderline } from './render';
+import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 
 const BACKDROP_CLOSE_GUARD_MS = 420;
 const MIN_POINT_DISTANCE_SQ = 0.35;
@@ -41,6 +42,7 @@ export interface DrawerRuntimeConfig {
 	releaseAdvanceDelayMs: number;
 	advanceTriggerRatio: number; // position of the orange "near the edge" line (fraction of width)
 	showWritingLine: boolean;
+	velocityWidth: boolean;
 	usePointerCapture: boolean;
 	allowAnyNonMousePointer: boolean;
 }
@@ -80,6 +82,10 @@ export class InkDrawer {
 	private readonly pasteButtonEl: HTMLButtonElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
+	private readonly boldButtonEl: HTMLButtonElement;
+	private readonly underlineButtonEl: HTMLButtonElement;
+	private readonly colorButtonEl: HTMLButtonElement;
+	private readonly colorSwatchEl: HTMLSpanElement;
 	private readonly closeButtonEl: HTMLButtonElement;
 
 	private session: DrawerSession | null = null;
@@ -90,6 +96,12 @@ export class InkDrawer {
 	private redrawQueued = false;
 	private lastInteractionAt = 0;
 	private advanceTimer = 0;
+
+	// Current "pen" style applied to new strokes.
+	private penColor = DEFAULT_INK_COLOR;
+	private penBold = false;
+	private penUnderline = false;
+	private colorPopup: ColorPopupHandle | null = null;
 
 	constructor(getRuntimeConfig: () => DrawerRuntimeConfig) {
 		this.getRuntimeConfig = getRuntimeConfig;
@@ -119,6 +131,21 @@ export class InkDrawer {
 		};
 		this.eraseButtonEl = makeIconButton('eraser', 'Erase');
 		this.newLineButtonEl = makeIconButton('corner-down-left', 'New line');
+		this.boldButtonEl = makeIconButton('bold', 'Bold');
+		this.underlineButtonEl = makeIconButton('underline', 'Underline');
+
+		// Colour button shows the current pen colour as a swatch rather than an icon.
+		this.colorButtonEl = activeDocument.createElement('button');
+		this.colorButtonEl.type = 'button';
+		this.colorButtonEl.className = 'freeflow-ink-drawer-btn freeflow-ink-color-btn';
+		this.colorButtonEl.setAttribute('aria-label', 'Pen colour');
+		this.colorButtonEl.title = 'Pen colour';
+		this.colorSwatchEl = activeDocument.createElement('span');
+		this.colorSwatchEl.className = 'freeflow-ink-color-btn-swatch';
+		this.colorSwatchEl.style.backgroundColor = this.penColor;
+		this.colorButtonEl.appendChild(this.colorSwatchEl);
+		rightButtons.appendChild(this.colorButtonEl);
+
 		this.pasteButtonEl = makeIconButton('clipboard-paste', 'Paste');
 
 		const topBar = activeDocument.createElement('div');
@@ -184,6 +211,8 @@ export class InkDrawer {
 		}
 		this.finishStroke();
 		this.clearAdvanceTimer();
+		this.colorPopup?.close();
+		this.colorPopup = null;
 		const closing = this.session;
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
@@ -220,6 +249,7 @@ export class InkDrawer {
 			sourceLineHeight: session.doc.meta.lineHeight,
 			wordGapScale: this.getRuntimeConfig().wordGapScale,
 			strokeFillScale: 1,
+			velocityWidth: this.getRuntimeConfig().velocityWidth,
 		});
 		return { layout, viewCursor: { line: 0, word: words.length } };
 	}
@@ -341,8 +371,23 @@ export class InkDrawer {
 
 		const widthScale = view.layout.cssPerSource;
 		for (const word of view.layout.words) {
+			const underline = wordUnderline(word);
+			if (underline) {
+				drawUnderline(
+					ctx,
+					underline.minX - this.scrollX,
+					underline.maxX - this.scrollX,
+					underline.baselineY - this.scrollY,
+					underline.color,
+					widthScale,
+				);
+			}
 			for (const laid of word.strokes) {
-				const points = laid.points.map((p) => ({ x: p.x - this.scrollX, y: p.y - this.scrollY }));
+				const points = laid.points.map((p) => ({
+					x: p.x - this.scrollX,
+					y: p.y - this.scrollY,
+					w: p.w,
+				}));
 				const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
 				drawLaidStroke(ctx, points, widthPx, laid.stroke.color);
 			}
@@ -367,13 +412,13 @@ export class InkDrawer {
 		ctx.lineTo(caret.x - this.scrollX, caret.y + caret.height - this.scrollY);
 		ctx.stroke();
 
-		// Active (in-progress) stroke, drawn raw where the pen is.
+		// Active (in-progress) stroke, drawn raw where the pen is, in the current pen style.
 		if (this.activeStroke && this.activeStroke.length > 0) {
 			drawLaidStroke(
 				ctx,
 				this.activeStroke.map((p) => ({ x: p.x, y: p.y })),
-				Math.max(1, 2.4),
-				'#111827',
+				Math.max(1, this.penBold ? 4 : 2.4),
+				this.penColor,
 			);
 		}
 
@@ -389,6 +434,9 @@ export class InkDrawer {
 		this.canvasEl.addEventListener('pointercancel', this.onPointerUp);
 		this.eraseButtonEl.addEventListener('click', this.onErase);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
+		this.boldButtonEl.addEventListener('click', this.onToggleBold);
+		this.underlineButtonEl.addEventListener('click', this.onToggleUnderline);
+		this.colorButtonEl.addEventListener('click', this.onColorButton);
 		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
 		this.rootEl.addEventListener('pointerdown', this.onBackdropPointerDown);
@@ -401,6 +449,9 @@ export class InkDrawer {
 		this.canvasEl.removeEventListener('pointercancel', this.onPointerUp);
 		this.eraseButtonEl.removeEventListener('click', this.onErase);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
+		this.boldButtonEl.removeEventListener('click', this.onToggleBold);
+		this.underlineButtonEl.removeEventListener('click', this.onToggleUnderline);
+		this.colorButtonEl.removeEventListener('click', this.onColorButton);
 		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
@@ -526,9 +577,15 @@ export class InkDrawer {
 		const stroke: InkStroke = {
 			id: createStrokeId(),
 			width: Math.max(0.5, 2.4 / cssPerSource),
-			color: '#111827',
+			color: this.penColor,
 			points,
 		};
+		if (this.penBold) {
+			stroke.bold = true;
+		}
+		if (this.penUnderline) {
+			stroke.underline = true;
+		}
 		let sMinX = Infinity;
 		let sMaxX = -Infinity;
 		for (const p of points) {
@@ -636,6 +693,39 @@ export class InkDrawer {
 		session.onContentChanged();
 		this.requestDraw();
 	};
+
+	private onToggleBold = (): void => {
+		this.penBold = !this.penBold;
+		this.updateStyleButtons();
+		this.requestDraw();
+	};
+
+	private onToggleUnderline = (): void => {
+		this.penUnderline = !this.penUnderline;
+		this.updateStyleButtons();
+		this.requestDraw();
+	};
+
+	private onColorButton = (): void => {
+		if (this.colorPopup) {
+			this.colorPopup.close();
+			this.colorPopup = null;
+			return;
+		}
+		this.colorPopup = openColorPopup(this.colorButtonEl, this.penColor, (color) => {
+			this.penColor = color;
+			this.colorSwatchEl.style.backgroundColor = color;
+			this.colorPopup = null;
+			this.requestDraw();
+		});
+	};
+
+	// Reflect pen-state toggles on the toolbar buttons.
+	private updateStyleButtons(): void {
+		this.boldButtonEl.classList.toggle('is-active', this.penBold);
+		this.underlineButtonEl.classList.toggle('is-active', this.penUnderline);
+		this.colorSwatchEl.style.backgroundColor = this.penColor;
+	}
 
 	private onCloseClick = (): void => {
 		this.close();
