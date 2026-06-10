@@ -1,6 +1,10 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type FreeFlowInkPlugin from './main';
 
+// Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
+// Keep it in step with the manifest "Sync marker".
+export const FREEFLOW_BUILD_MARKER = '2026-06-10B';
+
 export interface FreeFlowInkSettings {
 	lineWidthScale: number;
 	wordGapScale: number;
@@ -47,6 +51,10 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		this.detachPreviewResize?.();
 		this.detachPreviewResize = null;
 		containerEl.empty();
+
+		new Setting(containerEl)
+			.setName('Build')
+			.setDesc(`Version ${this.plugin.manifest.version} · marker ${FREEFLOW_BUILD_MARKER}`);
 
 		new Setting(containerEl).setName('Writing behavior').setHeading();
 
