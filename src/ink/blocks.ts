@@ -1,7 +1,9 @@
 import {
+	App,
 	MarkdownPostProcessorContext,
 	MarkdownRenderChild,
 	MarkdownView,
+	Modal,
 	Notice,
 	Plugin,
 	setIcon,
@@ -26,9 +28,54 @@ import {
 import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions } from './render';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
-import { persistInkCodeBlock, SectionInfoLike } from './storage';
+import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
+
+// setIcon renders nothing for an icon name absent from the running Lucide set (notably on mobile),
+// leaving a blank button. Fall back to a text glyph so a control is never invisible.
+const ICON_FALLBACK: Record<string, string> = {
+	'box-select': '▢',
+	bold: 'B',
+	underline: 'U',
+	copy: '⧉',
+	scissors: '✂',
+	'clipboard-paste': '▤',
+	pencil: '✎',
+	'trash-2': '🗑',
+};
+
+function applyIconWithFallback(el: HTMLElement, icon: string): void {
+	setIcon(el, icon);
+	if (el.childElementCount === 0) {
+		el.setText(ICON_FALLBACK[icon] ?? '•');
+	}
+}
+
+function confirmModal(app: App, title: string, body: string, confirmText: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const modal = new Modal(app);
+		modal.setTitle(title);
+		modal.contentEl.createEl('p', { text: body });
+		const row = modal.contentEl.createDiv({ cls: 'freeflow-ink-confirm-row' });
+		const cancelEl = row.createEl('button', { text: 'Cancel' });
+		const confirmEl = row.createEl('button', { text: confirmText, cls: 'mod-warning' });
+		let decided = false;
+		const finish = (value: boolean): void => {
+			decided = true;
+			resolve(value);
+			modal.close();
+		};
+		cancelEl.addEventListener('click', () => finish(false));
+		confirmEl.addEventListener('click', () => finish(true));
+		modal.onClose = (): void => {
+			if (!decided) {
+				resolve(false);
+			}
+		};
+		modal.open();
+	});
+}
 
 export class InkBlockRegistry {
 	private readonly plugin: Plugin;
@@ -146,7 +193,7 @@ export class InkBlockRegistry {
 			btn.type = 'button';
 			btn.setAttribute('aria-label', label);
 			btn.title = label;
-			setIcon(btn, icon);
+			applyIconWithFallback(btn, icon);
 			return btn;
 		};
 		const selectButtonEl = makeMetaButton('box-select', 'Select words');
@@ -164,6 +211,8 @@ export class InkBlockRegistry {
 		const cutButtonEl = makeMetaButton('scissors', 'Cut');
 		const pasteButtonEl = makeMetaButton('clipboard-paste', 'Paste');
 		const actionEl = makeMetaButton('pencil', 'Open drawer');
+		const deleteButtonEl = makeMetaButton('trash-2', 'Delete handwriting block');
+		deleteButtonEl.classList.add('is-danger');
 
 		const updateMetaButtons = (): void => {
 			const hasSelection = !selectionIsEmpty(documentModel.meta.selection);
@@ -449,6 +498,36 @@ export class InkBlockRegistry {
 			openDrawer();
 		};
 
+		const onDelete = (): void => {
+			void (async () => {
+				const ok = await confirmModal(
+					this.plugin.app,
+					'Delete handwriting block?',
+					'This removes the entire handwriting block from the note. It cannot be undone from here.',
+					'Delete',
+				);
+				if (ok === false) {
+					return;
+				}
+				// Stop any pending save and block further ones, then close the drawer if it's ours.
+				if (saveTimeout) {
+					window.clearTimeout(saveTimeout);
+					saveTimeout = 0;
+				}
+				isDisposed = true;
+				if (isActiveKey(blockKey)) {
+					drawer.close();
+				}
+				try {
+					await removeInkCodeBlock(this.plugin.app, ctx.sourcePath, section);
+				} catch (error) {
+					isDisposed = false; // delete failed; let the block keep working
+					const message = error instanceof Error ? error.message : 'Unknown delete error.';
+					new Notice(`FreeFlow Ink delete failed: ${message}`);
+				}
+			})();
+		};
+
 		canvasEl.addEventListener('click', onCanvasClick);
 		canvasEl.addEventListener('dblclick', onCanvasDoubleClick);
 		canvasEl.addEventListener('keydown', onCanvasKeyDown);
@@ -464,6 +543,7 @@ export class InkBlockRegistry {
 		cutButtonEl.addEventListener('click', onCut);
 		pasteButtonEl.addEventListener('click', onPaste);
 		actionEl.addEventListener('click', onActionClick);
+		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;
 
 		const resizeObserver = new ResizeObserver(() => {
@@ -491,6 +571,7 @@ export class InkBlockRegistry {
 					cutButtonEl.removeEventListener('click', onCut);
 					pasteButtonEl.removeEventListener('click', onPaste);
 					actionEl.removeEventListener('click', onActionClick);
+					deleteButtonEl.removeEventListener('click', onDelete);
 					colorPopup?.close();
 					colorPopup = null;
 					if (saveTimeout) {

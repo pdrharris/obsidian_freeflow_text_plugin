@@ -87,6 +87,23 @@
 	opacity: 0.5;
 }
 
+.freeflow-ink-meta-action.is-danger {
+	color: var(--text-muted);
+}
+
+.freeflow-ink-meta-action.is-danger:hover {
+	color: var(--text-on-accent);
+	background: var(--color-red);
+	border-color: var(--color-red);
+}
+
+.freeflow-ink-confirm-row {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+}
+
 /* Colour-picker buttons (drawer + meta row): a swatch instead of an icon. */
 .freeflow-ink-color-btn-swatch {
 	display: block;

@@ -34,6 +34,24 @@ const BACKDROP_CLOSE_GUARD_MS = 420;
 const MIN_POINT_DISTANCE_SQ = 0.35;
 const ADVANCE_TARGET_RATIO = 0.4; // after advancing, the caret lands at this fraction of width
 const ADVANCE_MIN_CARET_RATIO = 0.4; // don't bother advancing while there's still room to the left
+const RAW_LOG_MAX = 4000; // ring buffer of raw pointer samples for iPad diagnostics
+
+// setIcon renders nothing for an unknown icon name (e.g. on a mobile build with an older Lucide
+// set), leaving a blank button. Fall back to a text glyph so a control is never invisible.
+const ICON_FALLBACK: Record<string, string> = {
+	eraser: '⌫',
+	'corner-down-left': '↵',
+	bold: 'B',
+	underline: 'U',
+	'clipboard-paste': '▤',
+};
+
+function applyIconWithFallback(el: HTMLElement, icon: string): void {
+	setIcon(el, icon);
+	if (el.childElementCount === 0) {
+		el.setText(ICON_FALLBACK[icon] ?? '•');
+	}
+}
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
@@ -68,6 +86,18 @@ interface ActivePoint {
 	time: number;
 }
 
+// One raw pointer event as the device delivered it — captured for iPad stroke-loss diagnostics.
+interface RawPointerSample {
+	phase: 'down' | 'move' | 'up' | 'cancel' | 'synth-down';
+	pointerType: string;
+	pointerId: number;
+	x: number;
+	y: number;
+	pressure: number;
+	coalesced: number;
+	t: number;
+}
+
 interface DrawerView {
 	layout: LayoutResult;
 	viewCursor: InkCursor;
@@ -97,6 +127,11 @@ export class InkDrawer {
 	private lastInteractionAt = 0;
 	private advanceTimer = 0;
 
+	// Raw pointer-event diagnostics (iPad stroke-loss). Always-on, cheap; dumped via command.
+	private readonly rawLog: RawPointerSample[] = [];
+	private synthStartCount = 0;
+	private finalizedOnReentryCount = 0;
+
 	// Current "pen" style applied to new strokes.
 	private penColor = DEFAULT_INK_COLOR;
 	private penBold = false;
@@ -125,7 +160,7 @@ export class InkDrawer {
 			btn.className = 'freeflow-ink-drawer-btn';
 			btn.setAttribute('aria-label', label);
 			btn.title = label;
-			setIcon(btn, icon);
+			applyIconWithFallback(btn, icon);
 			rightButtons.appendChild(btn);
 			return btn;
 		};
@@ -429,9 +464,12 @@ export class InkDrawer {
 
 	private attachListeners(): void {
 		this.canvasEl.addEventListener('pointerdown', this.onPointerDown);
-		this.canvasEl.addEventListener('pointermove', this.onPointerMove);
-		this.canvasEl.addEventListener('pointerup', this.onPointerUp);
-		this.canvasEl.addEventListener('pointercancel', this.onPointerUp);
+		// Move/up/cancel are bound to the window, not the canvas: a fast pen lift whose pointerup
+		// lands off-canvas would otherwise be lost, leaving a stroke stuck open and swallowing the
+		// next one. Window-level capture also lets us detect "downless" pen starts (see onPointerMove).
+		activeWindow.addEventListener('pointermove', this.onPointerMove);
+		activeWindow.addEventListener('pointerup', this.onPointerUp);
+		activeWindow.addEventListener('pointercancel', this.onPointerUp);
 		this.eraseButtonEl.addEventListener('click', this.onErase);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
 		this.boldButtonEl.addEventListener('click', this.onToggleBold);
@@ -444,9 +482,9 @@ export class InkDrawer {
 
 	private detachListeners(): void {
 		this.canvasEl.removeEventListener('pointerdown', this.onPointerDown);
-		this.canvasEl.removeEventListener('pointermove', this.onPointerMove);
-		this.canvasEl.removeEventListener('pointerup', this.onPointerUp);
-		this.canvasEl.removeEventListener('pointercancel', this.onPointerUp);
+		activeWindow.removeEventListener('pointermove', this.onPointerMove);
+		activeWindow.removeEventListener('pointerup', this.onPointerUp);
+		activeWindow.removeEventListener('pointercancel', this.onPointerUp);
 		this.eraseButtonEl.removeEventListener('click', this.onErase);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
 		this.boldButtonEl.removeEventListener('click', this.onToggleBold);
@@ -458,15 +496,74 @@ export class InkDrawer {
 	}
 
 	private onPointerDown = (event: PointerEvent): void => {
-		if (!this.session || this.activePointerId !== null) {
+		if (!this.session) {
 			return;
 		}
 		event.preventDefault();
-		this.lastInteractionAt = Date.now();
+		this.recordRaw('down', event, 1);
+		// If a stroke is somehow still open (e.g. a pointerup we never received), commit it rather
+		// than dropping this new pointerdown — that dropping is what swallowed rapid strokes.
+		if (this.activePointerId !== null) {
+			this.finalizedOnReentryCount += 1;
+			this.finishStroke();
+		}
+		this.beginStroke(event);
+	};
 
+	private onPointerMove = (event: PointerEvent): void => {
+		if (!this.session) {
+			return;
+		}
+		// Downless pen start: iOS sometimes omits the pointerdown for the Apple Pencil and the stroke
+		// arrives as moves only. If a pen is pressing on the canvas with no active stroke, begin one.
+		if (this.activeStroke === null) {
+			if (this.isDownlessPenStart(event)) {
+				this.synthStartCount += 1;
+				this.recordRaw('synth-down', event, 1);
+				this.beginStroke(event);
+			} else {
+				return;
+			}
+		}
+		if (this.activePointerId !== event.pointerId || !this.activeStroke) {
+			return;
+		}
+		event.preventDefault();
+		const samples =
+			typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
+		const list = samples.length > 0 ? samples : [event];
+		this.recordRaw('move', event, list.length);
+		for (const sample of list) {
+			this.appendActivePoint(sample);
+		}
+		this.requestDraw();
+	};
+
+	private onPointerUp = (event: PointerEvent): void => {
+		if (this.activePointerId !== event.pointerId) {
+			return;
+		}
+		event.preventDefault();
+		this.recordRaw(event.type === 'pointercancel' ? 'cancel' : 'up', event, 1);
+		this.lastInteractionAt = Date.now();
+		if (this.getRuntimeConfig().usePointerCapture && this.canvasEl.hasPointerCapture(event.pointerId)) {
+			try {
+				this.canvasEl.releasePointerCapture(event.pointerId);
+			} catch {
+				/* ignore */
+			}
+		}
+		this.finishStroke();
+	};
+
+	// Begin a new stroke from a pointer event (shared by pointerdown and downless-pen detection).
+	private beginStroke(event: PointerEvent): void {
+		if (!this.session) {
+			return;
+		}
+		this.lastInteractionAt = Date.now();
 		// Keep writing cancels any pending advance, so the view only moves when you actually pause.
 		this.clearAdvanceTimer();
-
 		this.activePointerId = event.pointerId;
 		if (this.getRuntimeConfig().usePointerCapture) {
 			try {
@@ -480,36 +577,35 @@ export class InkDrawer {
 		this.activeStroke = [];
 		this.appendActivePoint(event);
 		this.requestDraw();
-	};
+	}
 
-	private onPointerMove = (event: PointerEvent): void => {
-		if (this.activePointerId !== event.pointerId || !this.activeStroke) {
-			return;
+	// A pen touching (pressure > 0) the canvas with no active stroke — treat as a missed pointerdown.
+	private isDownlessPenStart(event: PointerEvent): boolean {
+		if (event.type !== 'pointermove' || event.pointerType !== 'pen' || event.pressure <= 0) {
+			return false;
 		}
-		event.preventDefault();
-		const samples =
-			typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
-		for (const sample of samples.length > 0 ? samples : [event]) {
-			this.appendActivePoint(sample);
-		}
-		this.requestDraw();
-	};
+		const rect = this.canvasEl.getBoundingClientRect();
+		const x = event.clientX - rect.left;
+		const y = event.clientY - rect.top;
+		return x >= 0 && y >= 0 && x <= rect.width && y <= rect.height;
+	}
 
-	private onPointerUp = (event: PointerEvent): void => {
-		if (this.activePointerId !== event.pointerId) {
-			return;
+	private recordRaw(phase: RawPointerSample['phase'], event: PointerEvent, coalesced: number): void {
+		const rect = this.canvasEl.getBoundingClientRect();
+		this.rawLog.push({
+			phase,
+			pointerType: event.pointerType || 'unknown',
+			pointerId: event.pointerId,
+			x: Math.round(event.clientX - rect.left),
+			y: Math.round(event.clientY - rect.top),
+			pressure: Math.round((event.pressure || 0) * 100) / 100,
+			coalesced,
+			t: Math.round(performance.now()),
+		});
+		if (this.rawLog.length > RAW_LOG_MAX) {
+			this.rawLog.shift();
 		}
-		event.preventDefault();
-		this.lastInteractionAt = Date.now();
-		if (this.getRuntimeConfig().usePointerCapture && this.canvasEl.hasPointerCapture(event.pointerId)) {
-			try {
-				this.canvasEl.releasePointerCapture(event.pointerId);
-			} catch {
-				/* ignore */
-			}
-		}
-		this.finishStroke();
-	};
+	}
 
 	private appendActivePoint(event: PointerEvent): void {
 		if (!this.activeStroke) {
@@ -756,12 +852,45 @@ export class InkDrawer {
 		];
 	}
 
+	// Dumps the raw pointer capture so iPad stroke-loss can be diagnosed from real device data.
 	getPencilTimingSummary(): string {
-		return 'Pencil timing diagnostics were removed in the flowing-text rewrite.';
+		if (this.rawLog.length === 0) {
+			return 'No pointer samples captured yet. Open the drawer, write on the iPad, then run this again.';
+		}
+		const counts: Record<string, number> = {};
+		let maxMoveGap = 0;
+		let prevMoveT = 0;
+		for (const s of this.rawLog) {
+			const key = `${s.phase}:${s.pointerType}`;
+			counts[key] = (counts[key] ?? 0) + 1;
+			if (s.phase === 'move') {
+				if (prevMoveT) {
+					maxMoveGap = Math.max(maxMoveGap, s.t - prevMoveT);
+				}
+				prevMoveT = s.t;
+			}
+		}
+		const header = Object.entries(counts)
+			.map(([k, v]) => `${k}=${v}`)
+			.join(' ');
+		const tail = this.rawLog.slice(-700);
+		const t0 = tail[0]?.t ?? 0;
+		const lines = tail.map(
+			(s) =>
+				`${String(s.t - t0).padStart(6)} ${s.phase.padEnd(10)} ${s.pointerType.padEnd(5)} id=${s.pointerId} p=${s.pressure} (${s.x},${s.y}) co=${s.coalesced}`,
+		);
+		return [
+			`samples=${this.rawLog.length} synthStarts=${this.synthStartCount} finalizedOnReentry=${this.finalizedOnReentryCount} maxMoveGapMs=${maxMoveGap}`,
+			header,
+			'',
+			lines.join('\n'),
+		].join('\n');
 	}
 
 	resetPencilTimingDiagnostics(): void {
-		/* no-op: timing diagnostics removed */
+		this.rawLog.length = 0;
+		this.synthStartCount = 0;
+		this.finalizedOnReentryCount = 0;
 	}
 }
 

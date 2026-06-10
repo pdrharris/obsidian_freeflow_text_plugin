@@ -40,14 +40,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: 'show-pencil-timing-summary',
-			name: 'Show pencil timing summary',
+			name: 'Copy pointer capture log',
 			callback: () => {
 				this.showPencilTimingSummary();
 			},
 		});
 		this.addCommand({
 			id: 'reset-pencil-timing-summary',
-			name: 'Reset pencil timing summary',
+			name: 'Reset pointer capture log',
 			callback: () => {
 				this.resetPencilTimingSummary();
 			},
@@ -246,7 +246,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 		}
 		const summary = this.drawer.getPencilTimingSummary();
 		const modal = new Modal(this.app);
-		modal.setTitle('Pencil timing summary');
+		modal.setTitle('Pointer capture log');
 		const infoEl = modal.contentEl.createEl('p', {
 			text: 'Copy this text and paste it into chat.',
 		});
