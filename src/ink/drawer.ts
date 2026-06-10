@@ -103,6 +103,7 @@ export class InkDrawer {
 	private session: DrawerSession | null = null;
 	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
+	private activeTouchId: number | null = null;
 	private scrollX = 0;
 	private scrollY = 0;
 	private redrawQueued = false;
@@ -207,6 +208,7 @@ export class InkDrawer {
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		this.activeStroke = null;
 		this.activePointerId = null;
+		this.activeTouchId = null;
 		this.clearAdvanceTimer();
 		this.rootEl.classList.add('is-open');
 		this.resetScrollX();
@@ -449,11 +451,17 @@ export class InkDrawer {
 	private attachListeners(): void {
 		this.canvasEl.addEventListener('pointerdown', this.onPointerDown);
 		// Move/up/cancel are bound to the window, not the canvas: a fast pen lift whose pointerup
-		// lands off-canvas would otherwise be lost, leaving a stroke stuck open and swallowing the
-		// next one. Window-level capture also lets us detect "downless" pen starts (see onPointerMove).
+		// lands off-canvas would otherwise be lost, leaving a stroke stuck open and swallowing the next.
 		activeWindow.addEventListener('pointermove', this.onPointerMove);
 		activeWindow.addEventListener('pointerup', this.onPointerUp);
 		activeWindow.addEventListener('pointercancel', this.onPointerUp);
+		// Touch events (passive:false + preventDefault) are the reliable stream for the Apple Pencil:
+		// WebKit drops the synthesized pointerdown for fast strokes but still fires touchstart. On iOS
+		// we drive capture from touch and ignore pointer events to avoid double-counting each contact.
+		this.canvasEl.addEventListener('touchstart', this.onTouchStart, { passive: false });
+		this.canvasEl.addEventListener('touchmove', this.onTouchMove, { passive: false });
+		this.canvasEl.addEventListener('touchend', this.onTouchEnd, { passive: false });
+		this.canvasEl.addEventListener('touchcancel', this.onTouchEnd, { passive: false });
 		this.eraseButtonEl.addEventListener('click', this.onErase);
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
 		this.boldButtonEl.addEventListener('click', this.onToggleBold);
@@ -469,6 +477,10 @@ export class InkDrawer {
 		activeWindow.removeEventListener('pointermove', this.onPointerMove);
 		activeWindow.removeEventListener('pointerup', this.onPointerUp);
 		activeWindow.removeEventListener('pointercancel', this.onPointerUp);
+		this.canvasEl.removeEventListener('touchstart', this.onTouchStart);
+		this.canvasEl.removeEventListener('touchmove', this.onTouchMove);
+		this.canvasEl.removeEventListener('touchend', this.onTouchEnd);
+		this.canvasEl.removeEventListener('touchcancel', this.onTouchEnd);
 		this.eraseButtonEl.removeEventListener('click', this.onErase);
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
 		this.boldButtonEl.removeEventListener('click', this.onToggleBold);
@@ -479,35 +491,40 @@ export class InkDrawer {
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
 	}
 
+	// On iOS the Apple Pencil is captured via touch events; pointer events are ignored there because
+	// WebKit also synthesizes a (less reliable) pointer stream for the same contact.
+	private get touchDriven(): boolean {
+		return this.getRuntimeConfig().allowAnyNonMousePointer;
+	}
+
+	// ------ pointer events (desktop / Android) ------
+
 	private onPointerDown = (event: PointerEvent): void => {
-		if (!this.session) {
+		if (!this.session || this.touchDriven) {
 			return;
 		}
 		event.preventDefault();
 		this.recordRaw('down', event, 1);
 		// If a stroke is somehow still open (e.g. a pointerup we never received), commit it rather
 		// than dropping this new pointerdown — that dropping is what swallowed rapid strokes.
-		if (this.activePointerId !== null) {
+		if (this.activeStroke !== null) {
 			this.finalizedOnReentryCount += 1;
 			this.finishStroke();
 		}
-		this.beginStroke(event);
+		this.activePointerId = event.pointerId;
+		if (this.getRuntimeConfig().usePointerCapture) {
+			try {
+				this.canvasEl.setPointerCapture(event.pointerId);
+			} catch {
+				/* capture can be rejected; harmless */
+			}
+		}
+		this.beginStrokeAt(event.clientX, event.clientY, event.pressure);
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
-		if (!this.session) {
+		if (!this.session || this.touchDriven) {
 			return;
-		}
-		// Downless pen start: iOS sometimes omits the pointerdown for the Apple Pencil and the stroke
-		// arrives as moves only. If a pen is pressing on the canvas with no active stroke, begin one.
-		if (this.activeStroke === null) {
-			if (this.isDownlessPenStart(event)) {
-				this.synthStartCount += 1;
-				this.recordRaw('synth-down', event, 1);
-				this.beginStroke(event);
-			} else {
-				return;
-			}
 		}
 		if (this.activePointerId !== event.pointerId || !this.activeStroke) {
 			return;
@@ -518,13 +535,13 @@ export class InkDrawer {
 		const list = samples.length > 0 ? samples : [event];
 		this.recordRaw('move', event, list.length);
 		for (const sample of list) {
-			this.appendActivePoint(sample);
+			this.appendPoint(sample.clientX, sample.clientY, sample.pressure);
 		}
 		this.requestDraw();
 	};
 
 	private onPointerUp = (event: PointerEvent): void => {
-		if (this.activePointerId !== event.pointerId) {
+		if (this.touchDriven || this.activePointerId !== event.pointerId) {
 			return;
 		}
 		event.preventDefault();
@@ -540,64 +557,84 @@ export class InkDrawer {
 		this.finishStroke();
 	};
 
-	// Begin a new stroke from a pointer event (shared by pointerdown and downless-pen detection).
-	private beginStroke(event: PointerEvent): void {
+	// ------ touch events (iOS Apple Pencil) ------
+
+	private onTouchStart = (event: TouchEvent): void => {
+		if (!this.session || !this.touchDriven) {
+			return;
+		}
+		const touch = event.changedTouches.item(0);
+		if (!touch) {
+			return;
+		}
+		event.preventDefault();
+		// Finalize any open stroke before starting the next (covers a missed touchend).
+		if (this.activeStroke !== null) {
+			this.finalizedOnReentryCount += 1;
+			this.finishStroke();
+		}
+		this.activeTouchId = touch.identifier;
+		this.pushRaw('down', 'touch', touch.identifier, touch.clientX, touch.clientY, touchForce(touch), 1);
+		this.beginStrokeAt(touch.clientX, touch.clientY, touchForce(touch));
+	};
+
+	private onTouchMove = (event: TouchEvent): void => {
+		if (this.activeTouchId === null || !this.activeStroke) {
+			return;
+		}
+		const touch = findTouch(event.changedTouches, this.activeTouchId);
+		if (!touch) {
+			return;
+		}
+		event.preventDefault();
+		this.pushRaw('move', 'touch', touch.identifier, touch.clientX, touch.clientY, touchForce(touch), 1);
+		this.appendPoint(touch.clientX, touch.clientY, touchForce(touch));
+		this.requestDraw();
+	};
+
+	private onTouchEnd = (event: TouchEvent): void => {
+		if (this.activeTouchId === null) {
+			return;
+		}
+		const touch = findTouch(event.changedTouches, this.activeTouchId);
+		if (touch) {
+			event.preventDefault();
+			this.pushRaw(
+				event.type === 'touchcancel' ? 'cancel' : 'up',
+				'touch',
+				touch.identifier,
+				touch.clientX,
+				touch.clientY,
+				0,
+				1,
+			);
+		}
+		this.lastInteractionAt = Date.now();
+		this.finishStroke();
+	};
+
+	// ------ shared capture core ------
+
+	private beginStrokeAt(clientX: number, clientY: number, pressure: number): void {
 		if (!this.session) {
 			return;
 		}
 		this.lastInteractionAt = Date.now();
-		// Keep writing cancels any pending advance, so the view only moves when you actually pause.
+		// Starting to write cancels any pending advance and clears a carried-over selection.
 		this.clearAdvanceTimer();
-		this.activePointerId = event.pointerId;
-		if (this.getRuntimeConfig().usePointerCapture) {
-			try {
-				this.canvasEl.setPointerCapture(event.pointerId);
-			} catch {
-				/* iOS can reject capture during fast pen input */
-			}
-		}
-		// Starting to write clears any selection carried over from the rendered view.
 		this.session.doc.meta.selection = null;
 		this.activeStroke = [];
-		this.appendActivePoint(event);
+		this.appendPoint(clientX, clientY, pressure);
 		this.requestDraw();
 	}
 
-	// A pen touching (pressure > 0) the canvas with no active stroke — treat as a missed pointerdown.
-	private isDownlessPenStart(event: PointerEvent): boolean {
-		if (event.type !== 'pointermove' || event.pointerType !== 'pen' || event.pressure <= 0) {
-			return false;
-		}
-		const rect = this.canvasEl.getBoundingClientRect();
-		const x = event.clientX - rect.left;
-		const y = event.clientY - rect.top;
-		return x >= 0 && y >= 0 && x <= rect.width && y <= rect.height;
-	}
-
-	private recordRaw(phase: RawPointerSample['phase'], event: PointerEvent, coalesced: number): void {
-		const rect = this.canvasEl.getBoundingClientRect();
-		this.rawLog.push({
-			phase,
-			pointerType: event.pointerType || 'unknown',
-			pointerId: event.pointerId,
-			x: Math.round(event.clientX - rect.left),
-			y: Math.round(event.clientY - rect.top),
-			pressure: Math.round((event.pressure || 0) * 100) / 100,
-			coalesced,
-			t: Math.round(performance.now()),
-		});
-		if (this.rawLog.length > RAW_LOG_MAX) {
-			this.rawLog.shift();
-		}
-	}
-
-	private appendActivePoint(event: PointerEvent): void {
+	private appendPoint(clientX: number, clientY: number, pressure: number): void {
 		if (!this.activeStroke) {
 			return;
 		}
 		const rect = this.canvasEl.getBoundingClientRect();
-		const x = event.clientX - rect.left;
-		const y = event.clientY - rect.top;
+		const x = clientX - rect.left;
+		const y = clientY - rect.top;
 		if (!Number.isFinite(x) || !Number.isFinite(y)) {
 			return;
 		}
@@ -609,12 +646,44 @@ export class InkDrawer {
 				return;
 			}
 		}
-		this.activeStroke.push({
-			x,
-			y,
-			pressure: event.pressure > 0 ? event.pressure : 0.5,
-			time: Date.now(),
+		this.activeStroke.push({ x, y, pressure: pressure > 0 ? pressure : 0.5, time: Date.now() });
+	}
+
+	private recordRaw(phase: RawPointerSample['phase'], event: PointerEvent, coalesced: number): void {
+		this.pushRaw(
+			phase,
+			event.pointerType || 'unknown',
+			event.pointerId,
+			event.clientX,
+			event.clientY,
+			event.pressure,
+			coalesced,
+		);
+	}
+
+	private pushRaw(
+		phase: RawPointerSample['phase'],
+		pointerType: string,
+		pointerId: number,
+		clientX: number,
+		clientY: number,
+		pressure: number,
+		coalesced: number,
+	): void {
+		const rect = this.canvasEl.getBoundingClientRect();
+		this.rawLog.push({
+			phase,
+			pointerType,
+			pointerId,
+			x: Math.round(clientX - rect.left),
+			y: Math.round(clientY - rect.top),
+			pressure: Math.round((pressure || 0) * 100) / 100,
+			coalesced,
+			t: Math.round(performance.now()),
 		});
+		if (this.rawLog.length > RAW_LOG_MAX) {
+			this.rawLog.shift();
+		}
 	}
 
 	// ----------------------------------------------------------------- commit
@@ -623,6 +692,7 @@ export class InkDrawer {
 		const session = this.session;
 		const active = this.activeStroke;
 		this.activePointerId = null;
+		this.activeTouchId = null;
 		this.activeStroke = null;
 		if (!session || !active || active.length === 0) {
 			this.requestDraw();
@@ -883,4 +953,19 @@ export class InkDrawer {
 
 function clamp(value: number, min: number, max: number): number {
 	return value < min ? min : value > max ? max : value;
+}
+
+// Apple Pencil reports contact force in Touch.force (0..1); fall back to a mid value when absent.
+function touchForce(touch: Touch): number {
+	return touch.force && touch.force > 0 ? touch.force : 0.5;
+}
+
+function findTouch(list: TouchList, id: number): Touch | null {
+	for (let i = 0; i < list.length; i += 1) {
+		const touch = list.item(i);
+		if (touch && touch.identifier === id) {
+			return touch;
+		}
+	}
+	return null;
 }
