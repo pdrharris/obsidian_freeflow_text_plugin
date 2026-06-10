@@ -63,6 +63,16 @@
 	background: var(--background-primary);
 	color: var(--interactive-accent);
 	cursor: pointer;
+	font-size: 15px;
+	line-height: 1;
+}
+
+.freeflow-ink-meta-action.is-bold-glyph {
+	font-weight: 800;
+}
+
+.freeflow-ink-meta-action.is-underline-glyph {
+	text-decoration: underline;
 }
 
 .freeflow-ink-meta-action .svg-icon {

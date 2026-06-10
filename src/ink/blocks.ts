@@ -6,7 +6,6 @@ import {
 	Modal,
 	Notice,
 	Plugin,
-	setIcon,
 } from 'obsidian';
 import { InkDrawer } from './drawer';
 import {
@@ -31,26 +30,6 @@ import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
-
-// setIcon renders nothing for an icon name absent from the running Lucide set (notably on mobile),
-// leaving a blank button. Fall back to a text glyph so a control is never invisible.
-const ICON_FALLBACK: Record<string, string> = {
-	'box-select': '▢',
-	bold: 'B',
-	underline: 'U',
-	copy: '⧉',
-	scissors: '✂',
-	'clipboard-paste': '▤',
-	pencil: '✎',
-	'trash-2': '🗑',
-};
-
-function applyIconWithFallback(el: HTMLElement, icon: string): void {
-	setIcon(el, icon);
-	if (el.childElementCount === 0) {
-		el.setText(ICON_FALLBACK[icon] ?? '•');
-	}
-}
 
 function confirmModal(app: App, title: string, body: string, confirmText: string): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -188,17 +167,21 @@ export class InkBlockRegistry {
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
 		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor', cls: 'freeflow-ink-meta-hint' });
-		const makeMetaButton = (icon: string, label: string): HTMLButtonElement => {
+		// Plain glyph symbols rather than setIcon: Lucide SVGs render blank on some mobile builds,
+		// and glyphs inherit the (visible) button text colour, so a control is never invisible.
+		const makeMetaButton = (glyph: string, label: string): HTMLButtonElement => {
 			const btn = metaRowEl.createEl('button', { cls: 'freeflow-ink-meta-action' });
 			btn.type = 'button';
 			btn.setAttribute('aria-label', label);
 			btn.title = label;
-			applyIconWithFallback(btn, icon);
+			btn.setText(glyph);
 			return btn;
 		};
-		const selectButtonEl = makeMetaButton('box-select', 'Select words');
-		const boldButtonEl = makeMetaButton('bold', 'Bold selection');
-		const underlineButtonEl = makeMetaButton('underline', 'Underline selection');
+		const selectButtonEl = makeMetaButton('⬚', 'Select words');
+		const boldButtonEl = makeMetaButton('B', 'Bold selection');
+		boldButtonEl.classList.add('is-bold-glyph');
+		const underlineButtonEl = makeMetaButton('U', 'Underline selection');
+		underlineButtonEl.classList.add('is-underline-glyph');
 		const colorButtonEl = metaRowEl.createEl('button', {
 			cls: 'freeflow-ink-meta-action freeflow-ink-color-btn',
 		});
@@ -207,11 +190,11 @@ export class InkBlockRegistry {
 		colorButtonEl.title = 'Recolour selection';
 		const colorSwatchEl = colorButtonEl.createSpan({ cls: 'freeflow-ink-color-btn-swatch' });
 		colorSwatchEl.style.backgroundColor = lastSelectionColor;
-		const copyButtonEl = makeMetaButton('copy', 'Copy');
-		const cutButtonEl = makeMetaButton('scissors', 'Cut');
-		const pasteButtonEl = makeMetaButton('clipboard-paste', 'Paste');
-		const actionEl = makeMetaButton('pencil', 'Open drawer');
-		const deleteButtonEl = makeMetaButton('trash-2', 'Delete handwriting block');
+		const copyButtonEl = makeMetaButton('⧉', 'Copy');
+		const cutButtonEl = makeMetaButton('✂', 'Cut');
+		const pasteButtonEl = makeMetaButton('📋', 'Paste');
+		const actionEl = makeMetaButton('✏️', 'Open drawer');
+		const deleteButtonEl = makeMetaButton('🗑', 'Delete handwriting block');
 		deleteButtonEl.classList.add('is-danger');
 
 		const updateMetaButtons = (): void => {

@@ -7,7 +7,6 @@
 // writing nears the right edge. Captured strokes are converted to source coordinates and
 // inserted into the logical tree via edit.ts.
 
-import { setIcon } from 'obsidian';
 import {
 	InkCursor,
 	InkDocument,
@@ -35,23 +34,6 @@ const MIN_POINT_DISTANCE_SQ = 0.35;
 const ADVANCE_TARGET_RATIO = 0.4; // after advancing, the caret lands at this fraction of width
 const ADVANCE_MIN_CARET_RATIO = 0.4; // don't bother advancing while there's still room to the left
 const RAW_LOG_MAX = 4000; // ring buffer of raw pointer samples for iPad diagnostics
-
-// setIcon renders nothing for an unknown icon name (e.g. on a mobile build with an older Lucide
-// set), leaving a blank button. Fall back to a text glyph so a control is never invisible.
-const ICON_FALLBACK: Record<string, string> = {
-	eraser: '⌫',
-	'corner-down-left': '↵',
-	bold: 'B',
-	underline: 'U',
-	'clipboard-paste': '▤',
-};
-
-function applyIconWithFallback(el: HTMLElement, icon: string): void {
-	setIcon(el, icon);
-	if (el.childElementCount === 0) {
-		el.setText(ICON_FALLBACK[icon] ?? '•');
-	}
-}
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
@@ -131,6 +113,7 @@ export class InkDrawer {
 	private readonly rawLog: RawPointerSample[] = [];
 	private synthStartCount = 0;
 	private finalizedOnReentryCount = 0;
+	private committedStrokeCount = 0;
 
 	// Current "pen" style applied to new strokes.
 	private penColor = DEFAULT_INK_COLOR;
@@ -154,20 +137,21 @@ export class InkDrawer {
 
 		const rightButtons = activeDocument.createElement('div');
 		rightButtons.className = 'freeflow-ink-drawer-buttons';
-		const makeIconButton = (icon: string, label: string): HTMLButtonElement => {
+		// Plain glyph symbols rather than setIcon — Lucide SVGs render blank on some mobile builds.
+		const makeIconButton = (glyph: string, label: string): HTMLButtonElement => {
 			const btn = activeDocument.createElement('button');
 			btn.type = 'button';
 			btn.className = 'freeflow-ink-drawer-btn';
 			btn.setAttribute('aria-label', label);
 			btn.title = label;
-			applyIconWithFallback(btn, icon);
+			btn.setText(glyph);
 			rightButtons.appendChild(btn);
 			return btn;
 		};
-		this.eraseButtonEl = makeIconButton('eraser', 'Erase');
-		this.newLineButtonEl = makeIconButton('corner-down-left', 'New line');
-		this.boldButtonEl = makeIconButton('bold', 'Bold');
-		this.underlineButtonEl = makeIconButton('underline', 'Underline');
+		this.eraseButtonEl = makeIconButton('⌫', 'Erase');
+		this.newLineButtonEl = makeIconButton('↵', 'New line');
+		this.boldButtonEl = makeIconButton('B', 'Bold');
+		this.underlineButtonEl = makeIconButton('U', 'Underline');
 
 		// Colour button shows the current pen colour as a swatch rather than an icon.
 		this.colorButtonEl = activeDocument.createElement('button');
@@ -181,7 +165,7 @@ export class InkDrawer {
 		this.colorButtonEl.appendChild(this.colorSwatchEl);
 		rightButtons.appendChild(this.colorButtonEl);
 
-		this.pasteButtonEl = makeIconButton('clipboard-paste', 'Paste');
+		this.pasteButtonEl = makeIconButton('📋', 'Paste');
 
 		const topBar = activeDocument.createElement('div');
 		topBar.className = 'freeflow-ink-drawer-top';
@@ -747,6 +731,7 @@ export class InkDrawer {
 		const affectedIndex = line.words.indexOf(affected);
 		session.doc.meta.cursor = { line: cursor.line, word: affectedIndex + 1 };
 		session.doc.meta.selection = null;
+		this.committedStrokeCount += 1;
 
 		// Don't jump the view on lift-off; only advance after the configured pause.
 		this.scheduleAdvanceAfterStroke();
@@ -879,8 +864,9 @@ export class InkDrawer {
 			(s) =>
 				`${String(s.t - t0).padStart(6)} ${s.phase.padEnd(10)} ${s.pointerType.padEnd(5)} id=${s.pointerId} p=${s.pressure} (${s.x},${s.y}) co=${s.coalesced}`,
 		);
+		const downCount = this.rawLog.filter((s) => s.phase === 'down').length;
 		return [
-			`samples=${this.rawLog.length} synthStarts=${this.synthStartCount} finalizedOnReentry=${this.finalizedOnReentryCount} maxMoveGapMs=${maxMoveGap}`,
+			`samples=${this.rawLog.length} downs=${downCount} committed=${this.committedStrokeCount} synthStarts=${this.synthStartCount} finalizedOnReentry=${this.finalizedOnReentryCount} maxMoveGapMs=${maxMoveGap}`,
 			header,
 			'',
 			lines.join('\n'),
@@ -891,6 +877,7 @@ export class InkDrawer {
 		this.rawLog.length = 0;
 		this.synthStartCount = 0;
 		this.finalizedOnReentryCount = 0;
+		this.committedStrokeCount = 0;
 	}
 }
 
