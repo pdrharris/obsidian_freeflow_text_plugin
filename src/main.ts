@@ -70,6 +70,10 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.getRenderLineHeightScale(),
 			() => this.getRenderStrokeFillScale(),
 			() => this.settings.showWritingLine,
+			(value) => {
+				this.settings.showWritingLine = value;
+				void this.saveSettings();
+			},
 			() => this.settings.velocityWidth,
 			() => this.getSoftBlockLimitBytes(),
 			() => this.getHardBlockLimitBytes(),

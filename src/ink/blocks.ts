@@ -64,11 +64,15 @@ export class InkBlockRegistry {
 	private readonly getRenderLineHeightScale: () => number;
 	private readonly getRenderStrokeFillScale: () => number;
 	private readonly getShowWritingLine: () => boolean;
+	private readonly setShowWritingLine: (value: boolean) => void;
 	private readonly getVelocityWidth: () => boolean;
 	private readonly getSoftBlockLimitBytes: () => number;
 	private readonly getHardBlockLimitBytes: () => number;
 	private readonly getShowSoftLimitNotice: () => boolean;
 	private activeKey: string | null = null;
+	// Re-render callbacks for every mounted inline canvas (edit + reading), so a global toggle like
+	// the writing-line guide updates all visible blocks at once.
+	private readonly inlineRefreshers = new Set<() => void>();
 
 	constructor(
 		plugin: Plugin,
@@ -78,6 +82,7 @@ export class InkBlockRegistry {
 		getRenderLineHeightScale: () => number,
 		getRenderStrokeFillScale: () => number,
 		getShowWritingLine: () => boolean,
+		setShowWritingLine: (value: boolean) => void,
 		getVelocityWidth: () => boolean,
 		getSoftBlockLimitBytes: () => number,
 		getHardBlockLimitBytes: () => number,
@@ -90,10 +95,17 @@ export class InkBlockRegistry {
 		this.getRenderLineHeightScale = getRenderLineHeightScale;
 		this.getRenderStrokeFillScale = getRenderStrokeFillScale;
 		this.getShowWritingLine = getShowWritingLine;
+		this.setShowWritingLine = setShowWritingLine;
 		this.getVelocityWidth = getVelocityWidth;
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
 		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
 		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
+	}
+
+	private refreshAllInline(): void {
+		for (const refresh of this.inlineRefreshers) {
+			refresh();
+		}
 	}
 
 	register(): void {
@@ -122,6 +134,7 @@ export class InkBlockRegistry {
 		ctx: MarkdownPostProcessorContext,
 	): void {
 		const drawer = this.drawer;
+		const inlineRefreshers = this.inlineRefreshers;
 		const setActiveKey = (value: string | null): void => {
 			this.activeKey = value;
 		};
@@ -166,7 +179,6 @@ export class InkBlockRegistry {
 			attr: { role: 'button', 'aria-label': 'Open freeflow ink drawer' },
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
-		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor', cls: 'freeflow-ink-meta-hint' });
 		// Plain glyph symbols rather than setIcon: Lucide SVGs render blank on some mobile builds,
 		// and glyphs inherit the (visible) button text colour, so a control is never invisible.
 		const makeMetaButton = (glyph: string, label: string): HTMLButtonElement => {
@@ -177,6 +189,12 @@ export class InkBlockRegistry {
 			btn.setText(glyph);
 			return btn;
 		};
+		// Layout: delete on the far left (set apart), then a spacer, then the tools, with the
+		// drawer-open button last so it always sits on the far right and is easy to find.
+		const deleteButtonEl = makeMetaButton('🗑', 'Delete handwriting block');
+		deleteButtonEl.classList.add('is-danger');
+		const hintEl = metaRowEl.createSpan({ text: 'Tap to place cursor', cls: 'freeflow-ink-meta-hint' });
+		const writingLineButtonEl = makeMetaButton('☰', 'Toggle writing lines');
 		const selectButtonEl = makeMetaButton('⬚', 'Select words');
 		const boldButtonEl = makeMetaButton('B', 'Bold selection');
 		boldButtonEl.classList.add('is-bold-glyph');
@@ -194,11 +212,10 @@ export class InkBlockRegistry {
 		const cutButtonEl = makeMetaButton('✂', 'Cut');
 		const pasteButtonEl = makeMetaButton('📋', 'Paste');
 		const actionEl = makeMetaButton('✏️', 'Open drawer');
-		const deleteButtonEl = makeMetaButton('🗑', 'Delete handwriting block');
-		deleteButtonEl.classList.add('is-danger');
 
 		const updateMetaButtons = (): void => {
 			const hasSelection = !selectionIsEmpty(documentModel.meta.selection);
+			writingLineButtonEl.classList.toggle('is-active', this.getShowWritingLine());
 			selectButtonEl.classList.toggle('is-active', selectMode);
 			copyButtonEl.disabled = !hasSelection;
 			cutButtonEl.disabled = !hasSelection;
@@ -383,6 +400,13 @@ export class InkBlockRegistry {
 			renderInline();
 		};
 
+		// Writing-line guide is a global setting, so it persists across reading and editing mode and
+		// applies to every block. Toggle it, then re-render all visible blocks (and the drawer).
+		const onToggleWritingLine = (): void => {
+			this.setShowWritingLine(!this.getShowWritingLine());
+			this.refreshAllInline();
+		};
+
 		const onCopy = (): void => {
 			if (selectionIsEmpty(documentModel.meta.selection)) {
 				return;
@@ -518,6 +542,7 @@ export class InkBlockRegistry {
 		canvasEl.addEventListener('pointermove', onCanvasPointerMove);
 		canvasEl.addEventListener('pointerup', onCanvasPointerUp);
 		canvasEl.addEventListener('pointercancel', onCanvasPointerUp);
+		writingLineButtonEl.addEventListener('click', onToggleWritingLine);
 		selectButtonEl.addEventListener('click', onToggleSelect);
 		boldButtonEl.addEventListener('click', onBold);
 		underlineButtonEl.addEventListener('click', onUnderline);
@@ -529,6 +554,7 @@ export class InkBlockRegistry {
 		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;
 
+		inlineRefreshers.add(renderInline);
 		const resizeObserver = new ResizeObserver(() => {
 			renderInline();
 		});
@@ -538,6 +564,7 @@ export class InkBlockRegistry {
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
 					isDisposed = true;
+					inlineRefreshers.delete(renderInline);
 					resizeObserver.disconnect();
 					canvasEl.removeEventListener('click', onCanvasClick);
 					canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
@@ -593,16 +620,19 @@ export class InkBlockRegistry {
 		ctx: MarkdownPostProcessorContext,
 	): void {
 		containerEl.classList.add('is-reading');
+		const inlineRefreshers = this.inlineRefreshers;
 		const canvasEl = containerEl.createEl('canvas', { cls: 'freeflow-ink-inline-canvas' });
 		const render = (): void => {
 			drawInlineCanvas(canvasEl, documentModel, this.renderOptions(), null, null);
 		};
 		render();
+		inlineRefreshers.add(render);
 		const resizeObserver = new ResizeObserver(() => render());
 		resizeObserver.observe(containerEl);
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
+					inlineRefreshers.delete(render);
 					resizeObserver.disconnect();
 				}
 			})(el),

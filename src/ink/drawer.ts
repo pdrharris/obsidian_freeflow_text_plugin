@@ -26,7 +26,13 @@ import {
 	wordFromStroke,
 } from './edit';
 import { LayoutResult, layoutDocument } from './layout';
-import { drawLaidStroke, drawUnderline, resizeCanvasForDpr, wordUnderline } from './render';
+import {
+	drawLaidStroke,
+	drawUnderline,
+	resizeCanvasForDpr,
+	underlineThickness,
+	wordUnderline,
+} from './render';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 
 const BACKDROP_CLOSE_GUARD_MS = 420;
@@ -210,7 +216,7 @@ export class InkDrawer {
 		this.activePointerId = null;
 		this.activeTouchId = null;
 		this.clearAdvanceTimer();
-		this.syncPenColorToContext();
+		this.syncPenStyleToContext();
 		this.rootEl.classList.add('is-open');
 		this.resetScrollX();
 		this.requestDraw();
@@ -222,7 +228,7 @@ export class InkDrawer {
 		}
 		this.session.doc.meta.cursor = clampCursor(cursor, this.session.doc.lines);
 		this.session.doc.meta.selection = null;
-		this.syncPenColorToContext();
+		this.syncPenStyleToContext();
 		this.resetScrollX();
 		this.session.onCursorChanged();
 		this.requestDraw();
@@ -404,7 +410,7 @@ export class InkDrawer {
 					underline.maxX - this.scrollX,
 					underline.baselineY - this.scrollY,
 					underline.color,
-					widthScale,
+					underlineThickness(word, widthScale),
 				);
 			}
 			for (const laid of word.strokes) {
@@ -874,35 +880,47 @@ export class InkDrawer {
 		});
 	};
 
-	// Make the pen continue in the colour of the stroke just left of the cursor, so writing carries
-	// on in the colour already in use. Leaves the current pen colour alone when there's nothing left.
-	private syncPenColorToContext(): void {
-		const color = this.colorBeforeCursor();
-		if (color) {
-			this.penColor = color;
-			this.colorSwatchEl.style.backgroundColor = color;
+	// Make the pen continue in the colour/bold/underline of the stroke just left of the cursor, so
+	// writing carries on in the style already in use. With nothing to the left (a blank block, or the
+	// start of a line) it resets to the defaults: black, no bold, no underline.
+	private syncPenStyleToContext(): void {
+		const style = this.styleBeforeCursor();
+		if (style) {
+			this.penColor = style.color;
+			this.penBold = style.bold;
+			this.penUnderline = style.underline;
+		} else {
+			this.penColor = DEFAULT_INK_COLOR;
+			this.penBold = false;
+			this.penUnderline = false;
 		}
+		this.colorSwatchEl.style.backgroundColor = this.penColor;
+		this.updateStyleButtons();
 	}
 
-	private colorBeforeCursor(): string | null {
+	private styleBeforeCursor(): { color: string; bold: boolean; underline: boolean } | null {
 		const session = this.session;
 		if (!session) {
 			return null;
 		}
 		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
-		const lastStrokeColor = (word: InkWord | undefined): string | null => {
+		const lastStyle = (
+			word: InkWord | undefined,
+		): { color: string; bold: boolean; underline: boolean } | null => {
 			if (!word || word.strokes.length === 0) {
 				return null;
 			}
 			const stroke = word.strokes[word.strokes.length - 1];
-			return stroke ? stroke.color : null;
+			return stroke
+				? { color: stroke.color, bold: stroke.bold === true, underline: stroke.underline === true }
+				: null;
 		};
 		const line = session.doc.lines[cursor.line];
 		if (line) {
 			for (let w = Math.min(cursor.word, line.words.length) - 1; w >= 0; w -= 1) {
-				const color = lastStrokeColor(line.words[w]);
-				if (color) {
-					return color;
+				const style = lastStyle(line.words[w]);
+				if (style) {
+					return style;
 				}
 			}
 		}
@@ -913,9 +931,9 @@ export class InkDrawer {
 				continue;
 			}
 			for (let w = prevLine.words.length - 1; w >= 0; w -= 1) {
-				const color = lastStrokeColor(prevLine.words[w]);
-				if (color) {
-					return color;
+				const style = lastStyle(prevLine.words[w]);
+				if (style) {
+					return style;
 				}
 			}
 		}

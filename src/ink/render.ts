@@ -87,9 +87,11 @@ export function drawInlineCanvas(
 	ctx.fillRect(0, 0, cssWidth, cssHeight);
 
 	if (options.showWritingLine) {
+		// Draw one line per row at the writing baseline (same place relative to the strokes as the
+		// drawer), so words sit on the line rather than floating between two lines.
 		ctx.strokeStyle = WRITING_LINE_COLOR;
 		ctx.lineWidth = 1;
-		for (let y = layout.rowHeight; y < cssHeight; y += layout.rowHeight) {
+		for (let y = layout.baselineOffset; y < cssHeight; y += layout.rowHeight) {
 			ctx.beginPath();
 			ctx.moveTo(0, y);
 			ctx.lineTo(cssWidth, y);
@@ -108,7 +110,14 @@ export function drawInlineCanvas(
 	for (const word of layout.words) {
 		const underline = wordUnderline(word);
 		if (underline) {
-			drawUnderline(ctx, underline.minX, underline.maxX, underline.baselineY, underline.color, widthScale);
+			drawUnderline(
+				ctx,
+				underline.minX,
+				underline.maxX,
+				underline.baselineY,
+				underline.color,
+				underlineThickness(word, widthScale),
+			);
 		}
 		for (const laid of word.strokes) {
 			const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
@@ -216,18 +225,35 @@ export function wordUnderline(
 	return { minX, maxX, baselineY: word.baselineY, color };
 }
 
-// Draw an underline beneath a word span, just below the baseline.
+// A hand-weight underline thickness for a word: about as heavy as a bold pen stroke, derived from
+// the actual underlined strokes so it scales with the glyph size in both views.
+export function underlineThickness(word: LaidWord, widthScale: number): number {
+	let maxWidth = 0;
+	for (const laid of word.strokes) {
+		if (!laid.stroke.underline) {
+			continue;
+		}
+		const w = laid.stroke.width * widthScale;
+		if (w > maxWidth) {
+			maxWidth = w;
+		}
+	}
+	// Bold pen weight (~1.7x a normal stroke); never thinner than a visible hairline.
+	return Math.max(1.5, maxWidth * 1.7);
+}
+
+// Draw an underline beneath a word span, just below the baseline, at a hand-drawn weight.
 export function drawUnderline(
 	ctx: CanvasRenderingContext2D,
 	minX: number,
 	maxX: number,
 	baselineY: number,
 	color: string,
-	widthScale: number,
+	thickness: number,
 ): void {
-	const y = baselineY + Math.max(2, widthScale * 14);
+	const y = baselineY + Math.max(2, thickness * 0.9);
 	ctx.strokeStyle = color;
-	ctx.lineWidth = Math.max(1.2, widthScale * 6);
+	ctx.lineWidth = Math.max(1.2, thickness);
 	ctx.lineCap = 'round';
 	ctx.beginPath();
 	ctx.moveTo(minX, y);

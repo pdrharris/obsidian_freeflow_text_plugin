@@ -91,6 +91,7 @@ export interface LayoutResult {
 	width: number; // css px (wrap width if finite, else content extent)
 	height: number; // css px
 	rowHeight: number; // effective visual line height, css px
+	baselineOffset: number; // css px from the top of a row down to the writing baseline
 	cssPerSource: number; // scale factor source -> css
 	marginX: number; // css px left margin
 	cursorFromPoint(x: number, y: number): InkCursor;
@@ -242,6 +243,7 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 		width,
 		height,
 		rowHeight,
+		baselineOffset,
 		cssPerSource,
 		marginX,
 		cursorFromPoint: (x, y) => cursorFromPoint(rows, rowHeight, x, y),
