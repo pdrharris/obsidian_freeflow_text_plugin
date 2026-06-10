@@ -210,6 +210,7 @@ export class InkDrawer {
 		this.activePointerId = null;
 		this.activeTouchId = null;
 		this.clearAdvanceTimer();
+		this.syncPenColorToContext();
 		this.rootEl.classList.add('is-open');
 		this.resetScrollX();
 		this.requestDraw();
@@ -221,6 +222,7 @@ export class InkDrawer {
 		}
 		this.session.doc.meta.cursor = clampCursor(cursor, this.session.doc.lines);
 		this.session.doc.meta.selection = null;
+		this.syncPenColorToContext();
 		this.resetScrollX();
 		this.session.onCursorChanged();
 		this.requestDraw();
@@ -271,6 +273,8 @@ export class InkDrawer {
 			wordGapScale: this.getRuntimeConfig().wordGapScale,
 			strokeFillScale: 1,
 			velocityWidth: this.getRuntimeConfig().velocityWidth,
+			// Pin the origin so strokes stay exactly where drawn (WYSIWYG); no re-flush to the left.
+			rowOriginSource: 0,
 		});
 		return { layout, viewCursor: { line: 0, word: words.length } };
 	}
@@ -711,11 +715,10 @@ export class InkDrawer {
 			return;
 		}
 
-		// Convert canvas points to LINE-ABSOLUTE source coordinates, using the same frame the
-		// view was laid out in, so the stroke is stored exactly where it was drawn.
-		const shownWords = line.words.slice(0, cursor.word);
-		const firstShown = shownWords[0];
-		const rowOriginSource = firstShown ? wordBounds(firstShown)?.minX ?? 0 : 0;
+		// Convert canvas points to LINE-ABSOLUTE source coordinates. The drawer view is laid out with
+		// a pinned origin of 0 (rowOriginSource above), so the inverse uses the same fixed origin —
+		// the stroke is stored exactly where it was drawn and won't snap to the left on the next draw.
+		const rowOriginSource = 0;
 		const baselineY = layout.caretRect(view.viewCursor).baselineY;
 
 		const points = active.map((p) => ({
@@ -870,6 +873,54 @@ export class InkDrawer {
 			this.requestDraw();
 		});
 	};
+
+	// Make the pen continue in the colour of the stroke just left of the cursor, so writing carries
+	// on in the colour already in use. Leaves the current pen colour alone when there's nothing left.
+	private syncPenColorToContext(): void {
+		const color = this.colorBeforeCursor();
+		if (color) {
+			this.penColor = color;
+			this.colorSwatchEl.style.backgroundColor = color;
+		}
+	}
+
+	private colorBeforeCursor(): string | null {
+		const session = this.session;
+		if (!session) {
+			return null;
+		}
+		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
+		const lastStrokeColor = (word: InkWord | undefined): string | null => {
+			if (!word || word.strokes.length === 0) {
+				return null;
+			}
+			const stroke = word.strokes[word.strokes.length - 1];
+			return stroke ? stroke.color : null;
+		};
+		const line = session.doc.lines[cursor.line];
+		if (line) {
+			for (let w = Math.min(cursor.word, line.words.length) - 1; w >= 0; w -= 1) {
+				const color = lastStrokeColor(line.words[w]);
+				if (color) {
+					return color;
+				}
+			}
+		}
+		// Nothing on this line before the cursor — fall back to the last stroke on earlier lines.
+		for (let l = cursor.line - 1; l >= 0; l -= 1) {
+			const prevLine = session.doc.lines[l];
+			if (!prevLine) {
+				continue;
+			}
+			for (let w = prevLine.words.length - 1; w >= 0; w -= 1) {
+				const color = lastStrokeColor(prevLine.words[w]);
+				if (color) {
+					return color;
+				}
+			}
+		}
+		return null;
+	}
 
 	// Reflect pen-state toggles on the toolbar buttons.
 	private updateStyleButtons(): void {

@@ -42,6 +42,10 @@ export interface LayoutConfig {
 	// When true, each laid point carries a per-point width (`LaidPoint.w`) derived from pen
 	// speed so fast strokes render thinner and slow strokes thicker.
 	velocityWidth?: boolean;
+	// When set, each line is anchored so this source-x maps to the left margin (the drawer passes
+	// 0 for WYSIWYG — strokes stay exactly where drawn). When omitted, rows re-origin to the first
+	// word's min-x, flushing content to the line start (the inline renderer's behaviour).
+	rowOriginSource?: number;
 }
 
 export interface LaidPoint {
@@ -170,8 +174,9 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 		// Words are placed at their LINE-ABSOLUTE x so drawn whitespace is preserved exactly.
 		// `rowOriginSource` is the source-x that maps to the left margin of the current row
 		// (the first word of the line/row); on wrap it resets so the wrapped word starts at the
-		// margin while keeping the within-row spacing of the words that follow it.
-		let rowOriginSource: number | null = null;
+		// margin while keeping the within-row spacing of the words that follow it. When the caller
+		// pins it (drawer WYSIWYG), the first row keeps that fixed origin instead of re-flushing.
+		let rowOriginSource: number | null = config.rowOriginSource ?? null;
 		let rowHasContent = false;
 		ensureRow(lineIndex, visualRow);
 

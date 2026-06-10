@@ -125,7 +125,9 @@
 
 .freeflow-ink-color-popup {
 	position: fixed;
-	z-index: 1000;
+	/* Above the drawer overlay (z 1200); otherwise it renders behind it and taps hit the
+	   drawer backdrop, closing the drawer. */
+	z-index: 1300;
 	padding: 8px;
 	border-radius: 8px;
 	background: var(--background-primary);
