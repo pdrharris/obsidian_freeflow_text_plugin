@@ -12,10 +12,16 @@ npm run lint         # ESLint with eslint-plugin-obsidianmd
 npm test             # Headless tests for the pure logic (doc/edit/layout), bundled via esbuild
 ```
 
-Build output is `main.js` at the repo root. This repository folder **is** the installed plugin
-inside the live vault (`<Vault>/.obsidian/plugins/...`), so after `npm run build` just reload
-Obsidian (Ctrl+R) to test. The pen UI can't be driven from the CLI; interactive write/erase/
-cursor tests require a human in Obsidian.
+Build output is `main.js` at the repo root. The build (both `npm run dev` watch and `npm run
+build`) **also deploys** `main.js`, `manifest.json`, and `styles.css` into the live vault at
+`<Vault>/.obsidian/plugins/obsidian_freeflow_text_plugin/` (see the `deploy-to-vault` esbuild
+plugin in `esbuild.config.mjs`; override the destination with the `OBSIDIAN_PLUGIN_DIR` env var,
+or set it empty to skip). The default destination is the vault at
+`../../Documents/Notes/.obsidian/plugins/obsidian_freeflow_text_plugin`. After a build just reload
+Obsidian (Ctrl+R) to test. The vault copy carries only those runtime files (plus `data.json`
+settings) and is committed with the notes repo, so the plugin syncs to mobile through the single
+notes repo. The pen UI can't be driven from the CLI; interactive write/erase/cursor tests require
+a human in Obsidian.
 
 tsconfig is strict with `noUncheckedIndexedAccess` — array/index access is `T | undefined`, so
 guard before use. Note `console.log` is an eslint error via `obsidianmd/rule-custom-message`.
