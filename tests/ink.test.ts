@@ -157,6 +157,25 @@ test('v3 round-trip preserves line-absolute positions', () => {
 	eq(wordBounds(back.lines[0]!.words[1]!)?.minX, 200, 'absolute x must survive save/load unchanged');
 });
 
+test('parse preserves and clamps meta.widthScale; absent stays undefined', () => {
+	const base = (widthScale?: number) =>
+		JSON.stringify({
+			version: INK_DOC_VERSION,
+			meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null, widthScale },
+			lines: [{ id: 'l', words: [] }],
+		});
+	eq(parseInkDocument(base(0.6)).meta.widthScale, 0.6);
+	eq(parseInkDocument(base(5)).meta.widthScale, 1, 'over-max width clamps to 1');
+	eq(parseInkDocument(base(0.05)).meta.widthScale, 0.3, 'below-min width clamps to 0.3');
+	eq(parseInkDocument(base(undefined)).meta.widthScale, undefined, 'absent width stays undefined');
+});
+
+test('serialize -> parse round-trips meta.widthScale', () => {
+	const d = mkDoc([W('a')]);
+	d.meta.widthScale = 0.45;
+	eq(parseInkDocument(serializeInkDocument(d)).meta.widthScale, 0.45);
+});
+
 test('wordBounds spans all strokes', () => {
 	const w = word('w', stroke('a', [pt(0, -10), pt(10, 0)]), stroke('b', [pt(20, -30), pt(30, 5)]));
 	eq(wordBounds(w), { minX: 0, maxX: 30, minY: -30, maxY: 5 });
@@ -215,6 +234,33 @@ test('eraseAtCursor deletes the word before the cursor', () => {
 	const next = eraseAtCursor(d);
 	eq(d.lines[0]?.words.map((w) => w.id), ['a']);
 	eq(next, { line: 0, word: 1 });
+});
+
+test('eraseAtCursor closes up the gap when a mid-line word is deleted', () => {
+	// a@0..40, b@120..160, c@240..280; lineHeight 180 -> gap = 63. Deleting b should pull c left
+	// to sit one normal gap after a (40 + 63 = 103), not leave the hole b occupied.
+	const d = mkDoc([Wx('a', 0), Wx('b', 120), Wx('c', 240)]);
+	d.meta.cursor = { line: 0, word: 2 };
+	eraseAtCursor(d);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'c']);
+	eq(wordBounds(d.lines[0]!.words[0]!)?.minX, 0, 'a must not move');
+	eq(wordBounds(d.lines[0]!.words[1]!)?.minX, 103, 'c should close up behind a');
+});
+
+test('eraseAtCursor leaves trailing words in place (nothing to the right to close)', () => {
+	const d = mkDoc([Wx('a', 0), Wx('b', 120)]);
+	d.meta.cursor = { line: 0, word: 2 };
+	eraseAtCursor(d);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a']);
+	eq(wordBounds(d.lines[0]!.words[0]!)?.minX, 0, 'a must not move when the tail word is removed');
+});
+
+test('deleteSelection closes up the gap left by a mid-line range', () => {
+	const d = mkDoc([Wx('a', 0), Wx('b', 120), Wx('c', 240), Wx('d', 360)]);
+	d.meta.selection = { anchor: { line: 0, word: 1 }, focus: { line: 0, word: 3 } };
+	deleteSelection(d, d.meta.selection);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'd']);
+	eq(wordBounds(d.lines[0]!.words[1]!)?.minX, 103, 'd should close up behind a after b,c removed');
 });
 
 test('eraseAtCursor at line start joins with the previous line', () => {

@@ -115,6 +115,7 @@ export class InkDrawer {
 	private redrawQueued = false;
 	private lastInteractionAt = 0;
 	private advanceTimer = 0;
+	private readonly buttonTouchCleanups: Array<() => void> = [];
 
 	// Raw pointer-event diagnostics (iPad stroke-loss). Always-on, cheap; dumped via command.
 	private readonly rawLog: RawPointerSample[] = [];
@@ -480,6 +481,36 @@ export class InkDrawer {
 		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
 		this.rootEl.addEventListener('pointerdown', this.onBackdropPointerDown);
+
+		// Drive the toolbar buttons from touch directly on iPad: a Pencil tap on a <button>
+		// otherwise hands focus back to the note's editor and pops the on-screen keyboard.
+		// preventDefault on touchstart stops that focus shift (and suppresses the synthesized
+		// click, so the click handlers above never double-fire on touch).
+		this.bindButtonTouch(this.eraseButtonEl, this.onErase);
+		this.bindButtonTouch(this.newLineButtonEl, this.onNewLine);
+		this.bindButtonTouch(this.boldButtonEl, this.onToggleBold);
+		this.bindButtonTouch(this.underlineButtonEl, this.onToggleUnderline);
+		this.bindButtonTouch(this.colorButtonEl, this.onColorButton);
+		this.bindButtonTouch(this.pasteButtonEl, this.onPaste);
+		this.bindButtonTouch(this.closeButtonEl, this.onCloseClick);
+	}
+
+	private bindButtonTouch(btn: HTMLButtonElement, handler: () => void): void {
+		const onStart = (event: TouchEvent): void => {
+			event.preventDefault();
+		};
+		const onEnd = (event: TouchEvent): void => {
+			event.preventDefault();
+			if (!btn.disabled) {
+				handler();
+			}
+		};
+		btn.addEventListener('touchstart', onStart, { passive: false });
+		btn.addEventListener('touchend', onEnd, { passive: false });
+		this.buttonTouchCleanups.push(() => {
+			btn.removeEventListener('touchstart', onStart);
+			btn.removeEventListener('touchend', onEnd);
+		});
 	}
 
 	private detachListeners(): void {
@@ -499,6 +530,10 @@ export class InkDrawer {
 		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
+		for (const cleanup of this.buttonTouchCleanups) {
+			cleanup();
+		}
+		this.buttonTouchCleanups.length = 0;
 	}
 
 	// On iOS the Apple Pencil is captured via touch events; pointer events are ignored there because

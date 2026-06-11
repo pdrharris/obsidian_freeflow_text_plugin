@@ -69,9 +69,9 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.getWordGapScale(),
 			() => this.getRenderLineHeightScale(),
 			() => this.getRenderStrokeFillScale(),
-			() => this.settings.showWritingLine,
+			() => this.settings.showRenderWritingLine,
 			(value) => {
-				this.settings.showWritingLine = value;
+				this.settings.showRenderWritingLine = value;
 				void this.saveSettings();
 			},
 			() => this.settings.velocityWidth,
@@ -82,6 +82,16 @@ export default class FreeFlowInkPlugin extends Plugin {
 		registry.register();
 		this.addSettingTab(new FreeFlowInkSettingTab(this.app, this));
 		this.registerDomEvent(activeWindow, 'resize', () => this.applyRuntimeStyles());
+
+		// Switching a note to Reading view should commit whatever is in the drawer rather than
+		// stranding it: closing the drawer flushes the active block's pending save, so the read-only
+		// render then shows the latest strokes.
+		this.registerEvent(
+			this.app.workspace.on('layout-change', () => this.closeDrawerIfReadingMode()),
+		);
+		this.registerEvent(
+			this.app.workspace.on('active-leaf-change', () => this.closeDrawerIfReadingMode()),
+		);
 
 		this.register(() => {
 			this.drawer?.destroy();
@@ -104,6 +114,15 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.normalizeSettings();
 		await this.saveData(this.settings);
 		this.applyRuntimeStyles();
+	}
+
+	// When the active note flips to Reading view, close the drawer so its content is committed.
+	// A no-op when the drawer is already closed or the view is still editable.
+	private closeDrawerIfReadingMode(): void {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view && view.getMode() === 'preview') {
+			this.drawer?.close();
+		}
 	}
 
 	private getDrawerRuntimeConfig(): DrawerRuntimeConfig {
@@ -159,7 +178,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 	}
 
 	getRenderLineHeightScale(): number {
-		return clamp(this.settings.renderLineHeightScale, 0.1, 2.2);
+		return clamp(this.settings.renderLineHeightScale, 0.1, 4.0);
 	}
 
 	getRenderStrokeFillScale(): number {
@@ -206,7 +225,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.settings.softBlockLimitKb = clamp(Math.round(this.settings.softBlockLimitKb), 200, 12000);
 		this.settings.hardBlockLimitKb = clamp(Math.round(this.settings.hardBlockLimitKb), 512, 16000);
 		this.settings.wordGapScale = clamp(this.settings.wordGapScale, 0.8, 2.5);
-		this.settings.renderLineHeightScale = clamp(this.settings.renderLineHeightScale, 0.1, 2.2);
+		this.settings.renderLineHeightScale = clamp(this.settings.renderLineHeightScale, 0.1, 4.0);
 		this.settings.renderStrokeFillScale = clamp(this.settings.renderStrokeFillScale, 0.4, 1.6);
 		this.settings.drawerHeightScale = clamp(this.settings.drawerHeightScale, 0.3, 1.5);
 		this.settings.idleAdvanceMs = clamp(Math.round(this.settings.idleAdvanceMs), 500, 5000);

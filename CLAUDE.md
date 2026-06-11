@@ -44,7 +44,10 @@ The document is a **flowing-text logical tree**, not a flat coordinate soup:
 No absolute screen positions are stored. Intra-word geometry is preserved, but inter-word gaps
 and line height are **layout constants**, computed at render time. `meta.cursor: InkCursor`
 (`{line, word}`, an insertion slot) and `meta.selection: InkSelection | null` are the single
-source of truth for caret/selection and are persisted.
+source of truth for caret/selection and are persisted. `meta.widthScale?: number` is an optional
+per-block display width (a fraction 0.3–1 of the content column) set by dragging the block's
+right-edge handle; when absent the block uses the global "Displayed line width" default. It is
+device-independent (a fraction, not px) so it survives sync between desktop and iPad.
 
 ### Layout engine (`src/ink/layout.ts`)
 

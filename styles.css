@@ -1,9 +1,45 @@
 .freeflow-ink-block {
+	position: relative;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 12px;
 	padding: 8px;
 	background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(245, 248, 255, 0.4));
 	overflow: hidden;
+}
+
+/* Per-block width drag handle on the right edge. */
+.freeflow-ink-resize-handle {
+	position: absolute;
+	top: 8px;
+	bottom: 8px;
+	right: 2px;
+	width: 14px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: ew-resize;
+	touch-action: none;
+	opacity: 0.4;
+	transition: opacity 120ms ease;
+	z-index: 2;
+}
+
+.freeflow-ink-resize-handle::before {
+	content: '';
+	width: 3px;
+	height: 30px;
+	border-radius: 3px;
+	background: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--background-primary);
+}
+
+.freeflow-ink-resize-handle:hover,
+.freeflow-ink-block.is-resizing .freeflow-ink-resize-handle {
+	opacity: 0.95;
+}
+
+.freeflow-ink-block.is-resizing {
+	user-select: none;
 }
 
 .freeflow-ink-inline-canvas {

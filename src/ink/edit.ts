@@ -8,6 +8,7 @@ import {
 	InkCursor,
 	InkDocument,
 	InkFragment,
+	InkLine,
 	InkSelection,
 	InkStroke,
 	InkWord,
@@ -40,6 +41,29 @@ function placeRun(words: InkWord[], startX: number): number {
 		}
 	}
 	return right;
+}
+
+// After words are removed starting at `index`, pull the remaining right-hand words left so a
+// mid-line delete closes the hole instead of leaving the drawn whitespace behind. The first
+// surviving word is re-seated a normal word gap after the word now before it (or at the line
+// start when nothing precedes it).
+function closeLineGapAt(line: InkLine, index: number, lineHeight: number): void {
+	const rightWords = line.words.slice(index);
+	const firstRight = rightWords[0];
+	const firstBounds = firstRight ? wordBounds(firstRight) : null;
+	if (!firstBounds) {
+		return;
+	}
+	const prev = index > 0 ? line.words[index - 1] : null;
+	const prevBounds = prev ? wordBounds(prev) : null;
+	const gap = lineHeight * PASTE_GAP_FACTOR;
+	const targetStart = prevBounds ? prevBounds.maxX + gap : 0;
+	const delta = firstBounds.minX - targetStart;
+	if (delta > 0) {
+		for (const word of rightWords) {
+			shiftWordX(word, -delta);
+		}
+	}
 }
 
 function clampCursorToDoc(doc: InkDocument, cursor: InkCursor): InkCursor {
@@ -112,6 +136,7 @@ export function eraseAtCursor(doc: InkDocument): InkCursor {
 	}
 	if (cursor.word > 0) {
 		line.words.splice(cursor.word - 1, 1);
+		closeLineGapAt(line, cursor.word - 1, doc.meta.lineHeight);
 		const next: InkCursor = { line: cursor.line, word: cursor.word - 1 };
 		doc.meta.cursor = next;
 		return next;
@@ -316,6 +341,7 @@ export function deleteSelection(doc: InkDocument, selection: InkSelection): InkC
 		const line = doc.lines[start.line];
 		if (line) {
 			line.words.splice(start.word, end.word - start.word);
+			closeLineGapAt(line, start.word, doc.meta.lineHeight);
 		}
 		doc.meta.cursor = start;
 		return start;

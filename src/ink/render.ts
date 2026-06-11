@@ -52,7 +52,9 @@ export function inlineLayout(
 	doc: InkDocument,
 	options: InlineRenderOptions,
 ): { layout: LayoutResult; cssWidth: number; cssHeight: number } {
-	const cssWidth = Math.max(280, canvas.parentElement?.clientWidth ?? canvas.clientWidth ?? 280);
+	// Floor is low so a deliberately narrow (per-block resized) block isn't forced wider than its
+	// container, which would overflow and clip; normal blocks are far wider than this anyway.
+	const cssWidth = Math.max(160, canvas.parentElement?.clientWidth ?? canvas.clientWidth ?? 160);
 	const contentWidth = Math.min(cssWidth, Math.max(120, options.wrapWidth));
 	const targetLineHeight = clamp(INLINE_BASE_LINE_HEIGHT_PX * options.renderLineHeightScale, 10, 220);
 	const layout = layoutDocument(doc, {

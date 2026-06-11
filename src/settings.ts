@@ -3,7 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-06-10E';
+export const FREEFLOW_BUILD_MARKER = '2026-06-11B';
 
 export interface FreeFlowInkSettings {
 	lineWidthScale: number;
@@ -14,7 +14,10 @@ export interface FreeFlowInkSettings {
 	idleAdvanceMs: number;
 	releaseAdvanceDelayMs: number;
 	advanceLinePosition: number;
+	// Writing-line baseline guides are independent: one for the drawer (this setting) and one for
+	// the rendered inline view (`showRenderWritingLine`, toggled from each block's meta row).
 	showWritingLine: boolean;
+	showRenderWritingLine: boolean;
 	velocityWidth: boolean;
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
@@ -31,6 +34,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	releaseAdvanceDelayMs: 260,
 	advanceLinePosition: 85,
 	showWritingLine: true,
+	showRenderWritingLine: true,
 	velocityWidth: true,
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
@@ -70,14 +74,14 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			const screenProfile = metrics.isPhoneLike ? 'Phone profile' : 'Large-screen profile';
 			const renderLineSpacingPercent = Math.round(metrics.renderLineHeightScale * 100);
 			const renderStrokeFillPercent = Math.round(metrics.renderStrokeFillScale * 100);
-			const writingLineMode = this.plugin.settings.showWritingLine ? 'On' : 'Off';
+			const drawerWritingLineMode = this.plugin.settings.showWritingLine ? 'On' : 'Off';
 			previewValueEl.setText(
 				`${screenProfile}\n` +
 					`Viewport: ${metrics.viewportWidth}px x ${metrics.viewportHeight}px\n` +
 					`Line width: ${metrics.lineWidthBasePx}px base -> ${metrics.lineWidthPx}px active\n` +
 					`Rendered line spacing: ${renderLineSpacingPercent}%\n` +
 					`Rendered stroke fill: ${renderStrokeFillPercent}%\n` +
-					`Writing line guide: ${writingLineMode}\n` +
+					`Drawer writing line: ${drawerWritingLineMode}\n` +
 					`Drawer height: ${metrics.drawerHeightBasePx}px base -> ${metrics.drawerHeightPx}px active`,
 			);
 		};
@@ -152,7 +156,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			)
 			.addSlider((slider) =>
 				slider
-					.setLimits(10, 220, 1)
+					.setLimits(10, 400, 1)
 					.setValue(renderLineSpacingPercent)
 					.setDynamicTooltip()
 					.onChange(async (value) => {
@@ -239,9 +243,9 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Show writing line')
+			.setName('Show writing line in drawer')
 			.setDesc(
-				'Shows a baseline guide in the drawer and rendered view so letters sit consistently above and below it.',
+				'Shows a baseline guide in the writing drawer so letters sit consistently above and below it. The rendered (inline) view has its own writing-line toggle in each block’s toolbar.',
 			)
 			.addToggle((toggle) =>
 				toggle

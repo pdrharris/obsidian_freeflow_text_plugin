@@ -11,7 +11,9 @@ import { InkDrawer } from './drawer';
 import {
 	INK_CODE_BLOCK_LANGUAGE,
 	InkDocument,
+	InkWord,
 	clampCursor,
+	clampWidthScale,
 	fragmentIsEmpty,
 	parseInkDocument,
 	selectionIsEmpty,
@@ -30,6 +32,33 @@ import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
 
 const SAVE_DEBOUNCE_MS = 320;
+
+// The ink colour at the caret: the colour of the nearest stroke just before the cursor (so the
+// swatch previews "what you're writing in here"), falling back to the next stroke to the right,
+// then the default. Used to make the inline recolour button's swatch informative.
+function colorAtCursor(doc: InkDocument): string {
+	const cursor = clampCursor(doc.meta.cursor, doc.lines);
+	const lastColor = (word: InkWord | undefined): string | null => {
+		const stroke = word?.strokes[word.strokes.length - 1];
+		return stroke ? stroke.color : null;
+	};
+	const line = doc.lines[cursor.line];
+	if (line) {
+		for (let w = Math.min(cursor.word, line.words.length) - 1; w >= 0; w -= 1) {
+			const color = lastColor(line.words[w]);
+			if (color) {
+				return color;
+			}
+		}
+		for (let w = cursor.word; w < line.words.length; w += 1) {
+			const color = lastColor(line.words[w]);
+			if (color) {
+				return color;
+			}
+		}
+	}
+	return DEFAULT_INK_COLOR;
+}
 
 function confirmModal(app: App, title: string, body: string, confirmText: string): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -128,6 +157,25 @@ export class InkBlockRegistry {
 		};
 	}
 
+	// Render options for one block. A block that carries its own width governs wrapping by its
+	// container width, so the global wrap cap must not shrink it further.
+	private blockRenderOptions(doc: InkDocument): InlineRenderOptions {
+		const base = this.renderOptions();
+		if (typeof doc.meta.widthScale === 'number') {
+			return { ...base, wrapWidth: Number.POSITIVE_INFINITY };
+		}
+		return base;
+	}
+
+	// Size the block box to its stored per-block width (a fraction of the content column). With no
+	// stored width the box keeps its natural full-column width.
+	private applyBlockWidth(containerEl: HTMLElement, doc: InkDocument): void {
+		const ws = doc.meta.widthScale;
+		containerEl.setCssStyles({
+			width: typeof ws === 'number' ? `${(clampWidthScale(ws) * 100).toFixed(2)}%` : '',
+		});
+	}
+
 	private mountBlock(
 		source: string,
 		el: HTMLElement,
@@ -174,9 +222,15 @@ export class InkBlockRegistry {
 		let hardWarned = false;
 		const blockKey = `${ctx.sourcePath}:${section.lineStart}:${section.lineEnd}`;
 
+		this.applyBlockWidth(containerEl, documentModel);
 		const canvasEl = containerEl.createEl('canvas', {
 			cls: 'freeflow-ink-inline-canvas',
 			attr: { role: 'button', 'aria-label': 'Open freeflow ink drawer' },
+		});
+		// Drag handle on the block's right edge for per-block width (see resize handlers below).
+		const resizeHandleEl = containerEl.createDiv({
+			cls: 'freeflow-ink-resize-handle',
+			attr: { 'aria-label': 'Drag to resize block width', title: 'Drag to resize width' },
 		});
 		const metaRowEl = containerEl.createDiv({ cls: 'freeflow-ink-meta' });
 		// Plain glyph symbols rather than setIcon: Lucide SVGs render blank on some mobile builds,
@@ -223,6 +277,9 @@ export class InkBlockRegistry {
 			underlineButtonEl.disabled = !hasSelection;
 			colorButtonEl.disabled = !hasSelection;
 			pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
+			// The swatch previews the colour at the caret so it's a useful indicator even with no
+			// selection (when the recolour action itself is disabled).
+			colorSwatchEl.style.backgroundColor = colorAtCursor(documentModel);
 			if (hasSelection) {
 				const flags = selectionStyleFlags(documentModel, documentModel.meta.selection!);
 				boldButtonEl.classList.toggle('is-active', flags.allBold);
@@ -238,7 +295,7 @@ export class InkBlockRegistry {
 			drawInlineCanvas(
 				canvasEl,
 				documentModel,
-				this.renderOptions(),
+				this.blockRenderOptions(documentModel),
 				showInlineCaret ? documentModel.meta.cursor : null,
 				documentModel.meta.selection,
 			);
@@ -332,7 +389,7 @@ export class InkBlockRegistry {
 
 		const cursorAtEvent = (event: PointerEvent): ReturnType<typeof clampCursor> => {
 			const rect = canvasEl.getBoundingClientRect();
-			const { layout } = inlineLayout(canvasEl, documentModel, this.renderOptions());
+			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions(documentModel));
 			return layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
 		};
 
@@ -345,6 +402,79 @@ export class InkBlockRegistry {
 				return;
 			}
 			scheduleSave();
+		};
+
+		// --- per-block width drag handle ---------------------------------------------------------
+		let resizing = false;
+		let resizePointerId: number | null = null;
+		let resizeColumnWidth = 0;
+
+		const columnWidthPx = (): number => {
+			const parent = containerEl.parentElement;
+			return Math.max(200, parent?.clientWidth ?? containerEl.clientWidth ?? 400);
+		};
+		const persistWidth = (): void => {
+			if (isActiveKey(blockKey)) {
+				// Drawer is open for this block; let its close flush persist the new width.
+				pendingInlineRefreshWhileActive = true;
+			} else {
+				scheduleSave();
+			}
+		};
+		const applyResizeAt = (clientX: number): void => {
+			const left = containerEl.getBoundingClientRect().left;
+			const fraction = clampWidthScale((clientX - left) / Math.max(1, resizeColumnWidth));
+			documentModel.meta.widthScale = fraction;
+			containerEl.setCssStyles({ width: `${(fraction * 100).toFixed(2)}%` });
+			renderInline();
+			if (isActiveKey(blockKey)) {
+				drawer.refreshLayout();
+			}
+		};
+		const onResizePointerDown = (event: PointerEvent): void => {
+			event.preventDefault();
+			event.stopPropagation();
+			resizing = true;
+			resizePointerId = event.pointerId;
+			resizeColumnWidth = columnWidthPx();
+			containerEl.classList.add('is-resizing');
+			try {
+				resizeHandleEl.setPointerCapture(event.pointerId);
+			} catch {
+				/* capture is best-effort */
+			}
+		};
+		const onResizePointerMove = (event: PointerEvent): void => {
+			if (!resizing || resizePointerId !== event.pointerId) {
+				return;
+			}
+			event.preventDefault();
+			applyResizeAt(event.clientX);
+		};
+		const onResizePointerUp = (event: PointerEvent): void => {
+			if (!resizing || resizePointerId !== event.pointerId) {
+				return;
+			}
+			event.preventDefault();
+			resizing = false;
+			resizePointerId = null;
+			containerEl.classList.remove('is-resizing');
+			try {
+				resizeHandleEl.releasePointerCapture(event.pointerId);
+			} catch {
+				/* ignore */
+			}
+			persistWidth();
+		};
+		// Double-click/tap the handle clears the per-block width (back to the global default).
+		const onResizeReset = (): void => {
+			delete documentModel.meta.widthScale;
+			containerEl.setCssStyles({ width: '' });
+			renderInline();
+			if (isActiveKey(blockKey)) {
+				drawer.refreshLayout();
+			}
+			persistWidth();
 		};
 
 		const onCanvasPointerDown = (event: PointerEvent): void => {
@@ -484,7 +614,7 @@ export class InkBlockRegistry {
 				renderInline();
 				return;
 			}
-			const { layout } = inlineLayout(canvasEl, documentModel, this.renderOptions());
+			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions(documentModel));
 			const cursor = layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
 			documentModel.meta.cursor = cursor;
 			documentModel.meta.selection = null;
@@ -542,6 +672,11 @@ export class InkBlockRegistry {
 		canvasEl.addEventListener('pointermove', onCanvasPointerMove);
 		canvasEl.addEventListener('pointerup', onCanvasPointerUp);
 		canvasEl.addEventListener('pointercancel', onCanvasPointerUp);
+		resizeHandleEl.addEventListener('pointerdown', onResizePointerDown);
+		resizeHandleEl.addEventListener('pointermove', onResizePointerMove);
+		resizeHandleEl.addEventListener('pointerup', onResizePointerUp);
+		resizeHandleEl.addEventListener('pointercancel', onResizePointerUp);
+		resizeHandleEl.addEventListener('dblclick', onResizeReset);
 		writingLineButtonEl.addEventListener('click', onToggleWritingLine);
 		selectButtonEl.addEventListener('click', onToggleSelect);
 		boldButtonEl.addEventListener('click', onBold);
@@ -573,6 +708,11 @@ export class InkBlockRegistry {
 					canvasEl.removeEventListener('pointermove', onCanvasPointerMove);
 					canvasEl.removeEventListener('pointerup', onCanvasPointerUp);
 					canvasEl.removeEventListener('pointercancel', onCanvasPointerUp);
+					resizeHandleEl.removeEventListener('pointerdown', onResizePointerDown);
+					resizeHandleEl.removeEventListener('pointermove', onResizePointerMove);
+					resizeHandleEl.removeEventListener('pointerup', onResizePointerUp);
+					resizeHandleEl.removeEventListener('pointercancel', onResizePointerUp);
+					resizeHandleEl.removeEventListener('dblclick', onResizeReset);
 					selectButtonEl.removeEventListener('click', onToggleSelect);
 					boldButtonEl.removeEventListener('click', onBold);
 					underlineButtonEl.removeEventListener('click', onUnderline);
@@ -620,10 +760,11 @@ export class InkBlockRegistry {
 		ctx: MarkdownPostProcessorContext,
 	): void {
 		containerEl.classList.add('is-reading');
+		this.applyBlockWidth(containerEl, documentModel);
 		const inlineRefreshers = this.inlineRefreshers;
 		const canvasEl = containerEl.createEl('canvas', { cls: 'freeflow-ink-inline-canvas' });
 		const render = (): void => {
-			drawInlineCanvas(canvasEl, documentModel, this.renderOptions(), null, null);
+			drawInlineCanvas(canvasEl, documentModel, this.blockRenderOptions(documentModel), null, null);
 		};
 		render();
 		inlineRefreshers.add(render);

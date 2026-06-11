@@ -59,9 +59,25 @@ export interface InkDocument {
 		lineHeight: number;
 		cursor: InkCursor;
 		selection: InkSelection | null;
+		// Per-block display width as a fraction (0.3..1) of the available content column. Stored
+		// with the block so a resized block keeps its width on every device and through sync. When
+		// absent, the block uses the global "Displayed line width" default.
+		widthScale?: number;
 	};
 	lines: InkLine[];
 }
+
+// Clamp a per-block width fraction to the supported range.
+export function clampWidthScale(value: number): number {
+	return value < MIN_WIDTH_SCALE
+		? MIN_WIDTH_SCALE
+		: value > MAX_WIDTH_SCALE
+			? MAX_WIDTH_SCALE
+			: value;
+}
+
+export const MIN_WIDTH_SCALE = 0.3;
+export const MAX_WIDTH_SCALE = 1;
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -227,10 +243,15 @@ export function parseInkDocument(source: string): InkDocument {
 
 	const cursor = clampCursor(value.meta?.cursor, lines);
 	const selection = normalizeSelection(value.meta?.selection, lines);
+	const rawWidthScale = value.meta?.widthScale;
+	const widthScale =
+		typeof rawWidthScale === 'number' && Number.isFinite(rawWidthScale)
+			? clampWidthScale(rawWidthScale)
+			: undefined;
 
 	return {
 		version: INK_DOC_VERSION,
-		meta: { lineHeight, cursor, selection },
+		meta: { lineHeight, cursor, selection, ...(widthScale !== undefined ? { widthScale } : {}) },
 		lines,
 	};
 }
