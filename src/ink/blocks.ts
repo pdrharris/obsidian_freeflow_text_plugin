@@ -27,7 +27,7 @@ import {
 	selectionStyleFlags,
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
-import { drawInlineCanvas, inlineLayout, InlineRenderOptions } from './render';
+import { drawInlineCanvas, inlineLayout, InlineRenderOptions, StrokeNib } from './render';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
 
@@ -95,6 +95,13 @@ export class InkBlockRegistry {
 	private readonly getShowWritingLine: () => boolean;
 	private readonly setShowWritingLine: (value: boolean) => void;
 	private readonly getVelocityWidth: () => boolean;
+	private readonly getPressureWidth: () => boolean;
+	private readonly getTaperStrokeEnds: () => boolean;
+	private readonly getStrokeWeight: () => number;
+	private readonly getNib: () => StrokeNib | null;
+	private readonly getSmoothing: () => number;
+	private readonly getMatchTextWidth: () => boolean;
+	private readonly getWidthFraction: () => number;
 	private readonly getSoftBlockLimitBytes: () => number;
 	private readonly getHardBlockLimitBytes: () => number;
 	private readonly getShowSoftLimitNotice: () => boolean;
@@ -113,6 +120,13 @@ export class InkBlockRegistry {
 		getShowWritingLine: () => boolean,
 		setShowWritingLine: (value: boolean) => void,
 		getVelocityWidth: () => boolean,
+		getPressureWidth: () => boolean,
+		getTaperStrokeEnds: () => boolean,
+		getStrokeWeight: () => number,
+		getNib: () => StrokeNib | null,
+		getSmoothing: () => number,
+		getMatchTextWidth: () => boolean,
+		getWidthFraction: () => number,
 		getSoftBlockLimitBytes: () => number,
 		getHardBlockLimitBytes: () => number,
 		getShowSoftLimitNotice: () => boolean,
@@ -126,12 +140,19 @@ export class InkBlockRegistry {
 		this.getShowWritingLine = getShowWritingLine;
 		this.setShowWritingLine = setShowWritingLine;
 		this.getVelocityWidth = getVelocityWidth;
+		this.getPressureWidth = getPressureWidth;
+		this.getTaperStrokeEnds = getTaperStrokeEnds;
+		this.getStrokeWeight = getStrokeWeight;
+		this.getNib = getNib;
+		this.getSmoothing = getSmoothing;
+		this.getMatchTextWidth = getMatchTextWidth;
+		this.getWidthFraction = getWidthFraction;
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
 		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
 		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
 	}
 
-	private refreshAllInline(): void {
+	refreshAllInline(): void {
 		for (const refresh of this.inlineRefreshers) {
 			refresh();
 		}
@@ -154,32 +175,65 @@ export class InkBlockRegistry {
 			renderStrokeFillScale: this.getRenderStrokeFillScale(),
 			showWritingLine: this.getShowWritingLine(),
 			velocityWidth: this.getVelocityWidth(),
+			pressureWidth: this.getPressureWidth(),
+			taperStrokeEnds: this.getTaperStrokeEnds(),
+			strokeWeight: this.getStrokeWeight(),
+			nib: this.getNib(),
+			smoothing: this.getSmoothing(),
 		};
 	}
 
-	// Render options for one block. A block that carries its own width governs wrapping by its
-	// container width, so the global wrap cap must not shrink it further.
-	private blockRenderOptions(doc: InkDocument): InlineRenderOptions {
-		const base = this.renderOptions();
-		if (typeof doc.meta.widthScale === 'number') {
-			return { ...base, wrapWidth: Number.POSITIVE_INFINITY };
-		}
-		return base;
+	// The block's canvas always wraps to its own container width (the box we size in
+	// `applyBlockWidth`), so the global wrap cap must never shrink it further.
+	private blockRenderOptions(): InlineRenderOptions {
+		return { ...this.renderOptions(), wrapWidth: Number.POSITIVE_INFINITY };
 	}
 
-	// Size the block box to its stored per-block width (a fraction of the content column). With no
-	// stored width the box keeps its natural full-column width.
+	// Size the block box. Precedence:
+	//   1. An explicit per-block width (the drag handle) — a fraction of the readable-line column.
+	//   2. "Match text width" on — the natural column width, lined up with surrounding text.
+	//   3. Otherwise — a fraction of the full editor-pane width (the slider), broken out of the
+	//      readable-line column and centred.
+	//
+	// Centring is computed from WIDTHS ONLY (no getBoundingClientRect of positions): the block's
+	// containing column (parent) is centred in the pane by Obsidian, so centring the block on its
+	// column — margin-left = (columnWidth - blockWidth) / 2 — also centres it in the pane. Using
+	// stable widths (not positions) avoids the live-preview timing bug where a position measured
+	// before layout settles bakes in a wrong offset and the block's clip shows only a central strip.
 	private applyBlockWidth(containerEl: HTMLElement, doc: InkDocument): void {
+		const clearBreakout = (): void => {
+			containerEl.classList.remove('is-fill-width');
+			containerEl.style.removeProperty('margin-left');
+			containerEl.style.removeProperty('max-width');
+		};
 		const ws = doc.meta.widthScale;
-		containerEl.setCssStyles({
-			width: typeof ws === 'number' ? `${(clampWidthScale(ws) * 100).toFixed(2)}%` : '',
-		});
+		if (typeof ws === 'number') {
+			clearBreakout();
+			containerEl.setCssStyles({ width: `${(clampWidthScale(ws) * 100).toFixed(2)}%` });
+			return;
+		}
+		const pane = this.getMatchTextWidth()
+			? null
+			: containerEl.closest('.markdown-preview-view, .cm-scroller');
+		const parent = containerEl.parentElement;
+		if (!(pane instanceof HTMLElement) || !parent || pane.clientWidth < 240 || parent.clientWidth < 80) {
+			clearBreakout();
+			containerEl.setCssStyles({ width: '' });
+			return;
+		}
+		const fraction = Math.max(0.3, Math.min(1, this.getWidthFraction()));
+		const widthPx = Math.round((pane.clientWidth - 16) * fraction); // small inset off the pane edges
+		const marginLeft = Math.round((parent.clientWidth - widthPx) / 2);
+		containerEl.classList.add('is-fill-width');
+		containerEl.setCssStyles({ width: `${widthPx}px`, maxWidth: 'none', marginLeft: `${marginLeft}px` });
+		releaseAncestorContainment(containerEl, pane);
 	}
 
 	private mountBlock(
 		source: string,
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext,
+		attempt = 0,
 	): void {
 		const drawer = this.drawer;
 		const inlineRefreshers = this.inlineRefreshers;
@@ -188,6 +242,9 @@ export class InkBlockRegistry {
 		};
 		const isActiveKey = (value: string): boolean => this.activeKey === value;
 
+		// Clear first so a retry (see the section-info handling below) re-renders cleanly rather than
+		// stacking a second block into the same element.
+		el.empty();
 		const containerEl = el.createDiv({ cls: 'freeflow-ink-block' });
 		const parsed = this.parseWithError(source, containerEl);
 		if (!parsed) {
@@ -204,10 +261,17 @@ export class InkBlockRegistry {
 
 		const section = toSectionInfoLike(ctx.getSectionInfo(el));
 		if (!section) {
-			containerEl.createDiv({
-				cls: 'freeflow-ink-block-error',
-				text: 'Unable to attach fii-ink editor in this view. Re-open the note and try again.',
-			});
+			// Right after switching from Reading to editing, the editor's section info is briefly
+			// unavailable; retry on later frames before giving up. Without this the block mounts with no
+			// controls until the note is reopened (the user's workaround was switching notes and back).
+			if (attempt < 10) {
+				window.setTimeout(() => this.mountBlock(source, el, ctx, attempt + 1), 50);
+			} else {
+				containerEl.createDiv({
+					cls: 'freeflow-ink-block-error',
+					text: 'Unable to attach fii-ink editor in this view. Re-open the note and try again.',
+				});
+			}
 			return;
 		}
 		let showInlineCaret = false;
@@ -261,7 +325,12 @@ export class InkBlockRegistry {
 		colorButtonEl.setAttribute('aria-label', 'Recolour selection');
 		colorButtonEl.title = 'Recolour selection';
 		const colorSwatchEl = colorButtonEl.createSpan({ cls: 'freeflow-ink-color-btn-swatch' });
-		colorSwatchEl.style.backgroundColor = lastSelectionColor;
+		// Set both: background-color is the desktop path; `color` drives the iPad box-shadow fill.
+		const paintSwatch = (color: string): void => {
+			colorSwatchEl.style.backgroundColor = color;
+			colorSwatchEl.style.color = color;
+		};
+		paintSwatch(lastSelectionColor);
 		const copyButtonEl = makeMetaButton('⧉', 'Copy');
 		const cutButtonEl = makeMetaButton('✂', 'Cut');
 		const pasteButtonEl = makeMetaButton('📋', 'Paste');
@@ -279,7 +348,7 @@ export class InkBlockRegistry {
 			pasteButtonEl.disabled = fragmentIsEmpty(getClipboard());
 			// The swatch previews the colour at the caret so it's a useful indicator even with no
 			// selection (when the recolour action itself is disabled).
-			colorSwatchEl.style.backgroundColor = colorAtCursor(documentModel);
+			paintSwatch(colorAtCursor(documentModel));
 			if (hasSelection) {
 				const flags = selectionStyleFlags(documentModel, documentModel.meta.selection!);
 				boldButtonEl.classList.toggle('is-active', flags.allBold);
@@ -292,16 +361,34 @@ export class InkBlockRegistry {
 		};
 
 		const renderInline = (): void => {
+			this.applyBlockWidth(containerEl, documentModel);
 			drawInlineCanvas(
 				canvasEl,
 				documentModel,
-				this.blockRenderOptions(documentModel),
+				this.blockRenderOptions(),
 				showInlineCaret ? documentModel.meta.cursor : null,
 				documentModel.meta.selection,
 			);
 			updateMetaButtons();
 		};
 		renderInline();
+		// Live preview can still be settling the column geometry on first mount; the full-width
+		// sizing/centring measures the block's position, and the canvas is drawn to the block width.
+		// Re-render on the next frame(s) so a premature first measurement (wrong width or margin) is
+		// corrected once layout is stable — otherwise the canvas can stay at the narrow column width.
+		const rerenderSoon = (): void => {
+			window.requestAnimationFrame(() => {
+				if (!isDisposed) {
+					renderInline();
+				}
+			});
+			window.setTimeout(() => {
+				if (!isDisposed) {
+					renderInline();
+				}
+			}, 150);
+		};
+		rerenderSoon();
 
 		const flushSave = async (): Promise<void> => {
 			if (isDisposed) {
@@ -389,7 +476,7 @@ export class InkBlockRegistry {
 
 		const cursorAtEvent = (event: PointerEvent): ReturnType<typeof clampCursor> => {
 			const rect = canvasEl.getBoundingClientRect();
-			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions(documentModel));
+			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions());
 			return layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
 		};
 
@@ -595,7 +682,7 @@ export class InkBlockRegistry {
 			colorPopup = openColorPopup(colorButtonEl, lastSelectionColor, (color) => {
 				colorPopup = null;
 				lastSelectionColor = color;
-				colorSwatchEl.style.backgroundColor = color;
+				paintSwatch(color);
 				if (selectionIsEmpty(documentModel.meta.selection)) {
 					return;
 				}
@@ -614,7 +701,7 @@ export class InkBlockRegistry {
 				renderInline();
 				return;
 			}
-			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions(documentModel));
+			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions());
 			const cursor = layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
 			documentModel.meta.cursor = cursor;
 			documentModel.meta.selection = null;
@@ -690,10 +777,13 @@ export class InkBlockRegistry {
 		canvasEl.tabIndex = 0;
 
 		inlineRefreshers.add(renderInline);
+		// Observe the pane/column ancestor, not the block itself: in fill-width mode the block has a
+		// fixed pixel width, so a pane/window resize wouldn't change the block's own box and would be
+		// missed. Observing the parent also avoids a feedback loop (we resize the block, not the parent).
 		const resizeObserver = new ResizeObserver(() => {
 			renderInline();
 		});
-		resizeObserver.observe(containerEl);
+		resizeObserver.observe(containerEl.parentElement ?? containerEl);
 
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
@@ -764,12 +854,16 @@ export class InkBlockRegistry {
 		const inlineRefreshers = this.inlineRefreshers;
 		const canvasEl = containerEl.createEl('canvas', { cls: 'freeflow-ink-inline-canvas' });
 		const render = (): void => {
-			drawInlineCanvas(canvasEl, documentModel, this.blockRenderOptions(documentModel), null, null);
+			this.applyBlockWidth(containerEl, documentModel);
+			drawInlineCanvas(canvasEl, documentModel, this.blockRenderOptions(), null, null);
 		};
 		render();
+		// Re-render once layout has settled so the canvas matches the final width (see editable path).
+		window.requestAnimationFrame(() => render());
 		inlineRefreshers.add(render);
+		// Observe the pane ancestor (see the editable path) so fill-width blocks track pane resizes.
 		const resizeObserver = new ResizeObserver(() => render());
-		resizeObserver.observe(containerEl);
+		resizeObserver.observe(containerEl.parentElement ?? containerEl);
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
@@ -795,6 +889,27 @@ export class InkBlockRegistry {
 			});
 			return null;
 		}
+	}
+}
+
+// Release CSS containment on the code-block widget ancestors between the block and the editor pane.
+// CodeMirror sets `contain: paint` (inline, with !important) on the embed wrapper, which clips a
+// full-width block to the readable-line column even with overflow visible — a stylesheet rule can't
+// beat inline !important, so we override it inline on the element itself (inline beats inline). Only
+// touches per-block widget wrappers that actually carry containment, not the shared editor scroller.
+function releaseAncestorContainment(containerEl: HTMLElement, pane: HTMLElement): void {
+	let el: HTMLElement | null = containerEl.parentElement;
+	let guard = 0;
+	while (el && el !== pane && guard < 12) {
+		const contain = getComputedStyle(el).getPropertyValue('contain');
+		if (contain && contain !== 'none' && contain !== 'normal') {
+			// Needs inline `!important` to override CodeMirror's own inline `!important`; setCssStyles /
+			// CSS classes can't express priority, so the lint rule is deliberately suppressed here.
+			// eslint-disable-next-line obsidianmd/no-static-styles-assignment
+			el.style.setProperty('contain', 'none', 'important');
+		}
+		el = el.parentElement;
+		guard += 1;
 	}
 }
 

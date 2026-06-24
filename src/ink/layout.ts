@@ -38,10 +38,22 @@ export interface LayoutConfig {
 	sourceLineHeight: number;
 	wordGapScale: number;
 	strokeFillScale: number;
+	// Render-time multiplier on stroke thickness (default 1). Applied to the per-point width base.
+	strokeWeight?: number;
 	marginXCss?: number;
 	// When true, each laid point carries a per-point width (`LaidPoint.w`) derived from pen
 	// speed so fast strokes render thinner and slow strokes thicker.
 	velocityWidth?: boolean;
+	// When true, fold per-point pen pressure into the width too (combined with velocity when both
+	// are on). No-op for finger/mouse input, which reports a constant mid pressure.
+	pressureWidth?: boolean;
+	// Non-causal path smoothing strength 0..1 (0 = off). Cleans hand jitter at render time without
+	// touching the stored points; widths are computed from the smoothed path too.
+	smoothing?: number;
+	// Fixed glyph-scale source ratio. When set, it overrides the per-document estimate so the scale
+	// stays stable even as the laid-out content changes (the drawer pins this for the whole session,
+	// so a growing line doesn't keep rescaling and jumping the caret).
+	sourceHeightRatio?: number;
 	// When set, each line is anchored so this source-x maps to the left margin (the drawer passes
 	// 0 for WYSIWYG — strokes stay exactly where drawn). When omitted, rows re-origin to the first
 	// word's min-x, flushing content to the line start (the inline renderer's behaviour).
@@ -103,7 +115,7 @@ function clamp(value: number, min: number, max: number): number {
 	return value < min ? min : value > max ? max : value;
 }
 
-function estimateSourceStrokeHeightRatio(doc: InkDocument, lineHeight: number): number {
+export function estimateSourceStrokeHeightRatio(doc: InkDocument, lineHeight: number): number {
 	const ratios: number[] = [];
 	for (const line of doc.lines) {
 		for (const word of line.words) {
@@ -145,7 +157,10 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 	const sourceLineHeight = Math.max(80, config.sourceLineHeight);
 	const strokeFillScale = clamp(config.strokeFillScale, 0.4, 1.6);
 	const rowHeight = Math.max(8, config.targetLineHeightCss);
-	const sourceHeightRatio = estimateSourceStrokeHeightRatio(doc, sourceLineHeight);
+	const strokeWeight = clamp(config.strokeWeight ?? 1, 0.3, 4);
+	const smoothing = clamp(config.smoothing ?? 0, 0, 1);
+	const sourceHeightRatio =
+		config.sourceHeightRatio ?? estimateSourceStrokeHeightRatio(doc, sourceLineHeight);
 	// Glyph scale: a typical stroke (sourceHeightRatio * sourceLineHeight tall) maps to a
 	// pleasant fraction of the row height. Independent of canvas width.
 	const cssPerSource = (rowHeight * strokeFillScale) / (sourceLineHeight * sourceHeightRatio);
@@ -214,6 +229,9 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 				wordWidth,
 				rowHeight,
 				config.velocityWidth === true,
+				config.pressureWidth === true,
+				strokeWeight,
+				smoothing,
 			);
 			placed.line = lineIndex;
 			placed.word = wordIndex;
@@ -261,13 +279,22 @@ function placeWord(
 	wordWidth: number,
 	rowHeight: number,
 	velocityWidth: boolean,
+	pressureWidth: boolean,
+	strokeWeight: number,
+	smoothing: number,
 ): LaidWord {
 	const originX = bounds ? bounds.minX : 0;
 	const strokes: LaidStroke[] = word.strokes.map((stroke) => {
-		const widths = velocityWidth ? velocityWidths(stroke, cssPerSource) : null;
+		// Smooth the path (non-destructively) before measuring width and placing, so both the
+		// geometry and the velocity/pressure widths come from the cleaned path.
+		const srcPoints = smoothing > 0 ? smoothPolyline(stroke.points, smoothing) : stroke.points;
+		const widths =
+			velocityWidth || pressureWidth
+				? strokePointWidths(stroke, srcPoints, cssPerSource, velocityWidth, pressureWidth, strokeWeight)
+				: null;
 		return {
 			stroke,
-			points: stroke.points.map((p, i) => {
+			points: srcPoints.map((p, i) => {
 				const laid: LaidPoint = {
 					x: leftCss + (p.x - originX) * cssPerSource,
 					y: baselineY + p.y * cssPerSource,
@@ -293,18 +320,65 @@ function placeWord(
 	};
 }
 
-// Per-point widths from pen speed. Self-normalising per stroke (relative to the stroke's own
-// median speed) so it needs no absolute calibration: points drawn faster than the stroke's
-// typical speed get thinner, slower points thicker. Returns css-px widths, bold baked in.
+// Per-point widths from pen speed and/or pressure. Both contribute a multiplicative factor that is
+// centred at 1 (so each is a no-op when its signal is flat), then the result is lightly smoothed.
+// Returns css-px widths with bold baked in.
+//
+// Velocity is self-normalising per stroke (relative to the stroke's own median speed) so it needs
+// no absolute calibration: points faster than typical get thinner, slower points thicker. Pressure
+// is centred at the neutral mid value (0.5) that finger/mouse report, so flat pressure → factor 1.
 const VELOCITY_MIN_FACTOR = 0.55;
 const VELOCITY_MAX_FACTOR = 1.75;
-function velocityWidths(stroke: InkStroke, cssPerSource: number): number[] {
-	const pts = stroke.points;
+const PRESSURE_NEUTRAL = 0.5;
+const PRESSURE_GAIN = 1.4; // how strongly pressure deviation from neutral moves the width
+const PRESSURE_MIN_FACTOR = 0.6;
+const PRESSURE_MAX_FACTOR = 1.8;
+const COMBINED_MIN_FACTOR = 0.45;
+const COMBINED_MAX_FACTOR = 2.2;
+
+function strokePointWidths(
+	stroke: InkStroke,
+	pts: InkStroke['points'],
+	cssPerSource: number,
+	useVelocity: boolean,
+	usePressure: boolean,
+	strokeWeight: number,
+): number[] {
 	const n = pts.length;
-	const base = Math.max(0.6, stroke.width * cssPerSource * (stroke.bold ? 1.7 : 1));
+	const base = Math.max(0.6, stroke.width * cssPerSource * (stroke.bold ? 1.7 : 1) * strokeWeight);
 	if (n < 2) {
 		return [base];
 	}
+
+	const velFactors = useVelocity ? velocityFactors(pts) : null;
+	const preFactors = usePressure ? pressureFactors(pts) : null;
+
+	const raw: number[] = new Array<number>(n);
+	for (let i = 0; i < n; i += 1) {
+		let factor = 1;
+		if (velFactors) {
+			factor *= velFactors[i] ?? 1;
+		}
+		if (preFactors) {
+			factor *= preFactors[i] ?? 1;
+		}
+		raw[i] = base * clamp(factor, COMBINED_MIN_FACTOR, COMBINED_MAX_FACTOR);
+	}
+
+	// Light smoothing so the ribbon doesn't jitter point-to-point.
+	const out: number[] = new Array<number>(n);
+	for (let i = 0; i < n; i += 1) {
+		const prev = raw[i - 1] ?? raw[i] ?? base;
+		const cur = raw[i] ?? base;
+		const next = raw[i + 1] ?? raw[i] ?? base;
+		out[i] = (prev + cur * 2 + next) / 4;
+	}
+	return out;
+}
+
+// Velocity factor per point, centred at ~1 around the stroke's median speed.
+function velocityFactors(pts: InkStroke['points']): number[] {
+	const n = pts.length;
 	const segSpeed: number[] = [];
 	for (let i = 1; i < n; i += 1) {
 		const a = pts[i - 1];
@@ -320,28 +394,59 @@ function velocityWidths(stroke: InkStroke, cssPerSource: number): number[] {
 	const sorted = [...segSpeed].filter((s) => s > 0).sort((a, b) => a - b);
 	const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] ?? 0 : 0;
 	if (median <= 0) {
-		return new Array<number>(n).fill(base);
+		return new Array<number>(n).fill(1);
 	}
-	const widthAt = (speed: number): number => {
+	const factorAt = (speed: number): number => {
 		const ratio = median / Math.max(speed, median * 0.05);
-		const factor = clamp(Math.sqrt(ratio), VELOCITY_MIN_FACTOR, VELOCITY_MAX_FACTOR);
-		return base * factor;
+		return clamp(Math.sqrt(ratio), VELOCITY_MIN_FACTOR, VELOCITY_MAX_FACTOR);
 	};
-	const raw: number[] = new Array<number>(n);
-	raw[0] = widthAt(segSpeed[0] ?? median);
-	for (let i = 1; i < n - 1; i += 1) {
-		raw[i] = widthAt(((segSpeed[i - 1] ?? median) + (segSpeed[i] ?? median)) / 2);
-	}
-	raw[n - 1] = widthAt(segSpeed[n - 2] ?? median);
-	// Light smoothing so the ribbon doesn't jitter point-to-point.
 	const out: number[] = new Array<number>(n);
-	for (let i = 0; i < n; i += 1) {
-		const prev = raw[i - 1] ?? raw[i] ?? base;
-		const cur = raw[i] ?? base;
-		const next = raw[i + 1] ?? raw[i] ?? base;
-		out[i] = (prev + cur * 2 + next) / 4;
+	out[0] = factorAt(segSpeed[0] ?? median);
+	for (let i = 1; i < n - 1; i += 1) {
+		out[i] = factorAt(((segSpeed[i - 1] ?? median) + (segSpeed[i] ?? median)) / 2);
 	}
+	out[n - 1] = factorAt(segSpeed[n - 2] ?? median);
 	return out;
+}
+
+// Pressure factor per point, centred at 1 at the neutral pressure (0.5). Finger/mouse report a
+// constant 0.5, so this yields a flat 1 (no effect) and the width falls back to velocity/base.
+function pressureFactors(pts: InkStroke['points']): number[] {
+	return pts.map((p) => {
+		const pressure = typeof p.pressure === 'number' ? p.pressure : PRESSURE_NEUTRAL;
+		const factor = 1 + (pressure - PRESSURE_NEUTRAL) * PRESSURE_GAIN;
+		return clamp(factor, PRESSURE_MIN_FACTOR, PRESSURE_MAX_FACTOR);
+	});
+}
+
+// Non-causal path smoothing: repeated 3-tap binomial averaging with the endpoints pinned (so the
+// stroke keeps its start/end and overall extent). Because the whole stroke is known, this is
+// lag-free — unlike a live one-euro filter — and cleans hand jitter while preserving letter shape.
+// Generic over any point with x/y; other fields (pressure, time) are carried through unchanged.
+export function smoothPolyline<T extends { x: number; y: number }>(pts: T[], strength: number): T[] {
+	const n = pts.length;
+	if (n < 3 || strength <= 0) {
+		return pts;
+	}
+	const passes = 4;
+	const lambda = clamp(strength, 0, 1) * 0.5;
+	let cur: T[] = pts.map((p) => ({ ...p }));
+	for (let pass = 0; pass < passes; pass += 1) {
+		const next: T[] = cur.map((p) => ({ ...p }));
+		for (let i = 1; i < n - 1; i += 1) {
+			const prev = cur[i - 1];
+			const mid = cur[i];
+			const nxt = cur[i + 1];
+			const out = next[i];
+			if (!prev || !mid || !nxt || !out) {
+				continue;
+			}
+			out.x = mid.x + ((prev.x + nxt.x) / 2 - mid.x) * lambda;
+			out.y = mid.y + ((prev.y + nxt.y) / 2 - mid.y) * lambda;
+		}
+		cur = next;
+	}
+	return cur;
 }
 
 function cursorFromPoint(rows: RowInfo[], rowHeight: number, x: number, y: number): InkCursor {

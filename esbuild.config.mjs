@@ -12,30 +12,41 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === 'production';
 
-// Deploy the built runtime files into the live Obsidian vault so they sync with
-// the notes (single-repo workflow). Override with OBSIDIAN_PLUGIN_DIR if the
-// vault lives elsewhere. Set to an empty string to skip deployment.
-const deployDir =
-	process.env.OBSIDIAN_PLUGIN_DIR ??
-	path.resolve(
-		'../../Documents/Notes/.obsidian/plugins/obsidian_freeflow_text_plugin',
-	);
+// Deploy the built runtime files into the live Obsidian vaults so they sync with
+// the notes (single-repo workflow). Override with OBSIDIAN_PLUGIN_DIR (a single
+// path, or several separated by commas) if the vaults live elsewhere. Set it to
+// an empty string to skip deployment.
+const pluginSubpath = '.obsidian/plugins/obsidian_freeflow_text_plugin';
+const defaultDeployDirs = [
+	'../../Documents/Obsidian/Notes',
+	'../../Documents/Obsidian/Work',
+	'../../Documents/Obsidian/Theology',
+].map((vault) => path.resolve(vault, pluginSubpath));
+
+const deployDirs =
+	process.env.OBSIDIAN_PLUGIN_DIR !== undefined
+		? process.env.OBSIDIAN_PLUGIN_DIR.split(',')
+				.map((dir) => dir.trim())
+				.filter((dir) => dir.length > 0)
+		: defaultDeployDirs;
 
 const deployPlugin = {
 	name: 'deploy-to-vault',
 	setup(build) {
 		build.onEnd((result) => {
-			if (!deployDir || result.errors.length) return;
-			try {
-				fs.mkdirSync(deployDir, { recursive: true });
-				for (const file of ['main.js', 'manifest.json', 'styles.css']) {
-					if (fs.existsSync(file)) {
-						fs.copyFileSync(file, path.join(deployDir, file));
+			if (result.errors.length) return;
+			for (const deployDir of deployDirs) {
+				try {
+					fs.mkdirSync(deployDir, { recursive: true });
+					for (const file of ['main.js', 'manifest.json', 'styles.css']) {
+						if (fs.existsSync(file)) {
+							fs.copyFileSync(file, path.join(deployDir, file));
+						}
 					}
+					console.info(`[deploy] copied runtime files to ${deployDir}`);
+				} catch (err) {
+					console.error(`[deploy] failed for ${deployDir}: ${err.message}`);
 				}
-				console.info(`[deploy] copied runtime files to ${deployDir}`);
-			} catch (err) {
-				console.error(`[deploy] failed: ${err.message}`);
 			}
 		});
 	},

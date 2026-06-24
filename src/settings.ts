@@ -3,10 +3,15 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-06-11B';
+export const FREEFLOW_BUILD_MARKER = '2026-06-23H';
 
 export interface FreeFlowInkSettings {
+	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width
+	// (1 = the whole pane, centred). Only used when `matchTextWidth` is off.
 	lineWidthScale: number;
+	// When true, the rendered block matches Obsidian's readable-line (markdown text) width and lines
+	// up with surrounding text; the width slider is then ignored. Device-local like the other settings.
+	matchTextWidth: boolean;
 	wordGapScale: number;
 	renderLineHeightScale: number;
 	renderStrokeFillScale: number;
@@ -18,7 +23,27 @@ export interface FreeFlowInkSettings {
 	// the rendered inline view (`showRenderWritingLine`, toggled from each block's meta row).
 	showWritingLine: boolean;
 	showRenderWritingLine: boolean;
+	// Render-time multiplier on overall stroke thickness (not stored on the strokes, so it
+	// re-weights existing handwriting too). Above 1 = heavier/bolder lines.
+	strokeWeightScale: number;
 	velocityWidth: boolean;
+	// Fold Apple Pencil pressure (Touch.force, captured per point) into stroke width. Finger/mouse
+	// report no real pressure (a constant mid value), so this is a no-op there and falls back to
+	// velocity width.
+	pressureWidth: boolean;
+	// Taper each stroke's ends to a point (entry/exit), for a more penned look.
+	taperStrokeEnds: boolean;
+	// Optional broad-edge "calligraphy" nib: width depends on stroke direction (thin when moving
+	// along the nib axis, full across it). `nibAngle` is the edge angle in degrees; `nibContrast`
+	// (0..1) is how strong the thick/thin variation is (0 = round pen, 1 = razor edge).
+	calligraphyNib: boolean;
+	nibAngle: number;
+	nibContrast: number;
+	// Non-causal path smoothing strength 0..1 (render-time, non-destructive). Cleans hand jitter.
+	handwritingSmoothing: number;
+	// iOS only: once an Apple Pencil is seen, ignore finger/palm touches while drawing so a resting
+	// hand doesn't lay down stray strokes.
+	palmRejection: boolean;
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
 	showSoftLimitNotice: boolean;
@@ -26,6 +51,7 @@ export interface FreeFlowInkSettings {
 
 export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	lineWidthScale: 1,
+	matchTextWidth: true,
 	wordGapScale: 1.35,
 	renderLineHeightScale: 1,
 	renderStrokeFillScale: 1,
@@ -35,7 +61,15 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	advanceLinePosition: 85,
 	showWritingLine: true,
 	showRenderWritingLine: true,
+	strokeWeightScale: 1.3,
 	velocityWidth: true,
+	pressureWidth: true,
+	taperStrokeEnds: true,
+	calligraphyNib: false,
+	nibAngle: 40,
+	nibContrast: 0.6,
+	handwritingSmoothing: 0.35,
+	palmRejection: true,
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
 	showSoftLimitNotice: false,
@@ -60,7 +94,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.setName('Build')
 			.setDesc(`Version ${this.plugin.manifest.version} · marker ${FREEFLOW_BUILD_MARKER}`);
 
-		new Setting(containerEl).setName('Writing behavior').setHeading();
+		new Setting(containerEl).setName('Layout & sizing').setHeading();
 
 		const previewSetting = new Setting(containerEl)
 			.setName('Adaptive preview')
@@ -101,13 +135,26 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		lineWidthValueEl.setText(`${lineWidthPercent}%`);
 
 		new Setting(containerEl)
+			.setName('Match text width')
+			.setDesc(
+				'Render handwriting at the same width as Obsidian’s text (readable line length) so it lines up with surrounding notes. Turn this off to use the width slider below. The per-block resize handle still overrides both.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.matchTextWidth).onChange(async (value) => {
+					this.plugin.settings.matchTextWidth = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshInlineBlocks();
+				}),
+			);
+
+		new Setting(containerEl)
 			.setName('Displayed line width')
 			.setDesc(
-				'Adjusts where inline handwriting wraps. Defaults are adaptive for phones and larger screens.',
+				'Width of the rendered handwriting block: 100% spans the full editor width, lower values are narrower and centred. Only applies when “match text width” is off.',
 			)
 			.addSlider((slider) =>
 				slider
-					.setLimits(40, 130, 1)
+					.setLimits(30, 100, 1)
 					.setValue(lineWidthPercent)
 					.setDynamicTooltip()
 					.onChange(async (value) => {
@@ -115,6 +162,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 						lineWidthValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
 						renderAdaptivePreview();
+						this.plugin.refreshInlineBlocks();
 					}),
 			)
 			.controlEl.appendChild(lineWidthValueEl);
@@ -228,6 +276,29 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		advanceLineValueEl.addClass('freeflow-ink-settings-value');
 		advanceLineValueEl.setText(`${this.plugin.settings.advanceLinePosition}%`);
 
+		new Setting(containerEl).setName('Pen & ink').setHeading();
+
+		const strokeWeightValueEl = createDiv();
+		strokeWeightValueEl.addClass('freeflow-ink-settings-value');
+		const strokeWeightPercent = Math.round(this.plugin.settings.strokeWeightScale * 100);
+		strokeWeightValueEl.setText(`${strokeWeightPercent}%`);
+
+		new Setting(containerEl)
+			.setName('Line weight')
+			.setDesc('Overall thickness of the ink. Raise it if strokes look too thin.')
+			.addSlider((slider) =>
+				slider
+					.setLimits(50, 300, 5)
+					.setValue(strokeWeightPercent)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.strokeWeightScale = value / 100;
+						strokeWeightValueEl.setText(`${value}%`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(strokeWeightValueEl);
+
 		new Setting(containerEl)
 			.setName('Variable width by pen speed')
 			.setDesc(
@@ -238,6 +309,125 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.velocityWidth)
 					.onChange(async (value) => {
 						this.plugin.settings.velocityWidth = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Variable width by pen pressure')
+			.setDesc(
+				'Uses pen pressure from a pressure-sensitive stylus so harder presses render thicker. Finger and mouse have no real pressure, so it falls back to pen-speed width there.',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.pressureWidth)
+					.onChange(async (value) => {
+						this.plugin.settings.pressureWidth = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		const smoothingValueEl = createDiv();
+		smoothingValueEl.addClass('freeflow-ink-settings-value');
+		smoothingValueEl.setText(`${Math.round(this.plugin.settings.handwritingSmoothing * 100)}%`);
+
+		new Setting(containerEl)
+			.setName('Handwriting smoothing')
+			.setDesc(
+				'Cleans up jitter and shaky lines. Higher is smoother but rounds off fine detail. Applied when rendering, so it never changes your saved strokes.',
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(0, 100, 5)
+					.setValue(Math.round(this.plugin.settings.handwritingSmoothing * 100))
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.handwritingSmoothing = value / 100;
+						smoothingValueEl.setText(`${value}%`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(smoothingValueEl);
+
+		new Setting(containerEl)
+			.setName('Taper stroke ends')
+			.setDesc('Tapers the start and end of each stroke to a point for a more penned look.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.taperStrokeEnds)
+					.onChange(async (value) => {
+						this.plugin.settings.taperStrokeEnds = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		const nibAngleValueEl = createDiv();
+		nibAngleValueEl.addClass('freeflow-ink-settings-value');
+		nibAngleValueEl.setText(`${Math.round(this.plugin.settings.nibAngle)}°`);
+		const nibContrastValueEl = createDiv();
+		nibContrastValueEl.addClass('freeflow-ink-settings-value');
+		nibContrastValueEl.setText(`${Math.round(this.plugin.settings.nibContrast * 100)}%`);
+
+		new Setting(containerEl)
+			.setName('Calligraphy nib')
+			.setDesc(
+				'Gives strokes a broad-edge pen feel: thin when moving along the nib angle, thick across it. Stacks with the width settings above.',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.calligraphyNib)
+					.onChange(async (value) => {
+						this.plugin.settings.calligraphyNib = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Nib angle')
+			.setDesc(
+				'Angle of the pen edge. Positive tilts the edge one way (like an acute accent), negative the other (like a grave). Around 40° gives the classic thick-down, thin-across look.',
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(-90, 90, 1)
+					.setValue(Math.round(this.plugin.settings.nibAngle))
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.nibAngle = value;
+						nibAngleValueEl.setText(`${value}°`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(nibAngleValueEl);
+
+		new Setting(containerEl)
+			.setName('Nib contrast')
+			.setDesc('How strong the thick/thin variation is. Lower is a milder, more subtle nib.')
+			.addSlider((slider) =>
+				slider
+					.setLimits(0, 100, 5)
+					.setValue(Math.round(this.plugin.settings.nibContrast * 100))
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.nibContrast = value / 100;
+						nibContrastValueEl.setText(`${value}%`);
+						await this.plugin.saveSettings();
+					}),
+			)
+			.controlEl.appendChild(nibContrastValueEl);
+
+		new Setting(containerEl).setName('Writing aids').setHeading();
+
+		new Setting(containerEl)
+			.setName('Palm rejection')
+			.setDesc(
+				'On touch devices, once a pen stylus is detected, ignore finger and palm contact while writing so a resting hand does not leave stray strokes. Toolbar buttons still respond to taps.',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.palmRejection)
+					.onChange(async (value) => {
+						this.plugin.settings.palmRejection = value;
 						await this.plugin.saveSettings();
 					}),
 			);
@@ -256,6 +446,8 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 						renderAdaptivePreview();
 					}),
 			);
+
+		new Setting(containerEl).setName('Drawer auto-scroll').setHeading();
 
 		new Setting(containerEl)
 			.setName('Pause auto-scroll delay')

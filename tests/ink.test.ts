@@ -272,6 +272,19 @@ test('eraseAtCursor at line start joins with the previous line', () => {
 	eq(next, { line: 0, word: 1 }, 'cursor should land at the join point');
 });
 
+test('eraseAtCursor join re-seats the joined words after the previous line (no overlap)', () => {
+	// line0: a@0..40; line1: b@0..40, c@120..160. lineHeight 180 -> gap = 63. Joining line1 onto
+	// line0 must shift its words to start at a.maxX + gap (40 + 63 = 103), not keep x≈0 on top of a.
+	const d = mkDoc([Wx('a', 0)], [Wx('b', 0), Wx('c', 120)]);
+	d.meta.cursor = { line: 1, word: 0 };
+	eraseAtCursor(d);
+	eq(d.lines.length, 1);
+	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'b', 'c']);
+	eq(wordBounds(d.lines[0]!.words[0]!)?.minX, 0, 'a must not move');
+	eq(wordBounds(d.lines[0]!.words[1]!)?.minX, 103, 'b should start a word-gap after a');
+	eq(wordBounds(d.lines[0]!.words[2]!)?.minX, 223, 'c keeps its gap behind b (120 + 103)');
+});
+
 test('deleteSelection removes a same-line word range', () => {
 	const d = mkDoc([W('a'), W('b'), W('c'), W('d')]);
 	d.meta.selection = { anchor: { line: 0, word: 1 }, focus: { line: 0, word: 3 } };

@@ -13,15 +13,16 @@ npm test             # Headless tests for the pure logic (doc/edit/layout), bund
 ```
 
 Build output is `main.js` at the repo root. The build (both `npm run dev` watch and `npm run
-build`) **also deploys** `main.js`, `manifest.json`, and `styles.css` into the live vault at
+build`) **also deploys** `main.js`, `manifest.json`, and `styles.css` into the live vaults at
 `<Vault>/.obsidian/plugins/obsidian_freeflow_text_plugin/` (see the `deploy-to-vault` esbuild
-plugin in `esbuild.config.mjs`; override the destination with the `OBSIDIAN_PLUGIN_DIR` env var,
-or set it empty to skip). The default destination is the vault at
-`../../Documents/Notes/.obsidian/plugins/obsidian_freeflow_text_plugin`. After a build just reload
-Obsidian (Ctrl+R) to test. The vault copy carries only those runtime files (plus `data.json`
-settings) and is committed with the notes repo, so the plugin syncs to mobile through the single
-notes repo. The pen UI can't be driven from the CLI; interactive write/erase/cursor tests require
-a human in Obsidian.
+plugin in `esbuild.config.mjs`; override the destinations with the `OBSIDIAN_PLUGIN_DIR` env var —
+a single path, or several separated by commas — or set it empty to skip). The default destinations
+are three vaults: `../../Documents/Obsidian/Notes`, `../../Documents/Obsidian/Work`, and
+`../../Documents/Obsidian/Theology` (each `+ /.obsidian/plugins/obsidian_freeflow_text_plugin`).
+After a build just reload Obsidian (Ctrl+R) to test. The vault copy carries only those runtime
+files (plus `data.json` settings) and is committed with each notes repo, so the plugin syncs to
+mobile through those repos. The pen UI can't be driven from the CLI; interactive write/erase/cursor
+tests require a human in Obsidian.
 
 tsconfig is strict with `noUncheckedIndexedAccess` — array/index access is `T | undefined`, so
 guard before use. Note `console.log` is an eslint error via `obsidianmd/rule-custom-message`.
@@ -62,7 +63,9 @@ view renders small glyphs that wrap to the note width.
 
 Every edit is a **tree splice** followed by a relayout — there is no coordinate patching.
 `insertWordAtCursor`, `appendStrokeToCurrentWord`, `splitLineAtCursor` (newline),
-`eraseAtCursor`, `deleteSelection`.
+`eraseAtCursor`, `deleteSelection`. Copy/cut/paste go through `extractSelection` (selection →
+`InkFragment`) and `insertFragmentAtCursor`, with the fragment held in the process-wide in-app
+clipboard (`clipboard.ts`) so it survives across blocks/notes within a session.
 
 ### Module responsibilities
 
@@ -77,6 +80,7 @@ Every edit is a **tree splice** followed by a relayout — there is no coordinat
 | `src/ink/drawer.ts` | `InkDrawer` — the floating writing panel; pointer/touch input, stroke capture → source coords → `edit.ts`; holds the current pen style (colour/bold/underline) |
 | `src/ink/blocks.ts` | `InkBlockRegistry` — registers the `fii-ink` processor, mounts inline canvases, bridges to the singleton drawer |
 | `src/ink/palette.ts` | `INK_PALETTE` (swatch colours) + `openColorPopup` — the floating colour picker shared by the drawer pen and inline recolour |
+| `src/ink/clipboard.ts` | Process-wide in-app `InkFragment` clipboard shared by inline view + drawer for copy/cut/paste across blocks/notes |
 | `src/ink/storage.ts` | `persistInkCodeBlock` — serializes and splices the updated JSON back into the vault file |
 
 ### Key design decisions

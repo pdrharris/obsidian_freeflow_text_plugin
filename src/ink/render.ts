@@ -8,10 +8,25 @@ import { LaidPoint, LaidWord, LayoutResult, layoutDocument } from './layout';
 
 const INLINE_MIN_HEIGHT = 140;
 const INLINE_BASE_LINE_HEIGHT_PX = 28;
+// Dot-like strokes (full stops, the dot on an i, short ticks) are drawn at a fraction of the full
+// pen width so they read as small dots rather than fat blobs. Tuned by eye.
+const DOT_RADIUS_SCALE = 0.6;
 const CARET_COLOR = '#2563eb';
 const SELECTION_COLOR = 'rgba(37, 99, 235, 0.18)';
 const WRITING_LINE_COLOR = '#e8ecf5';
 const INLINE_BG = '#fcfdff';
+
+// A broad-edge "calligraphy" nib: width depends on stroke direction. `angleRad` is the pen-edge
+// angle; `contrast` (0..1) is how strong the thick/thin variation is (0 = round, 1 = razor edge).
+export interface StrokeNib {
+	angleRad: number;
+	contrast: number;
+}
+
+export interface StrokeRenderOptions {
+	taper?: boolean;
+	nib?: StrokeNib | null;
+}
 
 export interface InlineRenderOptions {
 	wrapWidth: number;
@@ -20,6 +35,11 @@ export interface InlineRenderOptions {
 	renderStrokeFillScale: number;
 	showWritingLine: boolean;
 	velocityWidth: boolean;
+	pressureWidth: boolean;
+	taperStrokeEnds: boolean;
+	strokeWeight: number;
+	nib: StrokeNib | null;
+	smoothing: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -64,8 +84,14 @@ export function inlineLayout(
 		wordGapScale: options.wordGapScale,
 		strokeFillScale: options.renderStrokeFillScale,
 		velocityWidth: options.velocityWidth,
+		pressureWidth: options.pressureWidth,
+		strokeWeight: options.strokeWeight,
+		smoothing: options.smoothing,
 	});
-	const cssHeight = Math.max(INLINE_MIN_HEIGHT, Math.ceil(layout.height + targetLineHeight));
+	// `layout.height` already spans every row exactly (one row height per line). Add only a small
+	// bottom margin for descenders — NOT a whole extra row, which used to leave a blank line (and an
+	// extra writing-line guide) hanging below the last line of writing.
+	const cssHeight = Math.max(INLINE_MIN_HEIGHT, Math.ceil(layout.height + targetLineHeight * 0.3));
 	return { layout, cssWidth, cssHeight };
 }
 
@@ -122,8 +148,14 @@ export function drawInlineCanvas(
 			);
 		}
 		for (const laid of word.strokes) {
-			const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
-			drawLaidStroke(ctx, laid.points, widthPx, laid.stroke.color);
+			const widthPx = Math.max(
+				1,
+				laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1) * options.strokeWeight,
+			);
+			drawLaidStroke(ctx, laid.points, widthPx, laid.stroke.color, {
+				taper: options.taperStrokeEnds,
+				nib: options.nib,
+			});
 		}
 	}
 
@@ -139,14 +171,18 @@ export function drawInlineCanvas(
 }
 
 // Paint a single laid-out stroke (points already in CSS px). Shared by inline + drawer.
-// If the points carry per-point widths (`w`, from velocity), the stroke is drawn as a series
-// of width-varying segments; otherwise it's one smooth quadratic path at `widthPx`.
+// When the points carry per-point widths (`w`, from velocity/pressure) or `taper` is on, the stroke
+// is drawn as a smooth filled outline (a ribbon) so the width varies cleanly and the ends can taper
+// to a point. A plain uniform-width stroke with no taper uses the cheaper quadratic stroke path.
 export function drawLaidStroke(
 	ctx: CanvasRenderingContext2D,
 	points: LaidPoint[],
 	widthPx: number,
 	color: string,
+	opts: StrokeRenderOptions = {},
 ): void {
+	const taper = opts.taper ?? false;
+	const nib = opts.nib ?? null;
 	const first = points[0];
 	if (!first) {
 		return;
@@ -157,7 +193,8 @@ export function drawLaidStroke(
 	ctx.lineJoin = 'round';
 
 	if (points.length === 1) {
-		const r = Math.max(1, (first.w ?? widthPx) / 2);
+		// A lone point is a dot (full stop, i-dot): shrink it so it doesn't read as an oversized blob.
+		const r = Math.max(0.8, ((first.w ?? widthPx) / 2) * DOT_RADIUS_SCALE);
 		ctx.beginPath();
 		ctx.arc(first.x, first.y, r, 0, Math.PI * 2);
 		ctx.fill();
@@ -165,19 +202,8 @@ export function drawLaidStroke(
 	}
 
 	const hasPerPoint = points.some((p) => typeof p.w === 'number');
-	if (hasPerPoint) {
-		for (let i = 1; i < points.length; i += 1) {
-			const prev = points[i - 1];
-			const curr = points[i];
-			if (!prev || !curr) {
-				continue;
-			}
-			ctx.lineWidth = Math.max(0.6, ((prev.w ?? widthPx) + (curr.w ?? widthPx)) / 2);
-			ctx.beginPath();
-			ctx.moveTo(prev.x, prev.y);
-			ctx.lineTo(curr.x, curr.y);
-			ctx.stroke();
-		}
+	if (hasPerPoint || taper || nib) {
+		drawStrokeRibbon(ctx, points, widthPx, taper, nib);
 		return;
 	}
 
@@ -199,6 +225,147 @@ export function drawLaidStroke(
 		ctx.lineTo(last.x, last.y);
 	}
 	ctx.stroke();
+}
+
+interface XY {
+	x: number;
+	y: number;
+}
+
+// Build and fill a variable-width ribbon for a stroke: offset the centreline left/right by the
+// per-point radius along the local normal, then fill the smooth closed outline. Optionally taper
+// the radius to ~0 at both ends. This gives smooth position AND smooth width in one pass, which the
+// old per-segment `lineTo` stroking could not (it was faceted and blunt-ended).
+function drawStrokeRibbon(
+	ctx: CanvasRenderingContext2D,
+	points: LaidPoint[],
+	widthPx: number,
+	taper: boolean,
+	nib: StrokeNib | null,
+): void {
+	const n = points.length;
+	const radius: number[] = points.map((p) => Math.max(0.35, (p.w ?? widthPx) / 2));
+
+	// Cumulative arc length + max radius, used for both the taper and the dot test.
+	const arc: number[] = new Array<number>(n).fill(0);
+	for (let i = 1; i < n; i += 1) {
+		const a = points[i - 1];
+		const b = points[i];
+		arc[i] = (arc[i - 1] ?? 0) + (a && b ? Math.hypot(b.x - a.x, b.y - a.y) : 0);
+	}
+	const total = arc[n - 1] ?? 0;
+	const maxRadius = radius.reduce((m, r) => (r > m ? r : m), 0);
+
+	// Don't taper a "dot-like" stroke (full stop, the dot on an i, a short tick): tapering both ends
+	// to a point makes a tiny stroke vanish. Such strokes render at full width with round caps below.
+	const isDot = total < Math.max(12, maxRadius * 4);
+	const effectiveTaper = taper && !isDot;
+
+	// Shrink a dot-like stroke so it renders as a small dot rather than a fat blob (it keeps its
+	// round caps below since taper is skipped for dots).
+	if (isDot) {
+		for (let i = 0; i < n; i += 1) {
+			radius[i] = (radius[i] ?? 0) * DOT_RADIUS_SCALE;
+		}
+	}
+
+	if (effectiveTaper) {
+		// Taper along arc length so it's independent of how densely the stroke was sampled.
+		let taperDist = clamp(maxRadius * 2.4, 3, 16);
+		if (total < taperDist * 2) {
+			taperDist = total / 2; // short stroke: keep a symmetric, gentle taper
+		}
+		if (taperDist > 0) {
+			for (let i = 0; i < n; i += 1) {
+				const d = Math.min(arc[i] ?? 0, total - (arc[i] ?? 0));
+				radius[i] = (radius[i] ?? 0) * Math.sqrt(clamp(d / taperDist, 0, 1));
+			}
+		}
+	}
+
+	// Optional calligraphy nib: scale each point's radius by how perpendicular the stroke runs to a
+	// fixed pen-edge direction (thin when moving along the edge, full across it).
+	const nibX = nib ? Math.cos(nib.angleRad) : 0;
+	const nibY = nib ? Math.sin(nib.angleRad) : 0;
+	let prevNibFactor = 1;
+
+	// Per-point unit normals from the local tangent (central difference).
+	const left: XY[] = new Array<XY>(n);
+	const right: XY[] = new Array<XY>(n);
+	let normalX = 0;
+	let normalY = -1;
+	for (let i = 0; i < n; i += 1) {
+		const prev = points[Math.max(0, i - 1)];
+		const next = points[Math.min(n - 1, i + 1)];
+		const cur = points[i];
+		if (!prev || !next || !cur) {
+			continue;
+		}
+		const tx = next.x - prev.x;
+		const ty = next.y - prev.y;
+		const len = Math.hypot(tx, ty);
+		if (len > 1e-4) {
+			normalX = -ty / len;
+			normalY = tx / len;
+		}
+		let nibFactor = prevNibFactor;
+		if (nib && len > 1e-4) {
+			const crossMag = Math.abs((tx / len) * nibY - (ty / len) * nibX);
+			nibFactor = 1 - nib.contrast * (1 - crossMag);
+			prevNibFactor = nibFactor;
+		}
+		const r = (radius[i] ?? 0) * nibFactor;
+		left[i] = { x: cur.x + normalX * r, y: cur.y + normalY * r };
+		right[i] = { x: cur.x - normalX * r, y: cur.y - normalY * r };
+	}
+
+	ctx.beginPath();
+	traceSmooth(ctx, left, true);
+	traceSmooth(ctx, right.slice().reverse(), false);
+	ctx.closePath();
+	ctx.fill();
+
+	// Round caps/joints: a dot at each end keeps blunt ends round when not tapered (a no-op when
+	// tapered, where the end radius is ~0). Also gives dot-like strokes a proper round shape.
+	if (!effectiveTaper) {
+		const ends = [
+			{ p: points[0], r: radius[0] },
+			{ p: points[n - 1], r: radius[n - 1] },
+		];
+		for (const end of ends) {
+			if (end.p && end.r && end.r > 0.35) {
+				ctx.beginPath();
+				ctx.arc(end.p.x, end.p.y, end.r, 0, Math.PI * 2);
+				ctx.fill();
+			}
+		}
+	}
+}
+
+// Trace a polyline as a smooth quadratic path (through segment midpoints), either starting a new
+// subpath (moveTo) or continuing the current one (lineTo to the first point).
+function traceSmooth(ctx: CanvasRenderingContext2D, poly: XY[], startNew: boolean): void {
+	const first = poly[0];
+	if (!first) {
+		return;
+	}
+	if (startNew) {
+		ctx.moveTo(first.x, first.y);
+	} else {
+		ctx.lineTo(first.x, first.y);
+	}
+	for (let i = 1; i < poly.length; i += 1) {
+		const prev = poly[i - 1];
+		const cur = poly[i];
+		if (!prev || !cur) {
+			continue;
+		}
+		ctx.quadraticCurveTo(prev.x, prev.y, (prev.x + cur.x) * 0.5, (prev.y + cur.y) * 0.5);
+	}
+	const last = poly[poly.length - 1];
+	if (last) {
+		ctx.lineTo(last.x, last.y);
+	}
 }
 
 // The underline span for a laid word: the x-extent (in css px) covered by its underlined

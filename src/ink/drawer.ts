@@ -25,11 +25,12 @@ import {
 	splitLineAtCursor,
 	wordFromStroke,
 } from './edit';
-import { LayoutResult, layoutDocument } from './layout';
+import { estimateSourceStrokeHeightRatio, LayoutResult, layoutDocument, smoothPolyline } from './layout';
 import {
 	drawLaidStroke,
 	drawUnderline,
 	resizeCanvasForDpr,
+	StrokeNib,
 	underlineThickness,
 	wordUnderline,
 } from './render';
@@ -49,6 +50,12 @@ export interface DrawerRuntimeConfig {
 	advanceTriggerRatio: number; // position of the orange "near the edge" line (fraction of width)
 	showWritingLine: boolean;
 	velocityWidth: boolean;
+	pressureWidth: boolean;
+	taperStrokeEnds: boolean;
+	strokeWeight: number;
+	nib: StrokeNib | null;
+	smoothing: number;
+	palmRejection: boolean;
 	usePointerCapture: boolean;
 	allowAnyNonMousePointer: boolean;
 }
@@ -96,7 +103,6 @@ export class InkDrawer {
 	private readonly rootEl: HTMLDivElement;
 	private readonly sheetEl: HTMLDivElement;
 	private readonly canvasEl: HTMLCanvasElement;
-	private readonly statusEl: HTMLDivElement;
 	private readonly pasteButtonEl: HTMLButtonElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
@@ -110,8 +116,16 @@ export class InkDrawer {
 	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
 	private activeTouchId: number | null = null;
+	// Palm rejection (iOS): once an Apple Pencil has been seen, finger/palm touches are ignored for
+	// drawing. `activeStrokeIsStylus` lets a pen touchdown supersede an in-progress finger stroke.
+	private sawStylus = false;
+	private activeStrokeIsStylus = false;
 	private scrollX = 0;
 	private scrollY = 0;
+	// Glyph-scale ratio pinned for the whole drawing session. The drawer lays out only the words
+	// before the caret, so a per-frame estimate would shift as the line grows and rescale/jump the
+	// view; snapshotting it at open keeps the scale stable while writing.
+	private sessionHeightRatio = 0.28;
 	private redrawQueued = false;
 	private lastInteractionAt = 0;
 	private advanceTimer = 0;
@@ -137,14 +151,12 @@ export class InkDrawer {
 		this.sheetEl = activeDocument.createElement('div');
 		this.sheetEl.className = 'freeflow-ink-drawer-sheet';
 
-		const canvasFrame = activeDocument.createElement('div');
-		canvasFrame.className = 'freeflow-ink-canvas-frame';
-		this.canvasEl = activeDocument.createElement('canvas');
-		this.canvasEl.className = 'freeflow-ink-drawer-canvas';
-		canvasFrame.appendChild(this.canvasEl);
-
-		const rightButtons = activeDocument.createElement('div');
-		rightButtons.className = 'freeflow-ink-drawer-buttons';
+		// Toolbar sits in the top bar (not a side column) so the canvas gets the full sheet width —
+		// a meaningful gain in writing space, especially on phones.
+		const topBar = activeDocument.createElement('div');
+		topBar.className = 'freeflow-ink-drawer-top';
+		const toolbar = activeDocument.createElement('div');
+		toolbar.className = 'freeflow-ink-drawer-buttons';
 		// Plain glyph symbols rather than setIcon — Lucide SVGs render blank on some mobile builds.
 		const makeIconButton = (glyph: string, label: string): HTMLButtonElement => {
 			const btn = activeDocument.createElement('button');
@@ -153,11 +165,11 @@ export class InkDrawer {
 			btn.setAttribute('aria-label', label);
 			btn.title = label;
 			btn.setText(glyph);
-			rightButtons.appendChild(btn);
+			toolbar.appendChild(btn);
 			return btn;
 		};
-		this.eraseButtonEl = makeIconButton('⌫', 'Erase');
-		this.newLineButtonEl = makeIconButton('↵', 'New line');
+		// Style/util buttons come first (left side of the toolbar); New line and Backspace are added
+		// last so they sit at the far right, nearest the writing edge.
 		this.boldButtonEl = makeIconButton('B', 'Bold');
 		this.underlineButtonEl = makeIconButton('U', 'Underline');
 
@@ -171,26 +183,31 @@ export class InkDrawer {
 		this.colorSwatchEl.className = 'freeflow-ink-color-btn-swatch';
 		this.colorSwatchEl.style.backgroundColor = this.penColor;
 		this.colorButtonEl.appendChild(this.colorSwatchEl);
-		rightButtons.appendChild(this.colorButtonEl);
+		toolbar.appendChild(this.colorButtonEl);
 
 		this.pasteButtonEl = makeIconButton('📋', 'Paste');
+		this.newLineButtonEl = makeIconButton('↵', 'New line');
+		this.eraseButtonEl = makeIconButton('⌫', 'Backspace');
 
-		const topBar = activeDocument.createElement('div');
-		topBar.className = 'freeflow-ink-drawer-top';
-		this.statusEl = activeDocument.createElement('div');
-		this.statusEl.className = 'freeflow-ink-drawer-status';
-		this.statusEl.textContent = 'Pen';
-		topBar.appendChild(this.statusEl);
 		this.closeButtonEl = activeDocument.createElement('button');
 		this.closeButtonEl.type = 'button';
 		this.closeButtonEl.className = 'freeflow-ink-drawer-close';
 		this.closeButtonEl.textContent = 'Close';
+
+		// Close is pinned to the far left; the toolbar (other buttons … New line, Backspace) is
+		// pushed to the right by the top bar's space-between layout.
 		topBar.appendChild(this.closeButtonEl);
+		topBar.appendChild(toolbar);
+
+		const canvasFrame = activeDocument.createElement('div');
+		canvasFrame.className = 'freeflow-ink-canvas-frame';
+		this.canvasEl = activeDocument.createElement('canvas');
+		this.canvasEl.className = 'freeflow-ink-drawer-canvas';
+		canvasFrame.appendChild(this.canvasEl);
 
 		this.sheetEl.appendChild(topBar);
 		this.sheetEl.appendChild(canvasFrame);
 		this.rootEl.appendChild(this.sheetEl);
-		this.rootEl.appendChild(rightButtons);
 		activeDocument.body.appendChild(this.rootEl);
 
 		this.attachListeners();
@@ -213,6 +230,8 @@ export class InkDrawer {
 		}
 		this.session = session;
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
+		// Pin the glyph scale from the full document for this whole session (see field comment).
+		this.sessionHeightRatio = estimateSourceStrokeHeightRatio(session.doc, session.doc.meta.lineHeight);
 		this.activeStroke = null;
 		this.activePointerId = null;
 		this.activeTouchId = null;
@@ -280,6 +299,11 @@ export class InkDrawer {
 			wordGapScale: this.getRuntimeConfig().wordGapScale,
 			strokeFillScale: 1,
 			velocityWidth: this.getRuntimeConfig().velocityWidth,
+			pressureWidth: this.getRuntimeConfig().pressureWidth,
+			strokeWeight: this.getRuntimeConfig().strokeWeight,
+			smoothing: this.getRuntimeConfig().smoothing,
+			// Keep the glyph scale fixed for the session so a growing line doesn't rescale and jump.
+			sourceHeightRatio: this.sessionHeightRatio,
 			// Pin the origin so strokes stay exactly where drawn (WYSIWYG); no re-flush to the left.
 			rowOriginSource: 0,
 		});
@@ -303,6 +327,30 @@ export class InkDrawer {
 		const { width } = this.canvasSize();
 		const caret = view.layout.caretRect(view.viewCursor);
 		this.scrollX = caret.x <= width * 0.7 ? 0 : caret.x - width * 0.5;
+	}
+
+	// Nudge the horizontal scroll only as far as needed to keep the caret comfortably on screen,
+	// WITHOUT re-centring. Used after an in-place edit (erase) so the existing writing doesn't jump
+	// sideways under the pen — `resetScrollX` would snap to the left edge and shove everything right,
+	// which is the "text jumps to the right and I write on top of it" bug.
+	private scrollCaretIntoView(): void {
+		const view = this.drawerView();
+		if (!view) {
+			return;
+		}
+		const { width } = this.canvasSize();
+		const caretX = view.layout.caretRect(view.viewCursor).x;
+		const localX = caretX - this.scrollX;
+		const minVisible = width * 0.15;
+		const maxVisible = width * 0.85;
+		if (localX < minVisible) {
+			this.scrollX = caretX - minVisible;
+		} else if (localX > maxVisible) {
+			this.scrollX = caretX - maxVisible;
+		}
+		if (this.scrollX < 0) {
+			this.scrollX = 0;
+		}
 	}
 
 	private caretLocalX(view: DrawerView): number {
@@ -420,8 +468,15 @@ export class InkDrawer {
 					y: p.y - this.scrollY,
 					w: p.w,
 				}));
-				const widthPx = Math.max(1, laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1));
-				drawLaidStroke(ctx, points, widthPx, laid.stroke.color);
+				const config = this.getRuntimeConfig();
+				const widthPx = Math.max(
+					1,
+					laid.stroke.width * widthScale * (laid.stroke.bold ? 1.7 : 1) * config.strokeWeight,
+				);
+				drawLaidStroke(ctx, points, widthPx, laid.stroke.color, {
+					taper: config.taperStrokeEnds,
+					nib: config.nib,
+				});
 			}
 		}
 
@@ -444,12 +499,20 @@ export class InkDrawer {
 		ctx.lineTo(caret.x - this.scrollX, caret.y + caret.height - this.scrollY);
 		ctx.stroke();
 
-		// Active (in-progress) stroke, drawn raw where the pen is, in the current pen style.
+		// Active (in-progress) stroke, drawn raw where the pen is, in the current pen style. Kept as a
+		// plain stroke (no taper/nib) for snappy live feedback; the committed redraw on lift applies
+		// the full styling. Width tracks the line-weight setting so the preview isn't misleadingly thin,
+		// and a light smoothing pass (endpoints pinned, so the pen tip stays exact) previews the cleanup.
 		if (this.activeStroke && this.activeStroke.length > 0) {
+			const liveConfig = this.getRuntimeConfig();
+			const livePoints = smoothPolyline(
+				this.activeStroke.map((p) => ({ x: p.x, y: p.y })),
+				liveConfig.smoothing * 0.7,
+			);
 			drawLaidStroke(
 				ctx,
-				this.activeStroke.map((p) => ({ x: p.x, y: p.y })),
-				Math.max(1, this.penBold ? 4 : 2.4),
+				livePoints,
+				Math.max(1, (this.penBold ? 4 : 2.4) * liveConfig.strokeWeight),
 				this.penColor,
 			);
 		}
@@ -613,12 +676,28 @@ export class InkDrawer {
 			return;
 		}
 		event.preventDefault();
+		const isStylus = touchIsStylus(touch);
+		if (isStylus) {
+			this.sawStylus = true;
+		}
+		// Palm rejection: once an Apple Pencil has been seen, ignore finger/palm (direct) touches for
+		// drawing so a resting hand doesn't lay down stray strokes. Toolbar buttons are unaffected
+		// (their own touch handlers run separately).
+		if (!isStylus && this.getRuntimeConfig().palmRejection && this.sawStylus) {
+			return;
+		}
+		// A pencil touchdown wins over an in-progress finger stroke (palm landed first, then the pen):
+		// drop the finger stroke uncommitted rather than commit a stray mark.
+		if (isStylus && this.activeStroke !== null && !this.activeStrokeIsStylus) {
+			this.discardStroke();
+		}
 		// Finalize any open stroke before starting the next (covers a missed touchend).
 		if (this.activeStroke !== null) {
 			this.finalizedOnReentryCount += 1;
 			this.finishStroke();
 		}
 		this.activeTouchId = touch.identifier;
+		this.activeStrokeIsStylus = isStylus;
 		this.pushRaw('down', 'touch', touch.identifier, touch.clientX, touch.clientY, touchForce(touch), 1);
 		this.beginStrokeAt(touch.clientX, touch.clientY, touchForce(touch));
 	};
@@ -732,6 +811,16 @@ export class InkDrawer {
 	}
 
 	// ----------------------------------------------------------------- commit
+
+	// Abandon the in-progress stroke without committing it (used when a palm stroke is superseded by
+	// the Apple Pencil).
+	private discardStroke(): void {
+		this.activeStroke = null;
+		this.activePointerId = null;
+		this.activeTouchId = null;
+		this.activeStrokeIsStylus = false;
+		this.requestDraw();
+	}
 
 	private finishStroke(): void {
 		const session = this.session;
@@ -872,8 +961,13 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		// Cancel any pending auto-advance from the previous stroke: it was scheduled for the
+		// pre-erase content and would otherwise fire and scroll the view a moment after erasing.
+		this.clearAdvanceTimer();
 		eraseAtCursor(session.doc);
-		this.resetScrollX();
+		// Keep the remaining writing where it is (only scroll if the caret would fall off screen),
+		// so it doesn't lurch sideways under the pen after a backspace.
+		this.scrollCaretIntoView();
 		session.onContentChanged();
 		this.requestDraw();
 	};
@@ -939,34 +1033,44 @@ export class InkDrawer {
 			return null;
 		}
 		const cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
-		const lastStyle = (
+		const styleOf = (
 			word: InkWord | undefined,
+			which: 'first' | 'last',
 		): { color: string; bold: boolean; underline: boolean } | null => {
 			if (!word || word.strokes.length === 0) {
 				return null;
 			}
-			const stroke = word.strokes[word.strokes.length - 1];
+			const stroke = which === 'first' ? word.strokes[0] : word.strokes[word.strokes.length - 1];
 			return stroke
 				? { color: stroke.color, bold: stroke.bold === true, underline: stroke.underline === true }
 				: null;
 		};
 		const line = session.doc.lines[cursor.line];
 		if (line) {
+			// Prefer the writing just to the LEFT (continue the style in use).
 			for (let w = Math.min(cursor.word, line.words.length) - 1; w >= 0; w -= 1) {
-				const style = lastStyle(line.words[w]);
+				const style = styleOf(line.words[w], 'last');
+				if (style) {
+					return style;
+				}
+			}
+			// Nothing to the left on this line (e.g. cursor at the start of a line that already has
+			// writing): inherit the colour/style of the writing to the RIGHT on the same line.
+			for (let w = Math.min(cursor.word, line.words.length); w < line.words.length; w += 1) {
+				const style = styleOf(line.words[w], 'first');
 				if (style) {
 					return style;
 				}
 			}
 		}
-		// Nothing on this line before the cursor — fall back to the last stroke on earlier lines.
+		// Nothing on this line at all — fall back to the last stroke on earlier lines.
 		for (let l = cursor.line - 1; l >= 0; l -= 1) {
 			const prevLine = session.doc.lines[l];
 			if (!prevLine) {
 				continue;
 			}
 			for (let w = prevLine.words.length - 1; w >= 0; w -= 1) {
-				const style = lastStyle(prevLine.words[w]);
+				const style = styleOf(prevLine.words[w], 'last');
 				if (style) {
 					return style;
 				}
@@ -1062,6 +1166,12 @@ function clamp(value: number, min: number, max: number): number {
 // Apple Pencil reports contact force in Touch.force (0..1); fall back to a mid value when absent.
 function touchForce(touch: Touch): number {
 	return touch.force && touch.force > 0 ? touch.force : 0.5;
+}
+
+// Apple Pencil contacts report touchType 'stylus'; finger/palm contacts report 'direct'. The
+// property is WebKit-only, so it's read defensively.
+function touchIsStylus(touch: Touch): boolean {
+	return (touch as { touchType?: string }).touchType === 'stylus';
 }
 
 function findTouch(list: TouchList, id: number): Touch | null {

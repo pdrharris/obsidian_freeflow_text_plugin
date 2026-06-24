@@ -146,6 +146,12 @@ export function eraseAtCursor(doc: InkDocument): InkCursor {
 		const prev = doc.lines[cursor.line - 1];
 		if (prev) {
 			const joinAt = prev.words.length;
+			// The joined line's words keep their own line-start x (near 0), which would land on top
+			// of the previous line's words — re-seat them after the previous line's last word.
+			const prevLast = prev.words[joinAt - 1];
+			const prevRight = prevLast ? (wordBounds(prevLast)?.maxX ?? 0) : 0;
+			const joinGap = doc.meta.lineHeight * PASTE_GAP_FACTOR;
+			placeRun(line.words, prevLast ? prevRight + joinGap : 0);
 			prev.words.push(...line.words);
 			doc.lines.splice(cursor.line, 1);
 			const next: InkCursor = { line: cursor.line - 1, word: joinAt };
