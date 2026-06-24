@@ -9,6 +9,7 @@ import {
 	InkPoint,
 	InkStroke,
 	InkWord,
+	MAX_INDENT_LEVEL,
 	clampCursor,
 	createEmptyDocument,
 	orderCursors,
@@ -19,13 +20,16 @@ import {
 import {
 	appendStrokeToCurrentWord,
 	applyStyleToSelection,
+	cursorLineIsBulleted,
 	deleteSelection,
 	eraseAtCursor,
 	extractSelection,
+	indentLines,
 	insertFragmentAtCursor,
 	insertWordAtCursor,
 	selectionStyleFlags,
 	splitLineAtCursor,
+	toggleBulletAtCursor,
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
@@ -395,6 +399,91 @@ test('selectionStyleFlags reports all-bold only when every stroke is bold', () =
 	eq(selectionStyleFlags(d, sel).count, 2);
 });
 
+// ---- bullets & indents ----------------------------------------------------
+
+test('parse round-trips bullet + indent and clamps the level', () => {
+	const d = mkDoc([W('a')]);
+	d.lines[0]!.bullet = true;
+	d.lines[0]!.indent = 2;
+	const back = parseInkDocument(serializeInkDocument(d));
+	eq(back.lines[0]?.bullet, true);
+	eq(back.lines[0]?.indent, 2);
+	const over = parseInkDocument(
+		JSON.stringify({
+			version: INK_DOC_VERSION,
+			meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+			lines: [{ id: 'l', words: [], indent: 99, bullet: true }],
+		}),
+	);
+	eq(over.lines[0]?.indent, MAX_INDENT_LEVEL, 'indent clamps to MAX_INDENT_LEVEL');
+});
+
+test('parse omits absent list fields (no bullet/indent on a plain line)', () => {
+	const back = parseInkDocument(serializeInkDocument(mkDoc([W('a')])));
+	eq(back.lines[0]?.bullet, undefined);
+	eq(back.lines[0]?.indent, undefined);
+});
+
+test('indentLines increases, clamps at the max, and outdent to 0 clears the field', () => {
+	const d = mkDoc([W('a')]);
+	d.meta.cursor = { line: 0, word: 0 };
+	indentLines(d, 1);
+	eq(d.lines[0]?.indent, 1);
+	for (let i = 0; i < 20; i += 1) {
+		indentLines(d, 1);
+	}
+	eq(d.lines[0]?.indent, MAX_INDENT_LEVEL, 'indent saturates at the max level');
+	for (let i = 0; i < 20; i += 1) {
+		indentLines(d, -1);
+	}
+	eq(d.lines[0]?.indent, undefined, 'outdent to 0 removes the field rather than storing 0');
+});
+
+test('toggleBulletAtCursor toggles the cursor line on then off', () => {
+	const d = mkDoc([W('a')]);
+	d.meta.cursor = { line: 0, word: 0 };
+	toggleBulletAtCursor(d);
+	eq(d.lines[0]?.bullet, true);
+	eq(cursorLineIsBulleted(d), true);
+	toggleBulletAtCursor(d);
+	eq(d.lines[0]?.bullet, undefined);
+	eq(cursorLineIsBulleted(d), false);
+});
+
+test('list ops span every line of an active selection; mixed bullets all turn on', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	d.lines[0]!.bullet = true; // line 0 already bulleted, line 1 not
+	d.meta.selection = { anchor: { line: 0, word: 0 }, focus: { line: 1, word: 1 } };
+	toggleBulletAtCursor(d);
+	eq(d.lines[0]?.bullet, true, 'a mixed selection becomes uniformly bulleted');
+	eq(d.lines[1]?.bullet, true);
+	indentLines(d, 1);
+	eq(d.lines[0]?.indent, 1);
+	eq(d.lines[1]?.indent, 1, 'indent applies to both selected lines');
+});
+
+test('splitLineAtCursor inherits indent + bullet onto the new line', () => {
+	const d = mkDoc([W('a'), W('b')]);
+	d.lines[0]!.bullet = true;
+	d.lines[0]!.indent = 2;
+	d.meta.cursor = { line: 0, word: 1 };
+	splitLineAtCursor(d);
+	eq(d.lines[1]?.bullet, true, 'new line continues the bulleted list');
+	eq(d.lines[1]?.indent, 2, 'new line keeps the same indent');
+});
+
+test('splitLineAtCursor on an empty bullet ends the list instead of adding a line', () => {
+	const d = mkDoc([]); // single empty line
+	d.lines[0]!.bullet = true;
+	d.lines[0]!.indent = 1;
+	d.meta.cursor = { line: 0, word: 0 };
+	const next = splitLineAtCursor(d);
+	eq(d.lines.length, 1, 'no new line is created');
+	eq(d.lines[0]?.bullet, undefined, 'the bullet is dropped (list terminated)');
+	eq(d.lines[0]?.indent, 1, 'indent is left intact');
+	eq(next, { line: 0, word: 0 });
+});
+
 // ---- velocity width -------------------------------------------------------
 
 test('velocityWidth attaches per-point widths; off leaves them undefined', () => {
@@ -479,6 +568,46 @@ test('rangeRects returns one rect per visual row for a same-line selection', () 
 	const rects = layout.rangeRects({ anchor: { line: 0, word: 0 }, focus: { line: 0, word: 2 } });
 	eq(rects.length, 1);
 	ok((rects[0]?.w ?? 0) > 0, 'selection rect should have width');
+});
+
+test('layout indents content and emits one bullet mark per bulleted line', () => {
+	const plain = layoutDocument(mkDoc([Wx('a', 0)]), layoutConfig);
+	const d = mkDoc([Wx('a', 0)]);
+	d.lines[0]!.bullet = true;
+	d.lines[0]!.indent = 1;
+	const listed = layoutDocument(d, layoutConfig);
+	eq(listed.bullets.length, 1, 'one bullet mark for the bulleted line');
+	ok(
+		(listed.words[0]?.x ?? 0) > (plain.words[0]?.x ?? 0),
+		'bulleted + indented content is pushed right of the plain line',
+	);
+	const bullet = listed.bullets[0]!;
+	ok(bullet.x < (listed.words[0]?.x ?? 0), 'the bullet sits left of the first word');
+	eq(plain.bullets.length, 0, 'a plain line emits no bullet mark');
+});
+
+test('a bulleted line still emits its bullet when it has no words', () => {
+	const d = mkDoc([]);
+	d.lines[0]!.bullet = true;
+	const layout = layoutDocument(d, layoutConfig);
+	eq(layout.bullets.length, 1, 'an empty bulleted line shows its bullet');
+});
+
+test('a wrapped bulleted line hangs its continuation under the first word, not the bullet', () => {
+	// Three wide words on one indented+bulleted line, forced to wrap by a narrow content width.
+	const d = mkDoc([Wx('a', 0), Wx('b', 300), Wx('c', 600)]);
+	d.lines[0]!.bullet = true;
+	d.lines[0]!.indent = 1;
+	const layout = layoutDocument(d, { ...layoutConfig, contentWidthCss: 200 });
+	const byRow = new Map<number, number>();
+	for (const w of layout.words) {
+		byRow.set(w.visualRow, Math.min(byRow.get(w.visualRow) ?? Infinity, w.x));
+	}
+	ok(byRow.size > 1, 'content should wrap to more than one visual row');
+	const firstWordX = layout.words.find((w) => w.word === 0)?.x ?? 0;
+	for (const [, left] of byRow) {
+		ok(Math.abs(left - firstWordX) < 1, 'every wrapped row starts at the content inset (hanging)');
+	}
 });
 
 test('preserves the drawn gap between words (absolute spacing)', () => {

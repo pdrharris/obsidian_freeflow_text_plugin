@@ -16,6 +16,7 @@ import {
 	cloneWord,
 	createEmptyLine,
 	createWordId,
+	MAX_INDENT_LEVEL,
 	orderCursors,
 	selectionIsEmpty,
 	shiftWordX,
@@ -106,21 +107,96 @@ export function appendStrokeToCurrentWord(doc: InkDocument, stroke: InkStroke): 
 	return true;
 }
 
-// Split the current line at the cursor (manual newline). Returns the new cursor.
+// Split the current line at the cursor (manual newline). Returns the new cursor. A new line
+// inherits the source line's list structure (indent + bullet) so lists continue automatically;
+// pressing newline on an EMPTY bulleted line instead ends the list (drops the bullet in place).
 export function splitLineAtCursor(doc: InkDocument): InkCursor {
 	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
 	const line = doc.lines[cursor.line];
 	if (!line) {
 		return cursor;
 	}
+	if (line.bullet && line.words.length === 0) {
+		delete line.bullet;
+		doc.meta.selection = null;
+		return cursor;
+	}
 	const tail = line.words.splice(cursor.word);
 	const newLine = createEmptyLine();
 	newLine.words = tail;
+	if (line.indent) {
+		newLine.indent = line.indent;
+	}
+	if (line.bullet) {
+		newLine.bullet = true;
+	}
 	doc.lines.splice(cursor.line + 1, 0, newLine);
 	const next: InkCursor = { line: cursor.line + 1, word: 0 };
 	doc.meta.cursor = next;
 	doc.meta.selection = null;
 	return next;
+}
+
+// The logical line range the list controls act on: the active selection's spanned lines, or the
+// single line under the cursor when there's no selection.
+function targetLineRange(doc: InkDocument): { from: number; to: number } {
+	const sel = doc.meta.selection;
+	if (sel && !selectionIsEmpty(sel)) {
+		const [start, end] = orderCursors(
+			clampCursorToDoc(doc, sel.anchor),
+			clampCursorToDoc(doc, sel.focus),
+		);
+		return { from: start.line, to: end.line };
+	}
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	return { from: cursor.line, to: cursor.line };
+}
+
+// Change the indent level of the target lines by `delta` (clamped to 0..MAX_INDENT_LEVEL).
+export function indentLines(doc: InkDocument, delta: number): void {
+	const { from, to } = targetLineRange(doc);
+	for (let i = from; i <= to; i += 1) {
+		const line = doc.lines[i];
+		if (!line) {
+			continue;
+		}
+		const next = Math.max(0, Math.min(MAX_INDENT_LEVEL, (line.indent ?? 0) + delta));
+		if (next === 0) {
+			delete line.indent;
+		} else {
+			line.indent = next;
+		}
+	}
+}
+
+// Toggle bullets on the target lines: turn them all OFF only when every target line is already
+// bulleted, otherwise turn them all ON (so a mixed selection becomes a uniform bulleted list).
+export function toggleBulletAtCursor(doc: InkDocument): void {
+	const { from, to } = targetLineRange(doc);
+	let allBulleted = true;
+	for (let i = from; i <= to; i += 1) {
+		if (!doc.lines[i]?.bullet) {
+			allBulleted = false;
+			break;
+		}
+	}
+	for (let i = from; i <= to; i += 1) {
+		const line = doc.lines[i];
+		if (!line) {
+			continue;
+		}
+		if (allBulleted) {
+			delete line.bullet;
+		} else {
+			line.bullet = true;
+		}
+	}
+}
+
+// Whether the line under the cursor is currently a bullet (for reflecting the toolbar button state).
+export function cursorLineIsBulleted(doc: InkDocument): boolean {
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	return doc.lines[cursor.line]?.bullet === true;
 }
 
 // Erase: delete the selection if present; otherwise delete the word before the cursor, or

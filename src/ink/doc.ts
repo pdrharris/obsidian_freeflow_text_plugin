@@ -39,7 +39,13 @@ export interface InkWord {
 export interface InkLine {
 	id: string;
 	words: InkWord[];
+	// Optional list structure. Device-independent (no pixels): the layout engine turns these into
+	// a left inset and a bullet glyph at render time. Absent = a normal flush-left line.
+	indent?: number; // indent level, integer 0..MAX_INDENT_LEVEL
+	bullet?: boolean; // draw a list bullet at the line start
 }
+
+export const MAX_INDENT_LEVEL = 8;
 
 // A logical insertion point: before `word` on line `line`. `word` ranges 0..words.length
 // (length == "after the last word"). This is the single source of truth for the caret.
@@ -287,10 +293,17 @@ function normalizeLine(value: unknown): InkLine | null {
 	const words = maybe.words
 		.map((word) => normalizeWord(word))
 		.filter((word): word is InkWord => word !== null);
-	return {
+	const line: InkLine = {
 		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createLineId(),
 		words,
 	};
+	if (typeof maybe.indent === 'number' && Number.isFinite(maybe.indent) && maybe.indent > 0) {
+		line.indent = Math.min(MAX_INDENT_LEVEL, Math.floor(maybe.indent));
+	}
+	if (maybe.bullet === true) {
+		line.bullet = true;
+	}
+	return line;
 }
 
 function normalizeWord(value: unknown): InkWord | null {

@@ -21,6 +21,7 @@ import {
 	InkSelection,
 	InkStroke,
 	InkWord,
+	MAX_INDENT_LEVEL,
 	orderCursors,
 	wordBounds,
 } from './doc';
@@ -28,6 +29,13 @@ import {
 const BASELINE_RATIO_FROM_TOP = 2 / 3;
 const DEFAULT_MARGIN_X = 16;
 const FALLBACK_SOURCE_HEIGHT_RATIO = 0.28;
+// List geometry, all expressed as fractions of the row height so they track the glyph scale in
+// both the small inline view and the large drawer strip.
+const INDENT_STEP_RATIO = 1.1; // left inset added per indent level
+const BULLET_RESERVE_RATIO = 0.85; // gap reserved between the bullet and the line's first word
+const BULLET_RADIUS_RATIO = 0.085; // bullet dot radius
+const BULLET_RISE_RATIO = 0.2; // how far above the baseline the bullet centre sits
+const DEFAULT_BULLET_COLOR = '#111827';
 
 export interface LayoutConfig {
 	// Soft-wrap width in CSS px. Pass Number.POSITIVE_INFINITY to disable wrapping (drawer).
@@ -98,8 +106,18 @@ export interface HighlightRect {
 	h: number;
 }
 
+// A list bullet to paint at a line start (css px). Emitted once per bulleted logical line, on its
+// first visual row; the renderer just fills a dot of `radius` at (x, y) in `color`.
+export interface BulletMark {
+	x: number;
+	y: number;
+	radius: number;
+	color: string;
+}
+
 export interface LayoutResult {
 	words: LaidWord[];
+	bullets: BulletMark[];
 	width: number; // css px (wrap width if finite, else content extent)
 	height: number; // css px
 	rowHeight: number; // effective visual line height, css px
@@ -166,9 +184,14 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 	const cssPerSource = (rowHeight * strokeFillScale) / (sourceLineHeight * sourceHeightRatio);
 	const baselineOffset = rowHeight * BASELINE_RATIO_FROM_TOP;
 	const marginX = config.marginXCss ?? DEFAULT_MARGIN_X;
-	const availableWidth = Math.max(20, config.contentWidthCss - marginX * 2);
+	const indentStep = rowHeight * INDENT_STEP_RATIO;
+	const bulletReserve = rowHeight * BULLET_RESERVE_RATIO;
 
 	const laidWords: LaidWord[] = [];
+	const bullets: BulletMark[] = [];
+	// The left inset (css px) of each logical line's content, for caret placement on empty/indented
+	// lines. Continuation (wrapped) rows hang to this same inset, so they align under the first word.
+	const lineInsets = new Map<number, number>();
 	const rows: RowInfo[] = [];
 	let visualRow = 0;
 	let maxRight = marginX;
@@ -187,10 +210,25 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 		if (!line) {
 			continue;
 		}
+		// List structure → a left inset. The bullet (if any) sits at the indent stop; the line's
+		// content (and every wrapped continuation row) starts a fixed gap to its right, so wrapped
+		// rows hang under the first word rather than under the bullet.
+		const indentLevel = clamp(line.indent ?? 0, 0, MAX_INDENT_LEVEL);
+		const hasBullet = line.bullet === true;
+		const indentCss = marginX + indentLevel * indentStep;
+		const contentLeft = indentCss + (hasBullet ? bulletReserve : 0);
+		lineInsets.set(lineIndex, contentLeft);
+		const availableWidth = Number.isFinite(config.contentWidthCss)
+			? Math.max(20, config.contentWidthCss - contentLeft - marginX)
+			: Number.POSITIVE_INFINITY;
+		const firstVisualRow = visualRow;
+		let lineColor = DEFAULT_BULLET_COLOR;
+		let lineColorFound = false;
+
 		// Words are placed at their LINE-ABSOLUTE x so drawn whitespace is preserved exactly.
-		// `rowOriginSource` is the source-x that maps to the left margin of the current row
+		// `rowOriginSource` is the source-x that maps to the content-left of the current row
 		// (the first word of the line/row); on wrap it resets so the wrapped word starts at the
-		// margin while keeping the within-row spacing of the words that follow it. When the caller
+		// inset while keeping the within-row spacing of the words that follow it. When the caller
 		// pins it (drawer WYSIWYG), the first row keeps that fixed origin instead of re-flushing.
 		let rowOriginSource: number | null = config.rowOriginSource ?? null;
 		let rowHasContent = false;
@@ -209,14 +247,21 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 			if (rowOriginSource === null) {
 				rowOriginSource = bounds.minX;
 			}
-			let leftCss = marginX + (bounds.minX - rowOriginSource) * cssPerSource;
+			let leftCss = contentLeft + (bounds.minX - rowOriginSource) * cssPerSource;
 
-			if (rowHasContent && leftCss - marginX + wordWidth > availableWidth) {
+			if (rowHasContent && leftCss - contentLeft + wordWidth > availableWidth) {
 				visualRow += 1;
 				rowOriginSource = bounds.minX;
 				rowHasContent = false;
 				ensureRow(lineIndex, visualRow);
-				leftCss = marginX;
+				leftCss = contentLeft;
+			}
+			if (!lineColorFound) {
+				const firstStroke = word.strokes[0];
+				if (firstStroke) {
+					lineColor = firstStroke.color;
+					lineColorFound = true;
+				}
 			}
 
 			const baselineY = visualRow * rowHeight + baselineOffset;
@@ -245,6 +290,17 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 			}
 		}
 
+		if (hasBullet) {
+			// One dot per bulleted line, on its first visual row, centred in the reserved gap and
+			// sitting just above the baseline so it reads like a mid-line list marker.
+			bullets.push({
+				x: indentCss + bulletReserve * 0.4,
+				y: firstVisualRow * rowHeight + baselineOffset - rowHeight * BULLET_RISE_RATIO,
+				radius: Math.max(1.2, rowHeight * BULLET_RADIUS_RATIO),
+				color: lineColor,
+			});
+		}
+
 		visualRow += 1; // next logical line starts on a fresh row
 	}
 
@@ -258,6 +314,7 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 
 	return {
 		words: laidWords,
+		bullets,
 		width,
 		height,
 		rowHeight,
@@ -265,7 +322,8 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 		cssPerSource,
 		marginX,
 		cursorFromPoint: (x, y) => cursorFromPoint(rows, rowHeight, x, y),
-		caretRect: (cursor) => caretRect(laidWords, rows, rowHeight, marginX, baselineOffset, cursor),
+		caretRect: (cursor) =>
+			caretRect(laidWords, rows, rowHeight, lineInsets, marginX, baselineOffset, cursor),
 		rangeRects: (selection) => rangeRects(laidWords, rowHeight, selection),
 	};
 }
@@ -483,11 +541,13 @@ function caretRect(
 	laidWords: LaidWord[],
 	rows: RowInfo[],
 	rowHeight: number,
+	lineInsets: Map<number, number>,
 	marginX: number,
 	baselineOffset: number,
 	cursor: InkCursor,
 ): CaretRect {
 	const caretHeight = Math.max(12, rowHeight * 0.8);
+	const inset = lineInsets.get(cursor.line) ?? marginX;
 	const onLine = laidWords.filter((w) => w.line === cursor.line);
 
 	const fromRow = (visualRow: number, x: number): CaretRect => {
@@ -497,7 +557,7 @@ function caretRect(
 
 	if (onLine.length === 0) {
 		const row = rows.find((r) => r.line === cursor.line);
-		return fromRow(row ? row.visualRow : 0, marginX);
+		return fromRow(row ? row.visualRow : 0, inset);
 	}
 
 	const before = onLine.find((w) => w.word === cursor.word);
@@ -506,7 +566,7 @@ function caretRect(
 	}
 	const last = onLine[onLine.length - 1];
 	if (!last) {
-		return fromRow(0, marginX);
+		return fromRow(0, inset);
 	}
 	return fromRow(last.visualRow, last.x + last.width);
 }

@@ -134,6 +134,13 @@ export function drawInlineCanvas(
 		}
 	}
 
+	for (const bullet of layout.bullets) {
+		ctx.fillStyle = bullet.color;
+		ctx.beginPath();
+		ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
+		ctx.fill();
+	}
+
 	const widthScale = layout.cssPerSource;
 	for (const word of layout.words) {
 		const underline = wordUnderline(word);

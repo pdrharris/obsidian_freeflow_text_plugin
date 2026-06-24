@@ -39,6 +39,10 @@ The document is a **flowing-text logical tree**, not a flat coordinate soup:
 
 - `InkDocument.lines: InkLine[]` — paragraphs/lines (line breaks are structure, not markers)
 - `InkLine.words: InkWord[]` — a line is an ordered list of words
+- `InkLine.indent?: number` / `InkLine.bullet?: boolean` — optional **list structure**: an indent
+  level (0..`MAX_INDENT_LEVEL`) and whether to draw a list bullet. Device-independent (no pixels);
+  `layout.ts` turns them into a left inset + a `BulletMark`. Continuation (wrapped) rows hang to the
+  same inset so they align under the first word, not the bullet.
 - `InkWord.strokes: InkStroke[]` — a word is a **rigid cluster** of pen strokes
 - `InkStroke.points: InkPoint[]` — in a word-local space; **point Y is baseline-relative**
 
@@ -65,7 +69,12 @@ Every edit is a **tree splice** followed by a relayout — there is no coordinat
 `insertWordAtCursor`, `appendStrokeToCurrentWord`, `splitLineAtCursor` (newline),
 `eraseAtCursor`, `deleteSelection`. Copy/cut/paste go through `extractSelection` (selection →
 `InkFragment`) and `insertFragmentAtCursor`, with the fragment held in the process-wide in-app
-clipboard (`clipboard.ts`) so it survives across blocks/notes within a session.
+clipboard (`clipboard.ts`) so it survives across blocks/notes within a session. **List structure**:
+`indentLines(doc, ±1)` and `toggleBulletAtCursor` act on the cursor's line, or every line a
+selection spans; `splitLineAtCursor` (newline) inherits the source line's indent+bullet so lists
+continue, and newline on an *empty* bullet ends the list (drops the bullet in place). The drawer's
+toolbar exposes these as •/⇤/⇥ buttons; the drawer strip itself doesn't render the indent/bullet (it's
+a single-line capture surface) — the structure shows in the inline block.
 
 ### Module responsibilities
 

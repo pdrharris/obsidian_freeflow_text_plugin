@@ -20,9 +20,12 @@ import {
 } from './doc';
 import { getClipboard } from './clipboard';
 import {
+	cursorLineIsBulleted,
 	eraseAtCursor,
+	indentLines,
 	insertFragmentAtCursor,
 	splitLineAtCursor,
+	toggleBulletAtCursor,
 	wordFromStroke,
 } from './edit';
 import { estimateSourceStrokeHeightRatio, LayoutResult, layoutDocument, smoothPolyline } from './layout';
@@ -108,6 +111,9 @@ export class InkDrawer {
 	private readonly newLineButtonEl: HTMLButtonElement;
 	private readonly boldButtonEl: HTMLButtonElement;
 	private readonly underlineButtonEl: HTMLButtonElement;
+	private readonly bulletButtonEl: HTMLButtonElement;
+	private readonly indentButtonEl: HTMLButtonElement;
+	private readonly outdentButtonEl: HTMLButtonElement;
 	private readonly colorButtonEl: HTMLButtonElement;
 	private readonly colorSwatchEl: HTMLSpanElement;
 	private readonly closeButtonEl: HTMLButtonElement;
@@ -172,6 +178,9 @@ export class InkDrawer {
 		// last so they sit at the far right, nearest the writing edge.
 		this.boldButtonEl = makeIconButton('B', 'Bold');
 		this.underlineButtonEl = makeIconButton('U', 'Underline');
+		this.bulletButtonEl = makeIconButton('•', 'Bullet list');
+		this.outdentButtonEl = makeIconButton('⇤', 'Outdent');
+		this.indentButtonEl = makeIconButton('⇥', 'Indent');
 
 		// Colour button shows the current pen colour as a swatch rather than an icon.
 		this.colorButtonEl = activeDocument.createElement('button');
@@ -540,6 +549,9 @@ export class InkDrawer {
 		this.newLineButtonEl.addEventListener('click', this.onNewLine);
 		this.boldButtonEl.addEventListener('click', this.onToggleBold);
 		this.underlineButtonEl.addEventListener('click', this.onToggleUnderline);
+		this.bulletButtonEl.addEventListener('click', this.onToggleBullet);
+		this.outdentButtonEl.addEventListener('click', this.onOutdent);
+		this.indentButtonEl.addEventListener('click', this.onIndent);
 		this.colorButtonEl.addEventListener('click', this.onColorButton);
 		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
@@ -553,6 +565,9 @@ export class InkDrawer {
 		this.bindButtonTouch(this.newLineButtonEl, this.onNewLine);
 		this.bindButtonTouch(this.boldButtonEl, this.onToggleBold);
 		this.bindButtonTouch(this.underlineButtonEl, this.onToggleUnderline);
+		this.bindButtonTouch(this.bulletButtonEl, this.onToggleBullet);
+		this.bindButtonTouch(this.outdentButtonEl, this.onOutdent);
+		this.bindButtonTouch(this.indentButtonEl, this.onIndent);
 		this.bindButtonTouch(this.colorButtonEl, this.onColorButton);
 		this.bindButtonTouch(this.pasteButtonEl, this.onPaste);
 		this.bindButtonTouch(this.closeButtonEl, this.onCloseClick);
@@ -589,6 +604,9 @@ export class InkDrawer {
 		this.newLineButtonEl.removeEventListener('click', this.onNewLine);
 		this.boldButtonEl.removeEventListener('click', this.onToggleBold);
 		this.underlineButtonEl.removeEventListener('click', this.onToggleUnderline);
+		this.bulletButtonEl.removeEventListener('click', this.onToggleBullet);
+		this.outdentButtonEl.removeEventListener('click', this.onOutdent);
+		this.indentButtonEl.removeEventListener('click', this.onIndent);
 		this.colorButtonEl.removeEventListener('click', this.onColorButton);
 		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
@@ -995,6 +1013,36 @@ export class InkDrawer {
 		this.requestDraw();
 	};
 
+	// List structure acts on the cursor's line (the drawer edits one line at a time). The drawer
+	// strip itself doesn't render the bullet/indent — it's a focused capture surface — so these
+	// persist the change and update the button state; the structure shows in the inline block.
+	private onToggleBullet = (): void => {
+		const session = this.session;
+		if (!session) {
+			return;
+		}
+		toggleBulletAtCursor(session.doc);
+		session.onContentChanged();
+		this.updateStyleButtons();
+	};
+
+	private onIndent = (): void => {
+		this.applyIndent(1);
+	};
+
+	private onOutdent = (): void => {
+		this.applyIndent(-1);
+	};
+
+	private applyIndent(delta: number): void {
+		const session = this.session;
+		if (!session) {
+			return;
+		}
+		indentLines(session.doc, delta);
+		session.onContentChanged();
+	}
+
 	private onColorButton = (): void => {
 		if (this.colorPopup) {
 			this.colorPopup.close();
@@ -1083,6 +1131,10 @@ export class InkDrawer {
 	private updateStyleButtons(): void {
 		this.boldButtonEl.classList.toggle('is-active', this.penBold);
 		this.underlineButtonEl.classList.toggle('is-active', this.penUnderline);
+		this.bulletButtonEl.classList.toggle(
+			'is-active',
+			this.session ? cursorLineIsBulleted(this.session.doc) : false,
+		);
 		this.colorSwatchEl.style.backgroundColor = this.penColor;
 	}
 
