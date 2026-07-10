@@ -17,15 +17,37 @@ build`) **also deploys** `main.js`, `manifest.json`, and `styles.css` into the l
 `<Vault>/.obsidian/plugins/obsidian_freeflow_text_plugin/` (see the `deploy-to-vault` esbuild
 plugin in `esbuild.config.mjs`; override the destinations with the `OBSIDIAN_PLUGIN_DIR` env var —
 a single path, or several separated by commas — or set it empty to skip). The default destinations
-are three vaults: `../../Documents/Obsidian/Notes`, `../../Documents/Obsidian/Work`, and
-`../../Documents/Obsidian/Theology` (each `+ /.obsidian/plugins/obsidian_freeflow_text_plugin`).
-After a build just reload Obsidian (Ctrl+R) to test. The vault copy carries only those runtime
-files (plus `data.json` settings) and is committed with each notes repo, so the plugin syncs to
-mobile through those repos. The pen UI can't be driven from the CLI; interactive write/erase/cursor
-tests require a human in Obsidian.
+are the Remotely Save vault copies in the user's personal OneDrive:
+`~/Library/CloudStorage/OneDrive-Personal/Apps/remotely-save/{Notes,Work,Theology}` (each
+`+ /.obsidian/plugins/obsidian_freeflow_text_plugin`). A vault folder that doesn't exist yet is
+skipped, not created (as of 2026-07 `Theology` hasn't been synced by Remotely Save yet). The
+OneDrive client uploads the copies automatically while it's running (`pgrep OneDrive` to check);
+there is no CLI to force a sync — if it seems stuck, restart it with
+`killall OneDrive && open -a OneDrive`. Devices then pull the update via the Remotely Save plugin
+inside Obsidian. **When shipping a plugin change, run `npm run build` (which deploys) as well as
+committing.** Obsidian is not installed on this Mac — the plugin runs on the user's other devices
+(e.g. iPad), so the pen UI can't be driven from the CLI; interactive write/erase/cursor tests
+require a human in Obsidian, after a sync round-trip.
 
 tsconfig is strict with `noUncheckedIndexedAccess` — array/index access is `T | undefined`, so
 guard before use. Note `console.log` is an eslint error via `obsidianmd/rule-custom-message`.
+
+**Tests**: the whole suite is one file, `tests/ink.test.ts`, using a tiny homegrown `test(name,
+fn)` harness (no framework, no filter flag) — `tests/run-tests.mjs` bundles it with esbuild and
+runs it in Node; it exits non-zero on any failure. There is no way to run a single test — the
+full suite is fast enough to always run whole. Tests import from `src/ink/` (`doc`, `edit`,
+`layout`) directly and must stay free of DOM/Obsidian imports since they run in plain Node.
+
+**Committed artifacts**: unlike the upstream sample-plugin convention (see `AGENTS.md`, which is
+the generic Obsidian boilerplate), this repo intentionally commits `main.js`, `manifest.json`,
+and `styles.css` at the root — the vaults consume them via the deploy step below. Don't gitignore
+them; do rebuild before committing so `main.js` matches the source.
+
+Before releasing changes that touch input/pointer/touch code, run through
+`docs/regression-checklist.md` (manual iPad/Pencil checks + build/lint). Releases follow the
+standard Obsidian flow: bump `minAppVersion` in `manifest.json` if needed, then `npm version
+patch|minor|major` (updates `manifest.json` + `versions.json` via `version-bump.mjs`), and tag
+the GitHub release with the bare version number (no `v` prefix).
 
 ## Architecture
 

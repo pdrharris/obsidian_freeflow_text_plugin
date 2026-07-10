@@ -2,6 +2,7 @@ import esbuild from 'esbuild';
 import process from 'process';
 import { builtinModules } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const banner = `/*
@@ -13,30 +14,45 @@ if you want to view the source, please visit the github repository of this plugi
 const prod = process.argv[2] === 'production';
 
 // Deploy the built runtime files into the live Obsidian vaults so they sync with
-// the notes (single-repo workflow). Override with OBSIDIAN_PLUGIN_DIR (a single
-// path, or several separated by commas) if the vaults live elsewhere. Set it to
-// an empty string to skip deployment.
+// the notes. The vaults are the Remotely Save copies in the user's personal
+// OneDrive; the OneDrive client uploads the copied files automatically and
+// Remotely Save pulls them onto each device. Override with OBSIDIAN_PLUGIN_DIR
+// (a single path, or several separated by commas) if the vaults live elsewhere.
+// Set it to an empty string to skip deployment.
 const pluginSubpath = '.obsidian/plugins/obsidian_freeflow_text_plugin';
-const defaultDeployDirs = [
-	'../../Documents/Obsidian/Notes',
-	'../../Documents/Obsidian/Work',
-	'../../Documents/Obsidian/Theology',
-].map((vault) => path.resolve(vault, pluginSubpath));
+const oneDriveVaultRoot = path.join(
+	os.homedir(),
+	'Library/CloudStorage/OneDrive-Personal/Apps/remotely-save',
+);
+// A default vault that doesn't exist yet is skipped rather than created, so a
+// build never plants a phantom vault folder in OneDrive; the vault starts
+// receiving copies as soon as Remotely Save creates it.
+const defaultVaultDirs = ['Notes', 'Work', 'Theology'].map((name) =>
+	path.join(oneDriveVaultRoot, name),
+);
 
-const deployDirs =
+const deployTargets =
 	process.env.OBSIDIAN_PLUGIN_DIR !== undefined
 		? process.env.OBSIDIAN_PLUGIN_DIR.split(',')
 				.map((dir) => dir.trim())
 				.filter((dir) => dir.length > 0)
-		: defaultDeployDirs;
+				.map((dir) => ({ deployDir: dir, vaultDir: null }))
+		: defaultVaultDirs.map((vaultDir) => ({
+				deployDir: path.join(vaultDir, pluginSubpath),
+				vaultDir,
+			}));
 
 const deployPlugin = {
 	name: 'deploy-to-vault',
 	setup(build) {
 		build.onEnd((result) => {
 			if (result.errors.length) return;
-			for (const deployDir of deployDirs) {
+			for (const { deployDir, vaultDir } of deployTargets) {
 				try {
+					if (vaultDir !== null && !fs.existsSync(vaultDir)) {
+						console.info(`[deploy] skipped ${vaultDir} (vault not found)`);
+						continue;
+					}
 					fs.mkdirSync(deployDir, { recursive: true });
 					for (const file of ['main.js', 'manifest.json', 'styles.css']) {
 						if (fs.existsSync(file)) {
