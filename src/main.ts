@@ -1,5 +1,6 @@
-import { Editor, MarkdownView, Modal, Notice, Platform, Plugin } from 'obsidian';
+import { Editor, MarkdownView, Modal, Notice, Platform, Plugin, editorLivePreviewField } from 'obsidian';
 import { INK_CODE_BLOCK_LANGUAGE } from './ink/doc';
+import { inkBlockGuard } from './ink/guard';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import { StrokeNib } from './ink/render';
@@ -31,6 +32,11 @@ export default class FreeFlowInkPlugin extends Plugin {
 		await this.loadSettings();
 		this.ensureRuntimeStyle();
 		this.applyRuntimeStyles();
+
+		// Live preview only: source mode must stay editable so the raw JSON remains inspectable.
+		this.registerEditorExtension(
+			inkBlockGuard((state) => state.field(editorLivePreviewField, false) === true),
+		);
 
 		this.drawer = new InkDrawer(() => this.getDrawerRuntimeConfig());
 		this.addCommand({

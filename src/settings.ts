@@ -155,9 +155,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(30, 100, 1)
-					.setValue(lineWidthPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(lineWidthPercent)					.onChange(async (value) => {
 						this.plugin.settings.lineWidthScale = value / 100;
 						lineWidthValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -180,9 +178,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(80, 250, 5)
-					.setValue(wordGapPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(wordGapPercent)					.onChange(async (value) => {
 						this.plugin.settings.wordGapScale = value / 100;
 						wordGapValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -205,9 +201,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(10, 400, 1)
-					.setValue(renderLineSpacingPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(renderLineSpacingPercent)					.onChange(async (value) => {
 						this.plugin.settings.renderLineHeightScale = value / 100;
 						renderLineSpacingValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -231,9 +225,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(40, 160, 1)
-					.setValue(renderStrokeFillPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(renderStrokeFillPercent)					.onChange(async (value) => {
 						this.plugin.settings.renderStrokeFillScale = value / 100;
 						renderStrokeFillValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -255,9 +247,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(30, 150, 1)
-					.setValue(drawerHeightPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(drawerHeightPercent)					.onChange(async (value) => {
 						this.plugin.settings.drawerHeightScale = value / 100;
 						drawerHeightValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -289,9 +279,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(50, 300, 5)
-					.setValue(strokeWeightPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(strokeWeightPercent)					.onChange(async (value) => {
 						this.plugin.settings.strokeWeightScale = value / 100;
 						strokeWeightValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -339,9 +327,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 100, 5)
-					.setValue(Math.round(this.plugin.settings.handwritingSmoothing * 100))
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(Math.round(this.plugin.settings.handwritingSmoothing * 100))					.onChange(async (value) => {
 						this.plugin.settings.handwritingSmoothing = value / 100;
 						smoothingValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -390,9 +376,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(-90, 90, 1)
-					.setValue(Math.round(this.plugin.settings.nibAngle))
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(Math.round(this.plugin.settings.nibAngle))					.onChange(async (value) => {
 						this.plugin.settings.nibAngle = value;
 						nibAngleValueEl.setText(`${value}°`);
 						await this.plugin.saveSettings();
@@ -406,9 +390,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 100, 5)
-					.setValue(Math.round(this.plugin.settings.nibContrast * 100))
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(Math.round(this.plugin.settings.nibContrast * 100))					.onChange(async (value) => {
 						this.plugin.settings.nibContrast = value / 100;
 						nibContrastValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -455,9 +437,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(500, 5000, 100)
-					.setValue(this.plugin.settings.idleAdvanceMs)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.idleAdvanceMs)					.onChange(async (value) => {
 						this.plugin.settings.idleAdvanceMs = value;
 						idleAdvanceValueEl.setText(`${value} ms`);
 						await this.plugin.saveSettings();
@@ -474,9 +454,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 1200, 25)
-					.setValue(this.plugin.settings.releaseAdvanceDelayMs)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.releaseAdvanceDelayMs)					.onChange(async (value) => {
 						this.plugin.settings.releaseAdvanceDelayMs = value;
 						releaseAdvanceDelayValueEl.setText(`${value} ms`);
 						await this.plugin.saveSettings();
@@ -492,9 +470,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(50, 95, 1)
-					.setValue(this.plugin.settings.advanceLinePosition)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.advanceLinePosition)					.onChange(async (value) => {
 						this.plugin.settings.advanceLinePosition = value;
 						advanceLineValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -526,9 +502,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(200, 12000, 100)
-					.setValue(this.plugin.settings.softBlockLimitKb)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.softBlockLimitKb)					.onChange(async (value) => {
 						this.plugin.settings.softBlockLimitKb = value;
 						if (this.plugin.settings.hardBlockLimitKb <= value) {
 							this.plugin.settings.hardBlockLimitKb = Math.min(16000, value + 256);
@@ -549,9 +523,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(512, 16000, 256)
-					.setValue(this.plugin.settings.hardBlockLimitKb)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.hardBlockLimitKb)					.onChange(async (value) => {
 						this.plugin.settings.hardBlockLimitKb = value;
 						if (this.plugin.settings.softBlockLimitKb >= value) {
 							this.plugin.settings.softBlockLimitKb = Math.max(200, value - 256);

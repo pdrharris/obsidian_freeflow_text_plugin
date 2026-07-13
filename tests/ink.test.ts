@@ -33,6 +33,8 @@ import {
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
+import { Text } from '@codemirror/state';
+import { editViolatesInkBlock, inkBlockAt } from '../src/ink/guard';
 
 let passed = 0;
 let failed = 0;
@@ -617,6 +619,87 @@ test('preserves the drawn gap between words (absolute spacing)', () => {
 	const nearGap = (near.words[1]?.x ?? 0) - (near.words[0]?.x ?? 0);
 	const farGap = (far.words[1]?.x ?? 0) - (far.words[0]?.x ?? 0);
 	ok(farGap > nearGap * 2, 'a larger drawn gap must produce a larger laid-out gap');
+});
+
+// ---- guard.ts --------------------------------------------------------------
+
+// Note layout: 1 text / 2 opener / 3 JSON body / 4 closer / 5 text.
+const guardNote = Text.of([
+	'Some text above',
+	'```fii-ink',
+	'{"version":2,"lines":[]}',
+	'```',
+	'Text below',
+]);
+
+test('inkBlockAt spans the fences and answers null outside', () => {
+	const block = inkBlockAt(guardNote, guardNote.line(3).from + 2);
+	eq(block, { from: guardNote.line(2).from, to: guardNote.line(4).to });
+	eq(inkBlockAt(guardNote, guardNote.line(2).from), block, 'opener line is inside');
+	eq(inkBlockAt(guardNote, guardNote.line(4).to), block, 'closer line end is inside');
+	eq(inkBlockAt(guardNote, guardNote.line(1).from), null, 'text above is outside');
+	eq(inkBlockAt(guardNote, guardNote.line(5).from), null, 'text below is outside');
+});
+
+test('an unclosed ink block is protected to the end of the note', () => {
+	const open = Text.of(['```fii-ink', '{"version":2}', 'trailing']);
+	const block = inkBlockAt(open, open.length);
+	eq(block, { from: 0, to: open.length });
+});
+
+test('backspace merging the line below into the closing fence is a violation', () => {
+	const closerEnd = guardNote.line(4).to;
+	ok(
+		editViolatesInkBlock(guardNote, closerEnd, guardNote.line(5).from, ''),
+		'deleting the newline after the closer must be blocked',
+	);
+});
+
+test('forward-delete merging the opener into the line above is a violation', () => {
+	ok(
+		editViolatesInkBlock(guardNote, guardNote.line(1).to, guardNote.line(2).from, ''),
+		'deleting the newline before the opener must be blocked',
+	);
+});
+
+test('typing inside the JSON body is a violation', () => {
+	ok(editViolatesInkBlock(guardNote, guardNote.line(3).from + 3, guardNote.line(3).from + 3, 'x'));
+	ok(
+		editViolatesInkBlock(guardNote, guardNote.line(3).from, guardNote.line(3).to, 'oops'),
+		'replacing the body must be blocked',
+	);
+});
+
+test('deleting the whole block (or more) is allowed', () => {
+	ok(!editViolatesInkBlock(guardNote, guardNote.line(2).from, guardNote.line(4).to, ''));
+	ok(
+		!editViolatesInkBlock(guardNote, guardNote.line(1).from, guardNote.line(5).to, ''),
+		'a selection swallowing the block whole is a legitimate delete',
+	);
+});
+
+test('boundary insertions are allowed only when they keep the fences intact', () => {
+	const from = guardNote.line(2).from;
+	const to = guardNote.line(4).to;
+	ok(!editViolatesInkBlock(guardNote, from, from, '\n'), 'Enter above the opener is fine');
+	ok(editViolatesInkBlock(guardNote, from, from, 'x'), 'a stray char breaks the opener fence');
+	ok(!editViolatesInkBlock(guardNote, to, to, '\nnew line'), 'a new line after the closer is fine');
+	ok(editViolatesInkBlock(guardNote, to, to, 'x'), 'a stray char breaks the closer fence');
+});
+
+test('ordinary edits elsewhere are untouched by the guard', () => {
+	ok(!editViolatesInkBlock(guardNote, guardNote.line(5).from + 2, guardNote.line(5).from + 2, 'x'));
+	const plainNote = Text.of(['no blocks here', 'just prose']);
+	ok(!editViolatesInkBlock(plainNote, 3, 5, 'y'));
+	const jsNote = Text.of(['```js', 'const a = 1;', '```', 'after']);
+	ok(
+		!editViolatesInkBlock(jsNote, jsNote.line(2).from + 1, jsNote.line(2).from + 1, 'z'),
+		'other code blocks stay editable',
+	);
+	ok(
+		!editViolatesInkBlock(jsNote, jsNote.line(3).to, jsNote.line(4).from, ''),
+		'backspace below a non-ink block stays allowed',
+	);
 });
 
 // ---- report ---------------------------------------------------------------
