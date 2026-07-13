@@ -752,6 +752,28 @@ export class InkBlockRegistry {
 			})();
 		};
 
+		// Never let pointer/click events bubble out of the block into CodeMirror: a click that
+		// reaches the editor places the text cursor inside the fii-ink source range, and live
+		// preview then unfolds the widget into the raw JSON, where a stray keystroke can corrupt
+		// the whole block. Bubble phase, so the block's own handlers (canvas, buttons) run first;
+		// the colour popup's outside-click dismiss still works (document capture listener).
+		const editorSuppressedEvents = [
+			'pointerdown',
+			'pointerup',
+			'mousedown',
+			'mouseup',
+			'click',
+			'dblclick',
+			'touchstart',
+			'touchend',
+		] as const;
+		const stopEditorPropagation = (event: Event): void => {
+			event.stopPropagation();
+		};
+		for (const type of editorSuppressedEvents) {
+			containerEl.addEventListener(type, stopEditorPropagation);
+		}
+
 		canvasEl.addEventListener('click', onCanvasClick);
 		canvasEl.addEventListener('dblclick', onCanvasDoubleClick);
 		canvasEl.addEventListener('keydown', onCanvasKeyDown);
@@ -791,6 +813,9 @@ export class InkBlockRegistry {
 					isDisposed = true;
 					inlineRefreshers.delete(renderInline);
 					resizeObserver.disconnect();
+					for (const type of editorSuppressedEvents) {
+						containerEl.removeEventListener(type, stopEditorPropagation);
+					}
 					canvasEl.removeEventListener('click', onCanvasClick);
 					canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
 					canvasEl.removeEventListener('keydown', onCanvasKeyDown);

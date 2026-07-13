@@ -27,6 +27,13 @@
 	overflow: visible;
 }
 
+/* Never expose the raw fii-ink JSON in live preview: hide Obsidian's hover "edit block"
+   button on ink widgets (clicking it swaps the widget for the editable source, where one
+   stray keystroke can corrupt the block). Source mode remains the debug escape hatch. */
+.cm-embed-block:has(.freeflow-ink-block) .edit-block-button {
+	display: none;
+}
+
 /* Per-block width drag handle on the right edge. */
 .freeflow-ink-resize-handle {
 	position: absolute;
