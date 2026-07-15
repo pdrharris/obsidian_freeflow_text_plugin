@@ -21,11 +21,13 @@ import {
 import { getClipboard } from './clipboard';
 import {
 	cursorLineIsBulleted,
+	cursorLineIsCheckbox,
 	eraseAtCursor,
 	indentLines,
 	insertFragmentAtCursor,
 	splitLineAtCursor,
 	toggleBulletAtCursor,
+	toggleCheckboxAtCursor,
 	wordFromStroke,
 } from './edit';
 import { estimateSourceStrokeHeightRatio, LayoutResult, layoutDocument, smoothPolyline } from './layout';
@@ -48,6 +50,9 @@ const RAW_LOG_MAX = 4000; // ring buffer of raw pointer samples for iPad diagnos
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
 	wordGapScale: number;
+	// When the unified floating toolbar is on, the drawer hides its own copies of the style/list/
+	// clipboard buttons (the toolbar drives the pen instead); writing-mechanics buttons stay.
+	unifiedToolbar: boolean;
 	idleAdvanceMs: number;
 	releaseAdvanceDelayMs: number;
 	advanceTriggerRatio: number; // position of the orange "near the edge" line (fraction of width)
@@ -112,6 +117,7 @@ export class InkDrawer {
 	private readonly boldButtonEl: HTMLButtonElement;
 	private readonly underlineButtonEl: HTMLButtonElement;
 	private readonly bulletButtonEl: HTMLButtonElement;
+	private readonly checkboxButtonEl: HTMLButtonElement;
 	private readonly indentButtonEl: HTMLButtonElement;
 	private readonly outdentButtonEl: HTMLButtonElement;
 	private readonly colorButtonEl: HTMLButtonElement;
@@ -148,6 +154,8 @@ export class InkDrawer {
 	private penBold = false;
 	private penUnderline = false;
 	private colorPopup: ColorPopupHandle | null = null;
+	// Fired whenever the pen style or open state changes, so the unified toolbar can mirror it.
+	private uiStateListener: (() => void) | null = null;
 
 	constructor(getRuntimeConfig: () => DrawerRuntimeConfig) {
 		this.getRuntimeConfig = getRuntimeConfig;
@@ -179,6 +187,7 @@ export class InkDrawer {
 		this.boldButtonEl = makeIconButton('B', 'Bold');
 		this.underlineButtonEl = makeIconButton('U', 'Underline');
 		this.bulletButtonEl = makeIconButton('•', 'Bullet list');
+		this.checkboxButtonEl = makeIconButton('☐', 'Checkbox list');
 		this.outdentButtonEl = makeIconButton('⇤', 'Outdent');
 		this.indentButtonEl = makeIconButton('⇥', 'Indent');
 
@@ -197,6 +206,22 @@ export class InkDrawer {
 		this.pasteButtonEl = makeIconButton('📋', 'Paste');
 		this.newLineButtonEl = makeIconButton('↵', 'New line');
 		this.eraseButtonEl = makeIconButton('⌫', 'Backspace');
+
+		// The buttons the unified floating toolbar duplicates; hidden while it is enabled
+		// (see `.is-unified` in styles.css). New line / Backspace / Close are writing mechanics
+		// and always stay.
+		for (const dup of [
+			this.boldButtonEl,
+			this.underlineButtonEl,
+			this.bulletButtonEl,
+			this.checkboxButtonEl,
+			this.outdentButtonEl,
+			this.indentButtonEl,
+			this.colorButtonEl,
+			this.pasteButtonEl,
+		]) {
+			dup.classList.add('freeflow-ink-drawer-dup');
+		}
 
 		this.closeButtonEl = activeDocument.createElement('button');
 		this.closeButtonEl.type = 'button';
@@ -233,6 +258,34 @@ export class InkDrawer {
 		this.requestDraw();
 	}
 
+	// ---- unified-toolbar pen access (ToolbarPenHost) ----
+
+	setUiStateListener(listener: (() => void) | null): void {
+		this.uiStateListener = listener;
+	}
+
+	isOpen(): boolean {
+		return this.session !== null;
+	}
+
+	getPen(): { color: string; bold: boolean; underline: boolean } {
+		return { color: this.penColor, bold: this.penBold, underline: this.penUnderline };
+	}
+
+	setPen(patch: Partial<{ color: string; bold: boolean; underline: boolean }>): void {
+		if (patch.color !== undefined) {
+			this.penColor = patch.color;
+		}
+		if (patch.bold !== undefined) {
+			this.penBold = patch.bold;
+		}
+		if (patch.underline !== undefined) {
+			this.penUnderline = patch.underline;
+		}
+		this.updateStyleButtons();
+		this.requestDraw();
+	}
+
 	open(session: DrawerSession): void {
 		if (this.session && this.session.key !== session.key) {
 			this.close();
@@ -246,9 +299,11 @@ export class InkDrawer {
 		this.activeTouchId = null;
 		this.clearAdvanceTimer();
 		this.syncPenStyleToContext();
+		this.sheetEl.classList.toggle('is-unified', this.getRuntimeConfig().unifiedToolbar);
 		this.rootEl.classList.add('is-open');
 		this.resetScrollX();
 		this.requestDraw();
+		this.uiStateListener?.();
 	}
 
 	updateCursor(sessionKey: string, cursor: InkCursor): void {
@@ -275,6 +330,7 @@ export class InkDrawer {
 		this.session = null;
 		this.rootEl.classList.remove('is-open');
 		closing.onClose();
+		this.uiStateListener?.();
 	}
 
 	// ----------------------------------------------------------------- view
@@ -550,6 +606,7 @@ export class InkDrawer {
 		this.boldButtonEl.addEventListener('click', this.onToggleBold);
 		this.underlineButtonEl.addEventListener('click', this.onToggleUnderline);
 		this.bulletButtonEl.addEventListener('click', this.onToggleBullet);
+		this.checkboxButtonEl.addEventListener('click', this.onToggleCheckbox);
 		this.outdentButtonEl.addEventListener('click', this.onOutdent);
 		this.indentButtonEl.addEventListener('click', this.onIndent);
 		this.colorButtonEl.addEventListener('click', this.onColorButton);
@@ -566,6 +623,7 @@ export class InkDrawer {
 		this.bindButtonTouch(this.boldButtonEl, this.onToggleBold);
 		this.bindButtonTouch(this.underlineButtonEl, this.onToggleUnderline);
 		this.bindButtonTouch(this.bulletButtonEl, this.onToggleBullet);
+		this.bindButtonTouch(this.checkboxButtonEl, this.onToggleCheckbox);
 		this.bindButtonTouch(this.outdentButtonEl, this.onOutdent);
 		this.bindButtonTouch(this.indentButtonEl, this.onIndent);
 		this.bindButtonTouch(this.colorButtonEl, this.onColorButton);
@@ -605,6 +663,7 @@ export class InkDrawer {
 		this.boldButtonEl.removeEventListener('click', this.onToggleBold);
 		this.underlineButtonEl.removeEventListener('click', this.onToggleUnderline);
 		this.bulletButtonEl.removeEventListener('click', this.onToggleBullet);
+		this.checkboxButtonEl.removeEventListener('click', this.onToggleCheckbox);
 		this.outdentButtonEl.removeEventListener('click', this.onOutdent);
 		this.indentButtonEl.removeEventListener('click', this.onIndent);
 		this.colorButtonEl.removeEventListener('click', this.onColorButton);
@@ -1026,6 +1085,16 @@ export class InkDrawer {
 		this.updateStyleButtons();
 	};
 
+	private onToggleCheckbox = (): void => {
+		const session = this.session;
+		if (!session) {
+			return;
+		}
+		toggleCheckboxAtCursor(session.doc);
+		session.onContentChanged();
+		this.updateStyleButtons();
+	};
+
 	private onIndent = (): void => {
 		this.applyIndent(1);
 	};
@@ -1127,7 +1196,7 @@ export class InkDrawer {
 		return null;
 	}
 
-	// Reflect pen-state toggles on the toolbar buttons.
+	// Reflect pen-state toggles on the toolbar buttons (and mirror them to the unified toolbar).
 	private updateStyleButtons(): void {
 		this.boldButtonEl.classList.toggle('is-active', this.penBold);
 		this.underlineButtonEl.classList.toggle('is-active', this.penUnderline);
@@ -1135,7 +1204,12 @@ export class InkDrawer {
 			'is-active',
 			this.session ? cursorLineIsBulleted(this.session.doc) : false,
 		);
+		this.checkboxButtonEl.classList.toggle(
+			'is-active',
+			this.session ? cursorLineIsCheckbox(this.session.doc) : false,
+		);
 		this.colorSwatchEl.style.backgroundColor = this.penColor;
+		this.uiStateListener?.();
 	}
 
 	private onCloseClick = (): void => {

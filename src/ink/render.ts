@@ -13,6 +13,11 @@ const INLINE_BASE_LINE_HEIGHT_PX = 28;
 const DOT_RADIUS_SCALE = 0.6;
 const CARET_COLOR = '#2563eb';
 const SELECTION_COLOR = 'rgba(37, 99, 235, 0.18)';
+// Checked list items: the ink dims and a strike runs through the words; the box fills green.
+const CHECKED_DIM_ALPHA = 0.38;
+const STRIKE_COLOR = '#6b7280';
+const CHECKBOX_DONE_FILL = '#16a34a';
+const CHECKBOX_TICK_COLOR = '#ffffff';
 const WRITING_LINE_COLOR = '#e8ecf5';
 const INLINE_BG = '#fcfdff';
 
@@ -141,8 +146,17 @@ export function drawInlineCanvas(
 		ctx.fill();
 	}
 
+	for (const box of layout.checkboxes) {
+		drawCheckbox(ctx, box.x, box.y, box.size, box.checked, box.color);
+	}
+
 	const widthScale = layout.cssPerSource;
 	for (const word of layout.words) {
+		const line = doc.lines[word.line];
+		const isChecked = line?.checkbox === true && line.checked === true;
+		if (isChecked) {
+			ctx.globalAlpha = CHECKED_DIM_ALPHA;
+		}
 		const underline = wordUnderline(word);
 		if (underline) {
 			drawUnderline(
@@ -164,7 +178,19 @@ export function drawInlineCanvas(
 				nib: options.nib,
 			});
 		}
+		if (isChecked) {
+			// Full-opacity strike over the dimmed ink so "done" reads clearly at a glance.
+			ctx.globalAlpha = 1;
+			drawStrikethrough(
+				ctx,
+				word.x,
+				word.x + word.width,
+				word.baselineY - layout.rowHeight * 0.18,
+				Math.max(1.5, layout.rowHeight * 0.05),
+			);
+		}
 	}
+	ctx.globalAlpha = 1;
 
 	if (cursor) {
 		const caret = layout.caretRect(cursor);
@@ -416,6 +442,56 @@ export function underlineThickness(word: LaidWord, widthScale: number): number {
 	}
 	// Bold pen weight (~1.7x a normal stroke); never thinner than a visible hairline.
 	return Math.max(1.5, maxWidth * 1.7);
+}
+
+// Paint a checkbox at (x, y) with side `size`: a rounded outline when unchecked, a filled green
+// box with a white tick when checked. Colours are deliberately app-like (not hand-drawn) so the
+// control reads as tappable in reading mode.
+export function drawCheckbox(
+	ctx: CanvasRenderingContext2D,
+	x: number,
+	y: number,
+	size: number,
+	checked: boolean,
+	inkColor: string,
+): void {
+	const radius = size * 0.24;
+	ctx.beginPath();
+	ctx.roundRect(x, y, size, size, radius);
+	if (checked) {
+		ctx.fillStyle = CHECKBOX_DONE_FILL;
+		ctx.fill();
+		ctx.strokeStyle = CHECKBOX_TICK_COLOR;
+		ctx.lineWidth = Math.max(1.4, size * 0.14);
+		ctx.lineCap = 'round';
+		ctx.lineJoin = 'round';
+		ctx.beginPath();
+		ctx.moveTo(x + size * 0.26, y + size * 0.54);
+		ctx.lineTo(x + size * 0.44, y + size * 0.72);
+		ctx.lineTo(x + size * 0.76, y + size * 0.3);
+		ctx.stroke();
+	} else {
+		ctx.strokeStyle = inkColor;
+		ctx.lineWidth = Math.max(1.4, size * 0.11);
+		ctx.stroke();
+	}
+}
+
+// A line through a checked item's words, at roughly mid x-height.
+export function drawStrikethrough(
+	ctx: CanvasRenderingContext2D,
+	minX: number,
+	maxX: number,
+	y: number,
+	thickness: number,
+): void {
+	ctx.strokeStyle = STRIKE_COLOR;
+	ctx.lineWidth = thickness;
+	ctx.lineCap = 'round';
+	ctx.beginPath();
+	ctx.moveTo(minX - 2, y);
+	ctx.lineTo(maxX + 2, y);
+	ctx.stroke();
 }
 
 // Draw an underline beneath a word span, just below the baseline, at a hand-drawn weight.

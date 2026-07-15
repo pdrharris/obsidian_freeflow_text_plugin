@@ -30,6 +30,8 @@ import {
 	selectionStyleFlags,
 	splitLineAtCursor,
 	toggleBulletAtCursor,
+	toggleCheckboxAtCursor,
+	toggleLineChecked,
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
@@ -619,6 +621,78 @@ test('preserves the drawn gap between words (absolute spacing)', () => {
 	const nearGap = (near.words[1]?.x ?? 0) - (near.words[0]?.x ?? 0);
 	const farGap = (far.words[1]?.x ?? 0) - (far.words[0]?.x ?? 0);
 	ok(farGap > nearGap * 2, 'a larger drawn gap must produce a larger laid-out gap');
+});
+
+// ---- checkboxes ------------------------------------------------------------
+
+test('toggleCheckboxAtCursor makes the cursor line a checkbox and replaces any bullet', () => {
+	const d = mkDoc([Wx('a', 0)]);
+	d.lines[0]!.bullet = true;
+	toggleCheckboxAtCursor(d);
+	eq(d.lines[0]!.checkbox, true);
+	eq(d.lines[0]!.bullet, undefined, 'bullet and checkbox are mutually exclusive');
+	toggleCheckboxAtCursor(d);
+	eq(d.lines[0]!.checkbox, undefined, 'toggling again removes the checkbox');
+});
+
+test('toggleBulletAtCursor replaces a checkbox (and clears its checked state)', () => {
+	const d = mkDoc([Wx('a', 0)]);
+	d.lines[0]!.checkbox = true;
+	d.lines[0]!.checked = true;
+	toggleBulletAtCursor(d);
+	eq(d.lines[0]!.bullet, true);
+	eq(d.lines[0]!.checkbox, undefined);
+	eq(d.lines[0]!.checked, undefined);
+});
+
+test('toggleLineChecked flips the state and rejects non-checkbox lines', () => {
+	const d = mkDoc([Wx('a', 0)], [Wx('b', 0)]);
+	d.lines[0]!.checkbox = true;
+	eq(toggleLineChecked(d, 0), true);
+	eq(d.lines[0]!.checked, true);
+	eq(toggleLineChecked(d, 0), false);
+	eq(d.lines[0]!.checked, undefined, 'unchecking deletes the flag (lean JSON)');
+	eq(toggleLineChecked(d, 1), null, 'a plain line is not toggleable');
+});
+
+test('newline inherits the checkbox (unchecked); newline on an empty checkbox line ends the list', () => {
+	const d = mkDoc([Wx('a', 0)]);
+	d.lines[0]!.checkbox = true;
+	d.lines[0]!.checked = true;
+	d.meta.cursor = { line: 0, word: 1 };
+	splitLineAtCursor(d);
+	eq(d.lines[1]!.checkbox, true, 'the next list item is a checkbox too');
+	eq(d.lines[1]!.checked, undefined, 'a new item starts unchecked');
+	// The new line is empty: newline again drops the checkbox in place (ends the list).
+	splitLineAtCursor(d);
+	eq(d.lines.length, 2, 'no third line is created');
+	eq(d.lines[1]!.checkbox, undefined);
+});
+
+test('checkbox and checked survive a serialize/parse round-trip', () => {
+	const d = mkDoc([Wx('a', 0)], [Wx('b', 0)]);
+	d.lines[0]!.checkbox = true;
+	d.lines[0]!.checked = true;
+	d.lines[1]!.checkbox = true;
+	const round = parseInkDocument(serializeInkDocument(d));
+	eq(round.lines[0]!.checkbox, true);
+	eq(round.lines[0]!.checked, true);
+	eq(round.lines[1]!.checkbox, true);
+	eq(round.lines[1]!.checked, undefined);
+});
+
+test('layout emits a checkbox mark with a hit box tied to its logical line', () => {
+	const d = mkDoc([Wx('a', 0)], [Wx('b', 0)]);
+	d.lines[1]!.checkbox = true;
+	d.lines[1]!.checked = true;
+	const layout = layoutDocument(d, layoutConfig);
+	eq(layout.checkboxes.length, 1);
+	const box = layout.checkboxes[0]!;
+	eq(box.line, 1);
+	eq(box.checked, true);
+	ok(box.size > 0, 'the box has a tappable size');
+	ok(box.y > layout.rowHeight * 0.5, 'the box sits on the second visual row');
+	ok(box.x < (layout.words.find((w) => w.line === 1)?.x ?? 0), 'the box sits left of the content');
 });
 
 // ---- guard.ts --------------------------------------------------------------

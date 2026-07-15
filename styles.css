@@ -34,6 +34,79 @@
 	display: none;
 }
 
+/* ---- unified floating toolbar ------------------------------------------------------------ */
+
+.freeflow-ink-toolbar {
+	position: fixed;
+	/* Default perch: right edge, upper third; a drag (persisted) overrides via left/top. */
+	right: 18px;
+	top: 30%;
+	z-index: 1200; /* above the drawer overlay so it stays usable while writing */
+	display: none;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	max-width: 272px;
+	padding: 6px;
+	border-radius: 12px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	box-shadow: 0 6px 24px rgba(15, 23, 42, 0.18);
+	touch-action: none;
+}
+
+.freeflow-ink-toolbar.is-open {
+	display: flex;
+}
+
+.freeflow-ink-toolbar-grip {
+	cursor: grab;
+	padding: 2px 4px;
+	color: var(--text-faint);
+	font-size: 14px;
+	line-height: 1;
+	user-select: none;
+	touch-action: none;
+}
+
+.freeflow-ink-toolbar-btn {
+	min-width: 34px;
+	height: 34px;
+	padding: 0 6px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.freeflow-ink-toolbar-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.freeflow-ink-toolbar-btn.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+
+.freeflow-ink-toolbar-btn.is-bold-glyph {
+	font-weight: 800;
+}
+
+.freeflow-ink-toolbar-btn.is-underline-glyph {
+	text-decoration: underline;
+}
+
+/* Buttons duplicated by the unified toolbar are hidden while it is enabled. */
+.freeflow-ink-meta .is-toolbar-dup,
+.freeflow-ink-drawer-sheet.is-unified .freeflow-ink-drawer-dup {
+	display: none;
+}
+
 /* Per-block width drag handle on the right edge. */
 .freeflow-ink-resize-handle {
 	position: absolute;

@@ -116,8 +116,10 @@ export function splitLineAtCursor(doc: InkDocument): InkCursor {
 	if (!line) {
 		return cursor;
 	}
-	if (line.bullet && line.words.length === 0) {
+	if ((line.bullet || line.checkbox) && line.words.length === 0) {
 		delete line.bullet;
+		delete line.checkbox;
+		delete line.checked;
 		doc.meta.selection = null;
 		return cursor;
 	}
@@ -129,6 +131,9 @@ export function splitLineAtCursor(doc: InkDocument): InkCursor {
 	}
 	if (line.bullet) {
 		newLine.bullet = true;
+	}
+	if (line.checkbox) {
+		newLine.checkbox = true; // a new list item starts unchecked
 	}
 	doc.lines.splice(cursor.line + 1, 0, newLine);
 	const next: InkCursor = { line: cursor.line + 1, word: 0 };
@@ -189,14 +194,90 @@ export function toggleBulletAtCursor(doc: InkDocument): void {
 			delete line.bullet;
 		} else {
 			line.bullet = true;
+			delete line.checkbox; // bullet and checkbox are mutually exclusive
+			delete line.checked;
 		}
 	}
+}
+
+// Toggle checkboxes on the target lines, same all-or-nothing rule as toggleBulletAtCursor.
+// Turning a line into a checkbox replaces any bullet; turning it off clears the checked state.
+export function toggleCheckboxAtCursor(doc: InkDocument): void {
+	const { from, to } = targetLineRange(doc);
+	let allCheckboxes = true;
+	for (let i = from; i <= to; i += 1) {
+		if (!doc.lines[i]?.checkbox) {
+			allCheckboxes = false;
+			break;
+		}
+	}
+	for (let i = from; i <= to; i += 1) {
+		const line = doc.lines[i];
+		if (!line) {
+			continue;
+		}
+		if (allCheckboxes) {
+			delete line.checkbox;
+			delete line.checked;
+		} else {
+			line.checkbox = true;
+			delete line.bullet;
+		}
+	}
+}
+
+// Flip a checkbox line's checked state (reading-mode tap). Returns the new state, or null when
+// the line isn't a checkbox item.
+export function toggleLineChecked(doc: InkDocument, lineIndex: number): boolean | null {
+	const line = doc.lines[lineIndex];
+	if (!line?.checkbox) {
+		return null;
+	}
+	if (line.checked) {
+		delete line.checked;
+		return false;
+	}
+	line.checked = true;
+	return true;
+}
+
+// The ink colour at the caret: the colour of the nearest stroke just before the cursor (so a
+// swatch previews "what you're writing in here"), falling back to the next stroke to the right,
+// then the supplied default. Used by the inline recolour button and the floating toolbar.
+export function colorAtCursor(doc: InkDocument, fallback: string): string {
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	const lastColor = (word: InkWord | undefined): string | null => {
+		const stroke = word?.strokes[word.strokes.length - 1];
+		return stroke ? stroke.color : null;
+	};
+	const line = doc.lines[cursor.line];
+	if (line) {
+		for (let w = Math.min(cursor.word, line.words.length) - 1; w >= 0; w -= 1) {
+			const color = lastColor(line.words[w]);
+			if (color) {
+				return color;
+			}
+		}
+		for (let w = cursor.word; w < line.words.length; w += 1) {
+			const color = lastColor(line.words[w]);
+			if (color) {
+				return color;
+			}
+		}
+	}
+	return fallback;
 }
 
 // Whether the line under the cursor is currently a bullet (for reflecting the toolbar button state).
 export function cursorLineIsBulleted(doc: InkDocument): boolean {
 	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
 	return doc.lines[cursor.line]?.bullet === true;
+}
+
+// Whether the line under the cursor is currently a checkbox item (for the toolbar button state).
+export function cursorLineIsCheckbox(doc: InkDocument): boolean {
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	return doc.lines[cursor.line]?.checkbox === true;
 }
 
 // Erase: delete the selection if present; otherwise delete the word before the cursor, or

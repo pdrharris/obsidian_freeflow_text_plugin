@@ -25,11 +25,13 @@ import {
 	extractSelection,
 	insertFragmentAtCursor,
 	selectionStyleFlags,
+	toggleLineChecked,
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions, StrokeNib } from './render';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
+import { InkToolbar, ToolbarTarget } from './toolbar';
 
 const SAVE_DEBOUNCE_MS = 320;
 
@@ -105,6 +107,8 @@ export class InkBlockRegistry {
 	private readonly getSoftBlockLimitBytes: () => number;
 	private readonly getHardBlockLimitBytes: () => number;
 	private readonly getShowSoftLimitNotice: () => boolean;
+	private readonly toolbar: InkToolbar | null;
+	private readonly getUnifiedToolbar: () => boolean;
 	private activeKey: string | null = null;
 	// Re-render callbacks for every mounted inline canvas (edit + reading), so a global toggle like
 	// the writing-line guide updates all visible blocks at once.
@@ -130,6 +134,8 @@ export class InkBlockRegistry {
 		getSoftBlockLimitBytes: () => number,
 		getHardBlockLimitBytes: () => number,
 		getShowSoftLimitNotice: () => boolean,
+		toolbar: InkToolbar | null,
+		getUnifiedToolbar: () => boolean,
 	) {
 		this.plugin = plugin;
 		this.drawer = drawer;
@@ -150,6 +156,8 @@ export class InkBlockRegistry {
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
 		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
 		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
+		this.toolbar = toolbar;
+		this.getUnifiedToolbar = getUnifiedToolbar;
 	}
 
 	refreshAllInline(): void {
@@ -236,6 +244,7 @@ export class InkBlockRegistry {
 		attempt = 0,
 	): void {
 		const drawer = this.drawer;
+		const toolbar = this.toolbar;
 		const inlineRefreshers = this.inlineRefreshers;
 		const setActiveKey = (value: string | null): void => {
 			this.activeKey = value;
@@ -358,6 +367,7 @@ export class InkBlockRegistry {
 				underlineButtonEl.classList.remove('is-active');
 			}
 			hintEl.textContent = selectMode ? 'Drag to select words' : 'Tap to place cursor';
+			this.toolbar?.refresh(); // mirror selection/cursor state on the floating toolbar
 		};
 
 		const renderInline = (): void => {
@@ -449,6 +459,7 @@ export class InkBlockRegistry {
 		const openDrawer = (): void => {
 			showInlineCaret = true;
 			setActiveKey(blockKey);
+			bindToolbar();
 			drawer.open({
 				key: blockKey,
 				doc: documentModel,
@@ -692,6 +703,7 @@ export class InkBlockRegistry {
 		};
 
 		const onCanvasClick = (event: MouseEvent): void => {
+			bindToolbar();
 			if (selectMode) {
 				return; // selection is handled by the pointer drag handlers
 			}
@@ -752,6 +764,39 @@ export class InkBlockRegistry {
 			})();
 		};
 
+		// Unified floating toolbar: this block's duplicated meta-row buttons are hidden and the
+		// singleton toolbar acts on the block instead. The toolbar binds to whichever block was
+		// interacted with last (cursor placed / drawer opened).
+		const unified = this.getUnifiedToolbar();
+		const toolbarTarget: ToolbarTarget = {
+			key: blockKey,
+			doc: documentModel,
+			applyEdit: applyInlineEdit,
+			renderOnly: renderInline,
+			isSelectMode: () => selectMode,
+			toggleSelectMode: onToggleSelect,
+			openDrawer,
+		};
+		const bindToolbar = (): void => {
+			if (unified) {
+				this.toolbar?.bind(toolbarTarget);
+			}
+		};
+		if (unified) {
+			for (const dup of [
+				writingLineButtonEl,
+				selectButtonEl,
+				boldButtonEl,
+				underlineButtonEl,
+				colorButtonEl,
+				copyButtonEl,
+				cutButtonEl,
+				pasteButtonEl,
+			]) {
+				dup.classList.add('is-toolbar-dup');
+			}
+		}
+
 		// Never let pointer/click events bubble out of the block into CodeMirror: a click that
 		// reaches the editor places the text cursor inside the fii-ink source range, and live
 		// preview then unfolds the widget into the raw JSON, where a stray keystroke can corrupt
@@ -811,6 +856,7 @@ export class InkBlockRegistry {
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
 					isDisposed = true;
+					toolbar?.unbind(blockKey);
 					inlineRefreshers.delete(renderInline);
 					resizeObserver.disconnect();
 					for (const type of editorSuppressedEvents) {
@@ -886,12 +932,74 @@ export class InkBlockRegistry {
 		// Re-render once layout has settled so the canvas matches the final width (see editable path).
 		window.requestAnimationFrame(() => render());
 		inlineRefreshers.add(render);
+
+		// Checkbox toggling is the ONE mutation reading mode supports: tap a box to (un)check it,
+		// with the new state persisted to the vault. Everything else stays read-only.
+		let saveTimeout = 0;
+		let disposed = false;
+		const persistChecked = (): void => {
+			if (saveTimeout) {
+				window.clearTimeout(saveTimeout);
+			}
+			saveTimeout = window.setTimeout(() => {
+				saveTimeout = 0;
+				// Section info is read at save time (it can be unavailable at mount). Without it the
+				// full-file range makes persistInkCodeBlock's section splice scan the whole note, which
+				// matches the FIRST ink block — correct for single-block notes, and no worse than the
+				// existing regex fallback for multi-block ones.
+				const section = toSectionInfoLike(ctx.getSectionInfo(el)) ?? {
+					lineStart: 0,
+					lineEnd: Number.MAX_SAFE_INTEGER,
+				};
+				persistInkCodeBlock(
+					this.plugin.app,
+					ctx.sourcePath,
+					section,
+					serializeInkDocument(documentModel),
+				).catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
+					new Notice(`FreeFlow Ink checkbox save failed: ${message}`);
+				});
+			}, SAVE_DEBOUNCE_MS);
+		};
+		const onReadingClick = (event: MouseEvent): void => {
+			if (disposed || documentModel.lines.every((line) => !line.checkbox)) {
+				return;
+			}
+			const rect = canvasEl.getBoundingClientRect();
+			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions());
+			const x = event.clientX - rect.left;
+			const y = event.clientY - rect.top;
+			for (const box of layout.checkboxes) {
+				const pad = box.size * 0.6; // generous target for fingers
+				if (
+					x >= box.x - pad &&
+					x <= box.x + box.size + pad &&
+					y >= box.y - pad &&
+					y <= box.y + box.size + pad
+				) {
+					if (toggleLineChecked(documentModel, box.line) !== null) {
+						render();
+						persistChecked();
+					}
+					return;
+				}
+			}
+		};
+		canvasEl.addEventListener('click', onReadingClick);
+
 		// Observe the pane ancestor (see the editable path) so fill-width blocks track pane resizes.
 		const resizeObserver = new ResizeObserver(() => render());
 		resizeObserver.observe(containerEl.parentElement ?? containerEl);
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
+					disposed = true;
+					canvasEl.removeEventListener('click', onReadingClick);
+					if (saveTimeout) {
+						window.clearTimeout(saveTimeout);
+						saveTimeout = 0;
+					}
 					inlineRefreshers.delete(render);
 					resizeObserver.disconnect();
 				}

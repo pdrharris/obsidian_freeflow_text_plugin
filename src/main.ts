@@ -1,6 +1,7 @@
 import { Editor, MarkdownView, Modal, Notice, Platform, Plugin, editorLivePreviewField } from 'obsidian';
 import { INK_CODE_BLOCK_LANGUAGE } from './ink/doc';
 import { inkBlockGuard } from './ink/guard';
+import { InkToolbar } from './ink/toolbar';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import { StrokeNib } from './ink/render';
@@ -25,6 +26,7 @@ export interface FreeFlowInkAdaptiveMetrics {
 export default class FreeFlowInkPlugin extends Plugin {
 	settings: FreeFlowInkSettings = { ...DEFAULT_FREEFLOW_SETTINGS };
 	private drawer: InkDrawer | null = null;
+	private toolbar: InkToolbar | null = null;
 	private registry: InkBlockRegistry | null = null;
 	private runtimeStyleEl: HTMLStyleElement | null = null;
 
@@ -84,6 +86,25 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.addRibbonIcon('pencil-line', 'New handwriting block', () => {
 			this.insertInkBlockFromRibbon();
 		});
+		// The unified floating toolbar (singleton, like the drawer). Constructed regardless of the
+		// setting — blocks only bind to it when the setting is on, so toggling needs no reload logic.
+		const toolbar = new InkToolbar({
+			penHost: this.drawer,
+			getShowWritingLine: () => this.settings.showRenderWritingLine,
+			setShowWritingLine: (value) => {
+				this.settings.showRenderWritingLine = value;
+				void this.saveSettings();
+			},
+			refreshAllInline: () => this.refreshInlineBlocks(),
+			getPosition: () => this.settings.toolbarPosition,
+			setPosition: (pos) => {
+				this.settings.toolbarPosition = pos;
+				void this.saveSettings();
+			},
+		});
+		this.toolbar = toolbar;
+		this.drawer.setUiStateListener(() => toolbar.refresh());
+
 		const registry = new InkBlockRegistry(
 			this,
 			this.drawer,
@@ -107,6 +128,8 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.getSoftBlockLimitBytes(),
 			() => this.getHardBlockLimitBytes(),
 			() => this.settings.showSoftLimitNotice,
+			toolbar,
+			() => this.settings.unifiedToolbar,
 		);
 		this.registry = registry;
 		registry.register();
@@ -130,6 +153,8 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.register(() => {
 			this.drawer?.destroy();
 			this.drawer = null;
+			this.toolbar?.destroy();
+			this.toolbar = null;
 			this.registry = null;
 			this.runtimeStyleEl?.remove();
 			this.runtimeStyleEl = null;
@@ -178,6 +203,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			palmRejection: this.settings.palmRejection,
 			usePointerCapture: !iosLike,
 			allowAnyNonMousePointer: iosLike,
+			unifiedToolbar: this.settings.unifiedToolbar,
 		};
 	}
 

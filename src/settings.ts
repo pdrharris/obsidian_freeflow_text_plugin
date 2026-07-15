@@ -3,7 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-06-24A';
+export const FREEFLOW_BUILD_MARKER = '2026-07-15A';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width
@@ -47,6 +47,12 @@ export interface FreeFlowInkSettings {
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
 	showSoftLimitNotice: boolean;
+	// One floating, draggable toolbar shared by the inline blocks and the drawer, replacing the
+	// per-block button row and the drawer's duplicated style buttons. Context-sensitive: with a
+	// selection the style buttons restyle it; without one (drawer open) they set the pen.
+	unifiedToolbar: boolean;
+	// Last dragged position of the floating toolbar (viewport px, clamped on restore).
+	toolbarPosition: { x: number; y: number } | null;
 }
 
 export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
@@ -73,6 +79,8 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
 	showSoftLimitNotice: false,
+	unifiedToolbar: true,
+	toolbarPosition: null,
 };
 
 export class FreeFlowInkSettingTab extends PluginSettingTab {
@@ -133,6 +141,19 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		lineWidthValueEl.addClass('freeflow-ink-settings-value');
 		const lineWidthPercent = Math.round(this.plugin.settings.lineWidthScale * 100);
 		lineWidthValueEl.setText(`${lineWidthPercent}%`);
+
+		new Setting(containerEl)
+			.setName('Unified floating toolbar')
+			.setDesc(
+				'One draggable toolbar shared by the rendered blocks and the drawer, instead of a button row at the bottom of every block. With a selection its style buttons restyle the selection; while the drawer is open they set the pen. Blocks already on screen pick the change up after reopening the note.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.unifiedToolbar).onChange(async (value) => {
+					this.plugin.settings.unifiedToolbar = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshInlineBlocks();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName('Match text width')

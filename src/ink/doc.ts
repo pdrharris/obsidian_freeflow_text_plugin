@@ -43,6 +43,10 @@ export interface InkLine {
 	// a left inset and a bullet glyph at render time. Absent = a normal flush-left line.
 	indent?: number; // indent level, integer 0..MAX_INDENT_LEVEL
 	bullet?: boolean; // draw a list bullet at the line start
+	// Checkbox list item (shopping lists): draws a tappable box instead of a bullet. `checked`
+	// persists with the document, and a checked line renders struck-through and dimmed.
+	checkbox?: boolean;
+	checked?: boolean; // only meaningful when checkbox is true
 }
 
 export const MAX_INDENT_LEVEL = 8;
@@ -302,6 +306,12 @@ function normalizeLine(value: unknown): InkLine | null {
 	}
 	if (maybe.bullet === true) {
 		line.bullet = true;
+	}
+	if (maybe.checkbox === true) {
+		line.checkbox = true;
+		if (maybe.checked === true) {
+			line.checked = true;
+		}
 	}
 	return line;
 }
