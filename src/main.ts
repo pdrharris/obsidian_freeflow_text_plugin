@@ -176,12 +176,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.applyRuntimeStyles();
 	}
 
-	// When the active note flips to Reading view, close the drawer so its content is committed.
-	// A no-op when the drawer is already closed or the view is still editable.
+	// When the active note flips to Reading view, close the drawer so its content is committed,
+	// and hide the floating toolbar (the editing widgets stay mounted in the background, so the
+	// toolbar would otherwise linger over the read-only page). A no-op while the view is editable.
 	private closeDrawerIfReadingMode(): void {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (view && view.getMode() === 'preview') {
 			this.drawer?.close();
+			this.toolbar?.hide();
 		}
 	}
 

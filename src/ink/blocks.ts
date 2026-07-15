@@ -795,6 +795,12 @@ export class InkBlockRegistry {
 			]) {
 				dup.classList.add('is-toolbar-dup');
 			}
+			// Every persisted edit remounts this block (the save splices the note and the code block
+			// processor re-runs). If the toolbar was bound to this block before the remount, re-bind
+			// it to the fresh target so it doesn't vanish mid-interaction.
+			if (this.toolbar?.wasBoundTo(blockKey)) {
+				this.toolbar.bind(toolbarTarget);
+			}
 		}
 
 		// Never let pointer/click events bubble out of the block into CodeMirror: a click that
@@ -856,7 +862,7 @@ export class InkBlockRegistry {
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
 					isDisposed = true;
-					toolbar?.unbind(blockKey);
+					toolbar?.unbind(toolbarTarget);
 					inlineRefreshers.delete(renderInline);
 					resizeObserver.disconnect();
 					for (const type of editorSuppressedEvents) {

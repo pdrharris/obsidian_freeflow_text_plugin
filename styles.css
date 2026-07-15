@@ -101,8 +101,10 @@
 	text-decoration: underline;
 }
 
-/* Buttons duplicated by the unified toolbar are hidden while it is enabled. */
-.freeflow-ink-meta .is-toolbar-dup,
+/* Buttons duplicated by the unified toolbar are hidden while it is enabled. Specificity must
+   beat the later `.freeflow-ink-meta-action.freeflow-ink-color-btn { display: inline-block }`
+   rule, or the colour button alone survives the cull. */
+.freeflow-ink-meta .freeflow-ink-meta-action.is-toolbar-dup,
 .freeflow-ink-drawer-sheet.is-unified .freeflow-ink-drawer-dup {
 	display: none;
 }

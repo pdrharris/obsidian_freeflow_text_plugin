@@ -71,6 +71,8 @@ export class InkToolbar {
 	private readonly rootEl: HTMLDivElement;
 	private readonly gripEl: HTMLDivElement;
 	private target: ToolbarTarget | null = null;
+	private lastKey: string | null = null;
+	private lastKeyAt = 0;
 	private colorPopup: ColorPopupHandle | null = null;
 	private readonly cleanups: Array<() => void> = [];
 
@@ -168,17 +170,38 @@ export class InkToolbar {
 
 	bind(target: ToolbarTarget): void {
 		this.target = target;
+		this.lastKey = target.key;
+		this.lastKeyAt = Date.now();
 		this.rootEl.classList.add('is-open');
 		this.applyStoredPosition();
 		this.refresh();
 	}
 
-	// Hide the toolbar when the block it was bound to unmounts (note closed, mode switched).
-	unbind(key: string): void {
-		if (this.target?.key !== key) {
+	// Whether this block key was bound RECENTLY. Blocks remount whenever a save splices the note
+	// (every persisted edit); the fresh mount uses this to re-bind so the toolbar doesn't vanish
+	// mid-interaction (e.g. right after dragging out a selection, whose save remounts). The window
+	// is short so reopening a note much later doesn't resurrect the toolbar uninvited.
+	wasBoundTo(key: string): boolean {
+		return this.lastKey === key && Date.now() - this.lastKeyAt < 3000;
+	}
+
+	// Unbind by TARGET IDENTITY, not key: a remount creates a new target with the SAME key, and
+	// the old widget's unload must not tear down the new widget's binding.
+	unbind(target: ToolbarTarget): void {
+		if (this.target !== target) {
 			return;
 		}
 		this.target = null;
+		this.colorPopup?.close();
+		this.colorPopup = null;
+		this.rootEl.classList.remove('is-open');
+	}
+
+	// Hide unconditionally (switching the note to reading mode). Also forgets the last-bound key
+	// so flipping back to editing doesn't resurrect the toolbar until the user taps a block.
+	hide(): void {
+		this.target = null;
+		this.lastKey = null;
 		this.colorPopup?.close();
 		this.colorPopup = null;
 		this.rootEl.classList.remove('is-open');
@@ -189,6 +212,9 @@ export class InkToolbar {
 		if (!target) {
 			return;
 		}
+		// Any interaction with the bound block keeps the remount re-bind window (wasBoundTo) fresh,
+		// so a save-triggered remount right after e.g. a drawer close doesn't drop the toolbar.
+		this.lastKeyAt = Date.now();
 		const doc = target.doc;
 		const sel = doc.meta.selection;
 		const hasSelection = !selectionIsEmpty(sel);
