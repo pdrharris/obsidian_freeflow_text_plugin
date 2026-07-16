@@ -179,18 +179,36 @@ export function drawInlineCanvas(
 			});
 		}
 		if (isChecked) {
-			// Full-opacity strike over the dimmed ink so "done" reads clearly at a glance.
 			ctx.globalAlpha = 1;
-			drawStrikethrough(
-				ctx,
-				word.x,
-				word.x + word.width,
-				word.baselineY - layout.rowHeight * 0.18,
-				Math.max(1.5, layout.rowHeight * 0.05),
-			);
 		}
 	}
 	ctx.globalAlpha = 1;
+
+	// One CONTINUOUS strike per visual row of a checked line — from the first word's left edge to
+	// the last word's right edge, bridging the word gaps (per-word segments read as choppy). Drawn
+	// after the ink, at full opacity over the dimmed strokes, so "done" reads clearly at a glance.
+	const strikeSpans = new Map<string, { minX: number; maxX: number; y: number }>();
+	for (const word of layout.words) {
+		const line = doc.lines[word.line];
+		if (line?.checkbox !== true || line.checked !== true) {
+			continue;
+		}
+		const key = `${word.line}:${word.visualRow}`;
+		const span = strikeSpans.get(key);
+		if (span) {
+			span.minX = Math.min(span.minX, word.x);
+			span.maxX = Math.max(span.maxX, word.x + word.width);
+		} else {
+			strikeSpans.set(key, {
+				minX: word.x,
+				maxX: word.x + word.width,
+				y: word.baselineY - layout.rowHeight * 0.18,
+			});
+		}
+	}
+	for (const span of strikeSpans.values()) {
+		drawStrikethrough(ctx, span.minX, span.maxX, span.y, Math.max(1.5, layout.rowHeight * 0.05));
+	}
 
 	if (cursor) {
 		const caret = layout.caretRect(cursor);
