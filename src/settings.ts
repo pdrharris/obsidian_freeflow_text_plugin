@@ -3,7 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-07-16A';
+export const FREEFLOW_BUILD_MARKER = '2026-07-17A';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width

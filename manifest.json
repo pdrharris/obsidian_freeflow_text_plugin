@@ -1,9 +1,9 @@
 {
 	"id": "obsidian-freeflow-ink",
 	"name": "FreeFlow Ink",
-	"version": "0.0.19",
-	"minAppVersion": "1.0.0",
-	"description": "Handwriting blocks that automatically wrap to the next line as you write, fitting perfectly into your typed notes. Sync marker: 2026-07-16A.",
+	"version": "0.0.20",
+	"minAppVersion": "1.1.0",
+	"description": "Handwriting blocks that automatically wrap to the next line as you write, fitting perfectly into your typed notes. Sync marker: 2026-07-17A.",
 	"author": "Peter Harris",
 	"authorUrl": "https://github.com/pdrharris",
 	"isDesktopOnly": false

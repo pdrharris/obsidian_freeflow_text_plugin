@@ -1,5 +1,6 @@
 import { Editor, MarkdownView, Modal, Notice, Platform, Plugin, editorLivePreviewField } from 'obsidian';
 import { INK_CODE_BLOCK_LANGUAGE } from './ink/doc';
+import { compactInkBlocksInContent } from './ink/compact';
 import { inkBlockGuard } from './ink/guard';
 import { InkToolbar } from './ink/toolbar';
 import { InkBlockRegistry } from './ink/blocks';
@@ -81,6 +82,13 @@ export default class FreeFlowInkPlugin extends Plugin {
 			name: 'Insert handwriting block',
 			editorCallback: (editor) => {
 				this.insertInkBlockAtCursor(editor);
+			},
+		});
+		this.addCommand({
+			id: 'compact-ink-blocks-vault',
+			name: 'Compact all ink blocks in vault',
+			callback: () => {
+				void this.compactAllInkBlocks();
 			},
 		});
 		this.addRibbonIcon('pencil-line', 'New handwriting block', () => {
@@ -539,6 +547,42 @@ export default class FreeFlowInkPlugin extends Plugin {
 		// An empty body parses to an empty document, ready to write into.
 		const block = `${prefix}\`\`\`${INK_CODE_BLOCK_LANGUAGE}\n\n\`\`\`\n`;
 		editor.replaceSelection(block);
+	}
+
+	// Re-serialize every fii-ink block in every markdown note into the current compact wire
+	// format. Blocks that fail to parse are left untouched. Notes are only written when their
+	// content actually changes (so sync tools don't re-upload untouched files).
+	private async compactAllInkBlocks(): Promise<void> {
+		const fenceMarker = `\`\`\`${INK_CODE_BLOCK_LANGUAGE}`;
+		let notesChanged = 0;
+		let blocksCompacted = 0;
+		let blocksFailed = 0;
+		let bytesSaved = 0;
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const content = await this.app.vault.cachedRead(file);
+			if (!content.includes(fenceMarker)) {
+				continue;
+			}
+			const result = compactInkBlocksInContent(content);
+			blocksFailed += result.blocksFailed;
+			if (result.content === content) {
+				continue;
+			}
+			// Re-run the transform inside `process` so the write is atomic against concurrent
+			// edits of the same file.
+			await this.app.vault.process(file, (current) => compactInkBlocksInContent(current).content);
+			notesChanged += 1;
+			blocksCompacted += result.blocksCompacted;
+			bytesSaved += result.bytesSaved;
+		}
+		const savedKb = Math.round(bytesSaved / 1024);
+		const failNote = blocksFailed > 0 ? ` ${blocksFailed} block(s) failed to parse and were left unchanged.` : '';
+		new Notice(
+			notesChanged === 0
+				? `FreeFlow Ink: all ink blocks are already compact.${failNote}`
+				: `FreeFlow Ink: compacted ${blocksCompacted} block(s) in ${notesChanged} note(s), saved ${savedKb} KB.${failNote}`,
+			8000,
+		);
 	}
 }
 

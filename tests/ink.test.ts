@@ -35,6 +35,7 @@ import {
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
+import { compactInkBlocksInContent } from '../src/ink/compact';
 import { Text } from '@codemirror/state';
 import { editViolatesInkBlock, inkBlockAt } from '../src/ink/guard';
 
@@ -182,6 +183,138 @@ test('serialize -> parse round-trips meta.widthScale', () => {
 	const d = mkDoc([W('a')]);
 	d.meta.widthScale = 0.45;
 	eq(parseInkDocument(serializeInkDocument(d)).meta.widthScale, 0.45);
+});
+
+// ---- v4 compact wire format -----------------------------------------------
+
+test('v4 serialize packs points as arrays and omits ids', () => {
+	const s = serializeInkDocument(mkDoc([W('a')]));
+	ok(s.includes('"version":4'), 'writes version 4');
+	ok(!s.includes('"id"'), 'no ids in the wire format');
+	ok(!s.includes('"x":'), 'no per-point object keys');
+	ok(s.includes('"points":[['), 'points are arrays');
+});
+
+test('v4 parse decodes fixed-point packed points', () => {
+	const raw = JSON.stringify({
+		version: 4,
+		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+		lines: [
+			{
+				words: [
+					{
+						strokes: [
+							{ points: [[2997, -2934, 8, 0], [2971, -3013, 11, 9]], width: 1.27, color: '#111827' },
+						],
+					},
+				],
+			},
+		],
+	});
+	const d = parseInkDocument(raw);
+	const p0 = d.lines[0]!.words[0]!.strokes[0]!.points[0]!;
+	const p1 = d.lines[0]!.words[0]!.strokes[0]!.points[1]!;
+	eq(p0, { x: 29.97, y: -29.34, pressure: 0.08, time: 0 });
+	eq(p1, { x: 29.71, y: -30.13, pressure: 0.11, time: 9 });
+});
+
+test('v4 serialize rounds to 2dp and rebases stroke times to zero', () => {
+	const d = mkDoc([
+		word('w', stroke('s', [
+			{ x: 29.974736842105266, y: -29.338105263157896, pressure: 0.07999999999999999, time: 1784234164423 },
+			{ x: 29.70947368421053, y: -30.13389473684211, pressure: 0.1139990005493164, time: 1784234164432 },
+		])),
+	]);
+	const back = parseInkDocument(serializeInkDocument(d));
+	const p0 = back.lines[0]!.words[0]!.strokes[0]!.points[0]!;
+	const p1 = back.lines[0]!.words[0]!.strokes[0]!.points[1]!;
+	eq(p0, { x: 29.97, y: -29.34, pressure: 0.08, time: 0 }, 'rounded + rebased');
+	eq(p1.time, 9, 'within-stroke delta preserved');
+});
+
+test('v4 serialize is idempotent after one round-trip', () => {
+	const d = mkDoc([
+		word('w', stroke('s', [
+			{ x: 12.345678, y: -0.999999, pressure: 0.333333, time: 1784234164423 },
+			{ x: 13.111111, y: -5.555555, pressure: 0.666666, time: 1784234164440 },
+		])),
+	]);
+	const s1 = serializeInkDocument(d);
+	const s2 = serializeInkDocument(parseInkDocument(s1));
+	eq(s2, s1, 'second serialize must be byte-identical');
+});
+
+test('v3 object-form points still parse (back-compat)', () => {
+	const raw = JSON.stringify({
+		version: 3,
+		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+		lines: [
+			{
+				id: 'l',
+				words: [
+					{
+						id: 'w',
+						strokes: [
+							{
+								id: 's',
+								points: [{ x: 1.5, y: -2.5, pressure: 0.4, time: 100 }],
+								width: 3,
+								color: '#111827',
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+	const d = parseInkDocument(raw);
+	eq(d.version, INK_DOC_VERSION);
+	eq(d.lines[0]!.words[0]!.strokes[0]!.points[0], { x: 1.5, y: -2.5, pressure: 0.4, time: 100 });
+});
+
+test('compactInkBlocksInContent: rewrites v3 blocks, leaves other content alone', () => {
+	const v3Body = JSON.stringify({
+		version: 3,
+		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+		lines: [
+			{
+				id: 'l-abc',
+				words: [
+					{
+						id: 'w-abc',
+						strokes: [
+							{
+								id: 's-abc',
+								points: [{ x: 29.974736842105266, y: -29.338105263157896, pressure: 0.5, time: 1784234164423 }],
+								width: 3,
+								color: '#111827',
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+	const note = `# Heading\n\nSome text.\n\n\`\`\`fii-ink\n${v3Body}\n\`\`\`\n\nMore text.\n`;
+	const result = compactInkBlocksInContent(note);
+	eq(result.blocksCompacted, 1);
+	eq(result.blocksFailed, 0);
+	ok(result.bytesSaved > 0, 'compacting a v3 block must shrink it');
+	ok(result.content.startsWith('# Heading\n\nSome text.\n\n```fii-ink\n'), 'prose before the block untouched');
+	ok(result.content.endsWith('\n```\n\nMore text.\n'), 'prose after the block untouched');
+	ok(result.content.includes('"version":4'), 'block rewritten to v4');
+	// Second pass is a no-op: already compact.
+	const again = compactInkBlocksInContent(result.content);
+	eq(again.blocksCompacted, 0);
+	eq(again.content, result.content);
+});
+
+test('compactInkBlocksInContent: unparsable and empty blocks are left untouched', () => {
+	const note = '```fii-ink\nnot json at all\n```\n\n```fii-ink\n\n```\n';
+	const result = compactInkBlocksInContent(note);
+	eq(result.content, note, 'nothing rewritten');
+	eq(result.blocksCompacted, 0);
+	eq(result.blocksFailed, 1, 'only the invalid block counts as failed');
 });
 
 test('wordBounds spans all strokes', () => {

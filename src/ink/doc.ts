@@ -1,4 +1,4 @@
-// Flowing-text ink document model (v3).
+// Flowing-text ink document model (v4).
 //
 // Content is a logical tree: Document -> Lines -> Words -> Strokes. Stroke points are stored
 // in LINE-ABSOLUTE coordinates: x is the position along the line (so the whitespace you draw
@@ -7,10 +7,16 @@
 // affect spacing. The layout engine scales these coordinates and wraps lines to width, but it
 // never re-spaces what you drew. Editing is a tree splice + relayout (no coordinate patching).
 //
-// v2 (the previous convention) stored points in word-local space and normalised inter-word
-// gaps; `parseInkDocument` migrates v2 docs to line-absolute on load.
+// Wire format history (parse accepts all, serialize writes only the newest):
+// - v4 (current): compact. Points are packed fixed-point arrays [x*100, y*100, pressure*100,
+//   ms since the stroke's first point] and ids are omitted (parse regenerates them). Two
+//   decimals is sub-hundredth-of-a-pixel at render scale, and layout only ever uses
+//   within-stroke time deltas, so nothing visible is lost — files are ~5x smaller.
+// - v3: same tree, but points as {x, y, pressure, time} objects at full float precision with
+//   absolute epoch times, and ids serialized.
+// - v2: word-local point coordinates with normalised gaps; migrated to line-absolute on load.
 
-export const INK_DOC_VERSION = 3 as const;
+export const INK_DOC_VERSION = 4 as const;
 export const DEFAULT_LINE_HEIGHT = 180;
 export const INK_CODE_BLOCK_LANGUAGE = 'fii-ink';
 
@@ -209,8 +215,90 @@ export function wordBounds(word: InkWord): InkBounds | null {
 // Serialization
 // ---------------------------------------------------------------------------
 
+// v4 packed point: [x*100, y*100, pressure*100, ms since the stroke's first point], all
+// integers. See the wire-format notes at the top of this file.
+type PackedPoint = [number, number, number, number];
+
+interface PackedStroke {
+	points: PackedPoint[];
+	width: number;
+	color: string;
+	bold?: true;
+	underline?: true;
+}
+
+interface PackedWord {
+	strokes: PackedStroke[];
+}
+
+interface PackedLine {
+	words: PackedWord[];
+	indent?: number;
+	bullet?: true;
+	checkbox?: true;
+	checked?: true;
+}
+
 export function serializeInkDocument(doc: InkDocument): string {
-	return JSON.stringify(doc);
+	const meta: Record<string, unknown> = {
+		lineHeight: doc.meta.lineHeight,
+		cursor: doc.meta.cursor,
+		selection: doc.meta.selection,
+	};
+	if (doc.meta.widthScale !== undefined) {
+		meta.widthScale = Math.round(doc.meta.widthScale * 1000) / 1000;
+	}
+	return JSON.stringify({
+		version: INK_DOC_VERSION,
+		meta,
+		lines: doc.lines.map(packLine),
+	});
+}
+
+function packLine(line: InkLine): PackedLine {
+	const packed: PackedLine = { words: line.words.map(packWord) };
+	if (typeof line.indent === 'number' && line.indent > 0) {
+		packed.indent = line.indent;
+	}
+	if (line.bullet === true) {
+		packed.bullet = true;
+	}
+	if (line.checkbox === true) {
+		packed.checkbox = true;
+		if (line.checked === true) {
+			packed.checked = true;
+		}
+	}
+	return packed;
+}
+
+function packWord(word: InkWord): PackedWord {
+	return { strokes: word.strokes.map(packStroke) };
+}
+
+function packStroke(stroke: InkStroke): PackedStroke {
+	// Rebase times to the stroke's first point — layout only ever uses within-stroke deltas,
+	// so absolute epoch values are pure waste. Idempotent: a rebased stroke rebases to itself.
+	const t0 = stroke.points[0]?.time ?? 0;
+	const packed: PackedStroke = {
+		points: stroke.points.map(
+			(p): PackedPoint => [
+				Math.round(p.x * 100),
+				Math.round(p.y * 100),
+				Math.round(p.pressure * 100),
+				Math.max(0, Math.round(p.time - t0)),
+			],
+		),
+		width: Math.round(stroke.width * 100) / 100,
+		color: stroke.color,
+	};
+	if (stroke.bold === true) {
+		packed.bold = true;
+	}
+	if (stroke.underline === true) {
+		packed.underline = true;
+	}
+	return packed;
 }
 
 export function parseInkDocument(source: string): InkDocument {
@@ -228,8 +316,12 @@ export function parseInkDocument(source: string): InkDocument {
 	}
 	const value = raw as Partial<InkDocument>;
 	const version: unknown = (raw as { version?: unknown }).version;
-	// Accept the current version and the previous one (which we migrate below).
-	if ((version !== INK_DOC_VERSION && version !== 2) || !Array.isArray(value.lines)) {
+	// Accept the current version and the earlier ones (v3 differs only in point encoding, which
+	// normalizePoint handles; v2 additionally needs the coordinate migration below).
+	if (
+		(version !== INK_DOC_VERSION && version !== 3 && version !== 2) ||
+		!Array.isArray(value.lines)
+	) {
 		throw new Error(`Invalid fii-ink JSON: expected { version: ${INK_DOC_VERSION}, lines: [] }.`);
 	}
 
@@ -369,6 +461,22 @@ function normalizeStroke(value: unknown): InkStroke | null {
 }
 
 function normalizePoint(value: unknown): InkPoint | null {
+	if (Array.isArray(value)) {
+		// v4 packed form: [x*100, y*100, pressure*100, ms since stroke start].
+		const x = Number(value[0]);
+		const y = Number(value[1]);
+		if (!Number.isFinite(x) || !Number.isFinite(y)) {
+			return null;
+		}
+		const pressure = Number(value[2]);
+		const time = Number(value[3]);
+		return {
+			x: x / 100,
+			y: y / 100,
+			pressure: Number.isFinite(pressure) ? pressure / 100 : 0.5,
+			time: Number.isFinite(time) ? time : 0,
+		};
+	}
 	if (!value || typeof value !== 'object') {
 		return null;
 	}
