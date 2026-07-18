@@ -921,6 +921,10 @@ export class InkDrawer {
 		if (!line) {
 			return;
 		}
+		// The word currently just left of the caret: the caret must never end up left of it, even
+		// when this stroke lands further back (e.g. a second dash drawn left of the first, or dotting
+		// an i on an earlier word).
+		const prevLeftWord = cursor.word > 0 ? line.words[cursor.word - 1] : undefined;
 
 		// Convert canvas points to LINE-ABSOLUTE source coordinates. The drawer view is laid out with
 		// a pinned origin of 0 (rowOriginSource above), so the inverse uses the same fixed origin —
@@ -1006,10 +1010,13 @@ export class InkDrawer {
 			}
 		}
 
-		// Keep words ordered left-to-right; put the cursor just after the affected word.
+		// Keep words ordered left-to-right; put the cursor just after the affected word — but never
+		// left of the slot it already occupied, so writing behind the caret (a dash drawn left of the
+		// previous one, a late i-dot) doesn't pull the caret backwards.
 		line.words.sort((a, b) => (wordBounds(a)?.minX ?? 0) - (wordBounds(b)?.minX ?? 0));
 		const affectedIndex = line.words.indexOf(affected);
-		session.doc.meta.cursor = { line: cursor.line, word: affectedIndex + 1 };
+		const prevLeftIndex = prevLeftWord ? line.words.indexOf(prevLeftWord) : -1;
+		session.doc.meta.cursor = { line: cursor.line, word: Math.max(affectedIndex, prevLeftIndex) + 1 };
 		session.doc.meta.selection = null;
 		this.committedStrokeCount += 1;
 
