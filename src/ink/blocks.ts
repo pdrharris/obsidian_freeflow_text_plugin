@@ -910,6 +910,13 @@ export class InkBlockRegistry {
 		if (el.closest('.markdown-source-view')) {
 			return false;
 		}
+		// PDF export (and print) renders the note into a detached `.print` container that is neither
+		// the source nor the reading-view wrapper. Without this it fell through to the editor path,
+		// which needs section info the export DOM can't supply — so the block came out blank/errored
+		// in the PDF. Treat it as read-only so the inline canvas paints for the snapshot.
+		if (el.closest('.print, .markdown-rendered.markdown-preview-view')) {
+			return true;
+		}
 		if (el.closest('.markdown-reading-view')) {
 			return true;
 		}

@@ -7,14 +7,15 @@
 // affect spacing. The layout engine scales these coordinates and wraps lines to width, but it
 // never re-spaces what you drew. Editing is a tree splice + relayout (no coordinate patching).
 //
-// Wire format history (parse accepts all, serialize writes only the newest):
-// - v4 (current): compact. Points are packed fixed-point arrays [x*100, y*100, pressure*100,
-//   ms since the stroke's first point] and ids are omitted (parse regenerates them). Two
-//   decimals is sub-hundredth-of-a-pixel at render scale, and layout only ever uses
-//   within-stroke time deltas, so nothing visible is lost — files are ~5x smaller.
-// - v3: same tree, but points as {x, y, pressure, time} objects at full float precision with
-//   absolute epoch times, and ids serialized.
-// - v2: word-local point coordinates with normalised gaps; migrated to line-absolute on load.
+// Wire format: v4 only. Points are packed fixed-point arrays [x*100, y*100, pressure*100,
+// ms since the stroke's first point] and ids are omitted (parse regenerates them). Two
+// decimals is sub-hundredth-of-a-pixel at render scale, and layout only ever uses
+// within-stroke time deltas, so nothing visible is lost — files are ~5x smaller than v3.
+//
+// Earlier formats (v3 object points, v2 word-local coordinates) are deliberately NOT readable:
+// all existing notes were bulk-migrated to v4 in July 2026 and the old test content was not
+// worth the code. If an old block ever resurfaces (e.g. restored from git/OneDrive history),
+// parse it with a pre-0.0.22 build — the readers live in this repo's git history.
 
 export const INK_DOC_VERSION = 4 as const;
 export const DEFAULT_LINE_HEIGHT = 180;
@@ -316,12 +317,7 @@ export function parseInkDocument(source: string): InkDocument {
 	}
 	const value = raw as Partial<InkDocument>;
 	const version: unknown = (raw as { version?: unknown }).version;
-	// Accept the current version and the earlier ones (v3 differs only in point encoding, which
-	// normalizePoint handles; v2 additionally needs the coordinate migration below).
-	if (
-		(version !== INK_DOC_VERSION && version !== 3 && version !== 2) ||
-		!Array.isArray(value.lines)
-	) {
+	if (version !== INK_DOC_VERSION || !Array.isArray(value.lines)) {
 		throw new Error(`Invalid fii-ink JSON: expected { version: ${INK_DOC_VERSION}, lines: [] }.`);
 	}
 
@@ -335,12 +331,6 @@ export function parseInkDocument(source: string): InkDocument {
 		.filter((line): line is InkLine => line !== null);
 	if (lines.length === 0) {
 		lines.push(createEmptyLine());
-	}
-
-	if (version === 2) {
-		// v2 stored word-local coordinates with normalised gaps. Spread each line's words to
-		// line-absolute positions with a default gap so old content stays readable.
-		migrateWordLocalToLineAbsolute(lines, lineHeight);
 	}
 
 	const cursor = clampCursor(value.meta?.cursor, lines);
@@ -358,26 +348,6 @@ export function parseInkDocument(source: string): InkDocument {
 	};
 }
 
-function migrateWordLocalToLineAbsolute(lines: InkLine[], lineHeight: number): void {
-	const defaultGap = lineHeight * 0.35;
-	for (const line of lines) {
-		let runningX = 0;
-		for (const word of line.words) {
-			const bounds = wordBounds(word);
-			if (!bounds) {
-				continue;
-			}
-			const shift = runningX - bounds.minX;
-			for (const stroke of word.strokes) {
-				for (const point of stroke.points) {
-					point.x += shift;
-				}
-			}
-			runningX += bounds.maxX - bounds.minX + defaultGap;
-		}
-	}
-}
-
 function normalizeLine(value: unknown): InkLine | null {
 	if (!value || typeof value !== 'object') {
 		return null;
@@ -389,8 +359,9 @@ function normalizeLine(value: unknown): InkLine | null {
 	const words = maybe.words
 		.map((word) => normalizeWord(word))
 		.filter((word): word is InkWord => word !== null);
+	// Ids are never serialized; every parse mints fresh ones.
 	const line: InkLine = {
-		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createLineId(),
+		id: createLineId(),
 		words,
 	};
 	if (typeof maybe.indent === 'number' && Number.isFinite(maybe.indent) && maybe.indent > 0) {
@@ -422,10 +393,7 @@ function normalizeWord(value: unknown): InkWord | null {
 	if (strokes.length === 0) {
 		return null;
 	}
-	return {
-		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createWordId(),
-		strokes,
-	};
+	return { id: createWordId(), strokes };
 }
 
 function normalizeStroke(value: unknown): InkStroke | null {
@@ -443,7 +411,7 @@ function normalizeStroke(value: unknown): InkStroke | null {
 		return null;
 	}
 	const stroke: InkStroke = {
-		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createStrokeId(),
+		id: createStrokeId(),
 		points,
 		width:
 			typeof maybe.width === 'number' && Number.isFinite(maybe.width)
@@ -461,40 +429,22 @@ function normalizeStroke(value: unknown): InkStroke | null {
 }
 
 function normalizePoint(value: unknown): InkPoint | null {
-	if (Array.isArray(value)) {
-		// v4 packed form: [x*100, y*100, pressure*100, ms since stroke start].
-		const x = Number(value[0]);
-		const y = Number(value[1]);
-		if (!Number.isFinite(x) || !Number.isFinite(y)) {
-			return null;
-		}
-		const pressure = Number(value[2]);
-		const time = Number(value[3]);
-		return {
-			x: x / 100,
-			y: y / 100,
-			pressure: Number.isFinite(pressure) ? pressure / 100 : 0.5,
-			time: Number.isFinite(time) ? time : 0,
-		};
-	}
-	if (!value || typeof value !== 'object') {
+	// v4 packed form: [x*100, y*100, pressure*100, ms since stroke start].
+	if (!Array.isArray(value)) {
 		return null;
 	}
-	const maybe = value as Partial<InkPoint>;
-	const x = Number(maybe.x);
-	const y = Number(maybe.y);
+	const x = Number(value[0]);
+	const y = Number(value[1]);
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		return null;
 	}
+	const pressure = Number(value[2]);
+	const time = Number(value[3]);
 	return {
-		x,
-		y,
-		pressure:
-			typeof maybe.pressure === 'number' && Number.isFinite(maybe.pressure)
-				? maybe.pressure
-				: 0.5,
-		time:
-			typeof maybe.time === 'number' && Number.isFinite(maybe.time) ? maybe.time : 0,
+		x: x / 100,
+		y: y / 100,
+		pressure: Number.isFinite(pressure) ? pressure / 100 : 0.5,
+		time: Number.isFinite(time) ? time : 0,
 	};
 }
 

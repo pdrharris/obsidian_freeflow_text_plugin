@@ -27,6 +27,7 @@ import {
 	indentLines,
 	insertFragmentAtCursor,
 	insertWordAtCursor,
+	isScribbleGesture,
 	selectionStyleFlags,
 	splitLineAtCursor,
 	toggleBulletAtCursor,
@@ -131,36 +132,15 @@ test('parse empty string -> empty doc', () => {
 test('parse drops empty words/strokes', () => {
 	const d = parseInkDocument(
 		JSON.stringify({
-			version: 2,
+			version: 4,
 			meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
-			lines: [{ id: 'l0', words: [{ id: 'w', strokes: [{ id: 's', points: [] }] }] }],
+			lines: [{ words: [{ strokes: [{ points: [] }] }] }],
 		}),
 	);
 	eq(d.lines[0]?.words.length, 0, 'word with only empty strokes should be dropped');
 });
 
-test('parse migrates v2 word-local docs to spread, line-absolute words', () => {
-	const v2 = JSON.stringify({
-		version: 2,
-		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
-		lines: [
-			{
-				id: 'l',
-				words: [
-					{ id: 'a', strokes: [{ id: 'as', points: [pt(0, -40), pt(40, 0)] }] },
-					{ id: 'b', strokes: [{ id: 'bs', points: [pt(0, -40), pt(40, 0)] }] },
-				],
-			},
-		],
-	});
-	const d = parseInkDocument(v2);
-	eq(d.version, INK_DOC_VERSION);
-	const a = wordBounds(d.lines[0]!.words[0]!);
-	const b = wordBounds(d.lines[0]!.words[1]!);
-	ok(!!a && !!b && b.minX > a.maxX, 'migrated v2 words should be spread apart, not overlapping');
-});
-
-test('v3 round-trip preserves line-absolute positions', () => {
+test('round-trip preserves line-absolute positions', () => {
 	const d = mkDoc([Wx('a', 0), Wx('b', 200)]);
 	const back = parseInkDocument(serializeInkDocument(d));
 	eq(wordBounds(back.lines[0]!.words[1]!)?.minX, 200, 'absolute x must survive save/load unchanged');
@@ -244,8 +224,8 @@ test('v4 serialize is idempotent after one round-trip', () => {
 	eq(s2, s1, 'second serialize must be byte-identical');
 });
 
-test('v3 object-form points still parse (back-compat)', () => {
-	const raw = JSON.stringify({
+test('legacy v2/v3 docs are rejected (support removed in 0.0.22)', () => {
+	const v3 = JSON.stringify({
 		version: 3,
 		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
 		lines: [
@@ -267,54 +247,49 @@ test('v3 object-form points still parse (back-compat)', () => {
 			},
 		],
 	});
-	const d = parseInkDocument(raw);
-	eq(d.version, INK_DOC_VERSION);
-	eq(d.lines[0]!.words[0]!.strokes[0]!.points[0], { x: 1.5, y: -2.5, pressure: 0.4, time: 100 });
+	let threw = false;
+	try {
+		parseInkDocument(v3);
+	} catch {
+		threw = true;
+	}
+	ok(threw, 'v3 must throw, not silently parse to an empty document');
 });
 
-test('compactInkBlocksInContent: rewrites v3 blocks, leaves other content alone', () => {
-	const v3Body = JSON.stringify({
-		version: 3,
-		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
-		lines: [
-			{
-				id: 'l-abc',
-				words: [
-					{
-						id: 'w-abc',
-						strokes: [
-							{
-								id: 's-abc',
-								points: [{ x: 29.974736842105266, y: -29.338105263157896, pressure: 0.5, time: 1784234164423 }],
-								width: 3,
-								color: '#111827',
-							},
-						],
-					},
-				],
-			},
-		],
-	});
-	const note = `# Heading\n\nSome text.\n\n\`\`\`fii-ink\n${v3Body}\n\`\`\`\n\nMore text.\n`;
+test('compactInkBlocksInContent: canonicalises loose v4 blocks, leaves other content alone', () => {
+	// Same v4 data but pretty-printed — as an external tool or hand edit might leave it.
+	const looseBody = JSON.stringify(
+		{
+			version: 4,
+			meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null },
+			lines: [
+				{ words: [{ strokes: [{ points: [[2997, -2934, 50, 0]], width: 3, color: '#111827' }] }] },
+			],
+		},
+		null,
+		2,
+	);
+	const note = `# Heading\n\nSome text.\n\n\`\`\`fii-ink\n${looseBody}\n\`\`\`\n\nMore text.\n`;
 	const result = compactInkBlocksInContent(note);
 	eq(result.blocksCompacted, 1);
 	eq(result.blocksFailed, 0);
-	ok(result.bytesSaved > 0, 'compacting a v3 block must shrink it');
+	ok(result.bytesSaved > 0, 'canonicalising a pretty-printed block must shrink it');
 	ok(result.content.startsWith('# Heading\n\nSome text.\n\n```fii-ink\n'), 'prose before the block untouched');
 	ok(result.content.endsWith('\n```\n\nMore text.\n'), 'prose after the block untouched');
-	ok(result.content.includes('"version":4'), 'block rewritten to v4');
+	ok(result.content.includes('"version":4'), 'block still v4');
 	// Second pass is a no-op: already compact.
 	const again = compactInkBlocksInContent(result.content);
 	eq(again.blocksCompacted, 0);
 	eq(again.content, result.content);
 });
 
-test('compactInkBlocksInContent: unparsable and empty blocks are left untouched', () => {
-	const note = '```fii-ink\nnot json at all\n```\n\n```fii-ink\n\n```\n';
+test('compactInkBlocksInContent: unparsable, legacy and empty blocks are left untouched', () => {
+	const v3Block = '```fii-ink\n{"version":3,"meta":{},"lines":[]}\n```';
+	const note = `\`\`\`fii-ink\nnot json at all\n\`\`\`\n\n${v3Block}\n\n\`\`\`fii-ink\n\n\`\`\`\n`;
 	const result = compactInkBlocksInContent(note);
 	eq(result.content, note, 'nothing rewritten');
 	eq(result.blocksCompacted, 0);
-	eq(result.blocksFailed, 1, 'only the invalid block counts as failed');
+	eq(result.blocksFailed, 2, 'invalid and legacy blocks count as failed; empty does not');
 });
 
 test('wordBounds spans all strokes', () => {
@@ -402,6 +377,27 @@ test('deleteSelection closes up the gap left by a mid-line range', () => {
 	deleteSelection(d, d.meta.selection);
 	eq(d.lines[0]?.words.map((w) => w.id), ['a', 'd']);
 	eq(wordBounds(d.lines[0]!.words[1]!)?.minX, 103, 'd should close up behind a after b,c removed');
+});
+
+test('isScribbleGesture: horizontal back-and-forth scratch-out is detected', () => {
+	// Five passes across a ~100-wide, ~20-tall box: clearly a strike-out.
+	const pts: { x: number; y: number }[] = [];
+	for (let pass = 0; pass < 5; pass += 1) {
+		const leftToRight = pass % 2 === 0;
+		for (let s = 0; s <= 10; s += 1) {
+			const t = leftToRight ? s : 10 - s;
+			pts.push({ x: t * 10, y: (pass % 2) * 20 });
+		}
+	}
+	ok(isScribbleGesture(pts), 'zig-zag over its own width should read as a scribble');
+});
+
+test('isScribbleGesture: straight strokes and short strokes are not scribbles', () => {
+	const horizontal = Array.from({ length: 20 }, (_, i) => ({ x: i * 6, y: 0 }));
+	ok(!isScribbleGesture(horizontal), 'a straight horizontal line is not a scribble');
+	const vertical = Array.from({ length: 20 }, (_, i) => ({ x: 0, y: i * 6 }));
+	ok(!isScribbleGesture(vertical), 'a straight vertical line is not a scribble');
+	ok(!isScribbleGesture([{ x: 0, y: 0 }, { x: 5, y: 5 }]), 'too few points is not a scribble');
 });
 
 test('eraseAtCursor at line start joins with the previous line', () => {

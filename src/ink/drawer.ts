@@ -15,6 +15,8 @@ import {
 	clampCursor,
 	createStrokeId,
 	fragmentIsEmpty,
+	parseInkDocument,
+	serializeInkDocument,
 	shiftWordX,
 	wordBounds,
 } from './doc';
@@ -25,6 +27,7 @@ import {
 	eraseAtCursor,
 	indentLines,
 	insertFragmentAtCursor,
+	isScribbleGesture,
 	splitLineAtCursor,
 	toggleBulletAtCursor,
 	toggleCheckboxAtCursor,
@@ -112,6 +115,7 @@ export class InkDrawer {
 	private readonly sheetEl: HTMLDivElement;
 	private readonly canvasEl: HTMLCanvasElement;
 	private readonly pasteButtonEl: HTMLButtonElement;
+	private readonly undoButtonEl: HTMLButtonElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
 	private readonly boldButtonEl: HTMLButtonElement;
@@ -125,6 +129,10 @@ export class InkDrawer {
 	private readonly closeButtonEl: HTMLButtonElement;
 
 	private session: DrawerSession | null = null;
+	// Undo history for the current session: v4-serialized snapshots taken before each mutating
+	// action (stroke commit, scribble-erase, backspace, new line, paste, list toggles, indent).
+	// Kept in-drawer (not persisted) and cleared when a new block is opened.
+	private readonly undoStack: string[] = [];
 	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
 	private activeTouchId: number | null = null;
@@ -204,6 +212,9 @@ export class InkDrawer {
 		toolbar.appendChild(this.colorButtonEl);
 
 		this.pasteButtonEl = makeIconButton('📋', 'Paste');
+		// Undo is a writing mechanic (like New line / Backspace) so it always stays visible even
+		// when the unified toolbar hides the style/list/clipboard duplicates.
+		this.undoButtonEl = makeIconButton('↶', 'Undo');
 		this.newLineButtonEl = makeIconButton('↵', 'New line');
 		this.eraseButtonEl = makeIconButton('⌫', 'Backspace');
 
@@ -291,6 +302,7 @@ export class InkDrawer {
 			this.close();
 		}
 		this.session = session;
+		this.undoStack.length = 0; // undo history is per-session
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		// Pin the glyph scale from the full document for this whole session (see field comment).
 		this.sessionHeightRatio = estimateSourceStrokeHeightRatio(session.doc, session.doc.meta.lineHeight);
@@ -302,6 +314,7 @@ export class InkDrawer {
 		this.sheetEl.classList.toggle('is-unified', this.getRuntimeConfig().unifiedToolbar);
 		this.rootEl.classList.add('is-open');
 		this.resetScrollX();
+		this.updateUndoButton();
 		this.requestDraw();
 		this.uiStateListener?.();
 	}
@@ -611,8 +624,12 @@ export class InkDrawer {
 		this.indentButtonEl.addEventListener('click', this.onIndent);
 		this.colorButtonEl.addEventListener('click', this.onColorButton);
 		this.pasteButtonEl.addEventListener('click', this.onPaste);
+		this.undoButtonEl.addEventListener('click', this.onUndo);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
 		this.rootEl.addEventListener('pointerdown', this.onBackdropPointerDown);
+		// Ctrl/Cmd+Z drives undo while the drawer is the active overlay (desktop convenience;
+		// iPad users get the toolbar button). The handler no-ops when the drawer is closed.
+		activeWindow.addEventListener('keydown', this.onKeyDown);
 
 		// Drive the toolbar buttons from touch directly on iPad: a Pencil tap on a <button>
 		// otherwise hands focus back to the note's editor and pops the on-screen keyboard.
@@ -628,6 +645,7 @@ export class InkDrawer {
 		this.bindButtonTouch(this.indentButtonEl, this.onIndent);
 		this.bindButtonTouch(this.colorButtonEl, this.onColorButton);
 		this.bindButtonTouch(this.pasteButtonEl, this.onPaste);
+		this.bindButtonTouch(this.undoButtonEl, this.onUndo);
 		this.bindButtonTouch(this.closeButtonEl, this.onCloseClick);
 	}
 
@@ -668,8 +686,10 @@ export class InkDrawer {
 		this.indentButtonEl.removeEventListener('click', this.onIndent);
 		this.colorButtonEl.removeEventListener('click', this.onColorButton);
 		this.pasteButtonEl.removeEventListener('click', this.onPaste);
+		this.undoButtonEl.removeEventListener('click', this.onUndo);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
+		activeWindow.removeEventListener('keydown', this.onKeyDown);
 		for (const cleanup of this.buttonTouchCleanups) {
 			cleanup();
 		}
@@ -957,6 +977,39 @@ export class InkDrawer {
 			if (p.x > sMaxX) sMaxX = p.x;
 		}
 
+		// Scribble-to-erase: a scratch-out gesture drawn over existing (shown) ink deletes the words
+		// it covers instead of committing as new writing. A scribble in empty space isn't an erase —
+		// it falls through and is drawn normally, so the gesture is only destructive over real ink.
+		if (isScribbleGesture(points)) {
+			const targets: number[] = [];
+			for (let i = 0; i < cursor.word; i += 1) {
+				const word = line.words[i];
+				if (!word) {
+					continue;
+				}
+				const b = wordBounds(word);
+				if (b && Math.min(sMaxX, b.maxX) - Math.max(sMinX, b.minX) > 0) {
+					targets.push(i);
+				}
+			}
+			if (targets.length > 0) {
+				this.pushUndoSnapshot();
+				for (let k = targets.length - 1; k >= 0; k -= 1) {
+					line.words.splice(targets[k]!, 1);
+				}
+				session.doc.meta.cursor = { line: cursor.line, word: cursor.word - targets.length };
+				session.doc.meta.selection = null;
+				this.clearAdvanceTimer();
+				this.scrollCaretIntoView();
+				session.onContentChanged();
+				this.requestDraw();
+				return;
+			}
+		}
+
+		// Committing a real stroke from here on — snapshot first so undo can drop it.
+		this.pushUndoSnapshot();
+
 		// Words to the RIGHT of the insertion point are hidden in the drawer but still present.
 		// They must never be merged into (that would draw the new stroke on top of them) — they
 		// get pushed aside below. Only the shown words (left of the cursor) are merge candidates.
@@ -1026,6 +1079,69 @@ export class InkDrawer {
 		this.requestDraw();
 	}
 
+	// ----------------------------------------------------------------- undo
+
+	private static readonly UNDO_LIMIT = 80;
+
+	// Snapshot the document BEFORE a mutating action so undo can restore this exact state. Call it
+	// at the point of no return in each action (after early-out guards, before the first mutation).
+	private pushUndoSnapshot(): void {
+		const session = this.session;
+		if (!session) {
+			return;
+		}
+		this.undoStack.push(serializeInkDocument(session.doc));
+		if (this.undoStack.length > InkDrawer.UNDO_LIMIT) {
+			this.undoStack.shift();
+		}
+		this.updateUndoButton();
+	}
+
+	private onUndo = (): void => {
+		const session = this.session;
+		const snapshot = this.undoStack.pop();
+		if (!session || snapshot === undefined) {
+			return;
+		}
+		// Abandon any half-drawn stroke so pen-up doesn't commit it over the restored state.
+		this.activeStroke = null;
+		this.activePointerId = null;
+		this.activeTouchId = null;
+		this.clearAdvanceTimer();
+		let restored: InkDocument;
+		try {
+			restored = parseInkDocument(snapshot);
+		} catch {
+			return; // corrupt snapshot: drop it rather than throwing mid-session
+		}
+		// session.doc is shared by reference with the inline block (blocks.ts) and this drawer's
+		// callbacks, so restore by mutating its fields in place — never reassign session.doc.
+		session.doc.lines = restored.lines;
+		session.doc.meta = restored.meta;
+		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
+		session.doc.meta.selection = null;
+		this.syncPenStyleToContext();
+		this.scrollCaretIntoView();
+		this.updateUndoButton();
+		session.onContentChanged();
+		session.onCursorChanged();
+		this.requestDraw();
+	};
+
+	private onKeyDown = (event: KeyboardEvent): void => {
+		if (!this.session) {
+			return;
+		}
+		if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z') {
+			event.preventDefault();
+			this.onUndo();
+		}
+	};
+
+	private updateUndoButton(): void {
+		this.undoButtonEl.disabled = this.undoStack.length === 0;
+	}
+
 	// ----------------------------------------------------------------- buttons
 
 	private onPaste = (): void => {
@@ -1034,6 +1150,7 @@ export class InkDrawer {
 		if (!session || fragmentIsEmpty(clip)) {
 			return;
 		}
+		this.pushUndoSnapshot();
 		insertFragmentAtCursor(session.doc, clip!);
 		this.resetScrollX();
 		session.onContentChanged();
@@ -1048,6 +1165,7 @@ export class InkDrawer {
 		// Cancel any pending auto-advance from the previous stroke: it was scheduled for the
 		// pre-erase content and would otherwise fire and scroll the view a moment after erasing.
 		this.clearAdvanceTimer();
+		this.pushUndoSnapshot();
 		eraseAtCursor(session.doc);
 		// Keep the remaining writing where it is (only scroll if the caret would fall off screen),
 		// so it doesn't lurch sideways under the pen after a backspace.
@@ -1061,6 +1179,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.pushUndoSnapshot();
 		splitLineAtCursor(session.doc);
 		this.resetScrollX();
 		session.onContentChanged();
@@ -1087,6 +1206,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.pushUndoSnapshot();
 		toggleBulletAtCursor(session.doc);
 		session.onContentChanged();
 		this.updateStyleButtons();
@@ -1097,6 +1217,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.pushUndoSnapshot();
 		toggleCheckboxAtCursor(session.doc);
 		session.onContentChanged();
 		this.updateStyleButtons();
@@ -1115,6 +1236,7 @@ export class InkDrawer {
 		if (!session) {
 			return;
 		}
+		this.pushUndoSnapshot();
 		indentLines(session.doc, delta);
 		session.onContentChanged();
 	}

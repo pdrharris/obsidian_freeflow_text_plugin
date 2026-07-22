@@ -44,6 +44,55 @@ function placeRun(words: InkWord[], startX: number): number {
 	return right;
 }
 
+// A "scribble erase" is a scratch-out gesture: several quick back-and-forth passes, usually
+// drawn over existing ink to strike it out. We classify purely on the stroke's own geometry so
+// the drawer can drop the stroke and delete what it covers instead of committing it as writing.
+// Points are in any consistent space (the drawer passes line-absolute source coords).
+//
+// The test is deliberately conservative — it must clear ALL of: enough samples, several genuine
+// horizontal direction reversals, a path far longer than the bounding box is wide, and a box that
+// is roughly as wide as it is tall. That rejects straight strokes (a vertical `l`/`t`, a dash) and
+// ordinary letters, which don't double back repeatedly across their own width.
+export function isScribbleGesture(points: ReadonlyArray<{ x: number; y: number }>): boolean {
+	if (points.length < 8) {
+		return false;
+	}
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let minY = Infinity;
+	let maxY = -Infinity;
+	for (const p of points) {
+		if (p.x < minX) minX = p.x;
+		if (p.x > maxX) maxX = p.x;
+		if (p.y < minY) minY = p.y;
+		if (p.y > maxY) maxY = p.y;
+	}
+	const width = maxX - minX;
+	const height = maxY - minY;
+	if (width <= 0 || width < height * 0.8) {
+		return false; // too narrow/tall to be a horizontal scratch-out
+	}
+	// Ignore sub-jitter horizontal motion so a slightly wavy line isn't read as reversing.
+	const eps = width * 0.06;
+	let pathLen = 0;
+	let reversals = 0;
+	let dir = 0; // last significant horizontal direction: -1, 0, or +1
+	for (let i = 1; i < points.length; i += 1) {
+		const p = points[i]!;
+		const prev = points[i - 1]!;
+		const dx = p.x - prev.x;
+		pathLen += Math.hypot(dx, p.y - prev.y);
+		if (Math.abs(dx) > eps) {
+			const nd = dx > 0 ? 1 : -1;
+			if (dir !== 0 && nd !== dir) {
+				reversals += 1;
+			}
+			dir = nd;
+		}
+	}
+	return reversals >= 3 && pathLen >= width * 2.5;
+}
+
 // After words are removed starting at `index`, pull the remaining right-hand words left so a
 // mid-line delete closes the hole instead of leaving the drawn whitespace behind. The first
 // surviving word is re-seated a normal word gap after the word now before it (or at the line
