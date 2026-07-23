@@ -269,7 +269,7 @@ export class InkBlockRegistry {
 
 		// Reading mode (and previews/exports): render read-only, no chrome, no border.
 		if (this.isReadingMode(el, ctx)) {
-			this.mountReadOnly(containerEl, documentModel, el, ctx);
+			this.mountReadOnly(source, containerEl, documentModel, el, ctx);
 			return;
 		}
 
@@ -1003,6 +1003,7 @@ export class InkBlockRegistry {
 	}
 
 	private mountReadOnly(
+		source: string,
 		containerEl: HTMLDivElement,
 		documentModel: InkDocument,
 		el: HTMLElement,
@@ -1079,20 +1080,48 @@ export class InkBlockRegistry {
 		// Observe the pane ancestor (see the editable path) so fill-width blocks track pane resizes.
 		const resizeObserver = new ResizeObserver(() => render());
 		resizeObserver.observe(containerEl.parentElement ?? containerEl);
-		ctx.addChild(
-			new (class extends MarkdownRenderChild {
-				onunload(): void {
-					disposed = true;
-					canvasEl.removeEventListener('click', onReadingClick);
-					if (saveTimeout) {
-						window.clearTimeout(saveTimeout);
-						saveTimeout = 0;
-					}
-					inlineRefreshers.delete(render);
-					resizeObserver.disconnect();
-				}
-			})(el),
-		);
+
+		const cleanup = (): void => {
+			if (disposed) {
+				return;
+			}
+			disposed = true;
+			canvasEl.removeEventListener('click', onReadingClick);
+			if (saveTimeout) {
+				window.clearTimeout(saveTimeout);
+				saveTimeout = 0;
+			}
+			inlineRefreshers.delete(render);
+			resizeObserver.disconnect();
+		};
+
+		// Self-heal for a race seen on iPad: the mode probe can mis-read an *editing* block as reading
+		// (the element often isn't attached when the processor runs, so it falls back to the active
+		// view's mode). That mounts it read-only — no border, no buttons — and because switching modes
+		// doesn't re-run the code-block processor it stayed stuck until the note was reopened. Once the
+		// element is in the DOM we can tell for certain we're inside an editor (a source/live-preview
+		// ancestor); if so, tear this read-only mount down and rebuild it as a full editable block.
+		const healIfInEditor = (): void => {
+			if (disposed || !el.isConnected || !el.closest('.markdown-source-view')) {
+				return;
+			}
+			cleanup();
+			this.mountBlock(source, el, ctx);
+		};
+
+		const child = new (class extends MarkdownRenderChild {
+			onunload(): void {
+				cleanup();
+			}
+		})(el);
+		// Component-scoped so these are dropped when the block unloads.
+		child.registerEvent(this.plugin.app.workspace.on('layout-change', healIfInEditor));
+		child.registerEvent(this.plugin.app.workspace.on('active-leaf-change', healIfInEditor));
+		ctx.addChild(child);
+		// Probe shortly after mount too, so the common case heals on its own without needing a
+		// workspace event (the element is usually attached a frame or two later).
+		window.setTimeout(healIfInEditor, 60);
+		window.setTimeout(healIfInEditor, 250);
 	}
 
 	private parseWithError(source: string, containerEl: HTMLDivElement): InkDocument | null {
