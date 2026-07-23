@@ -138,6 +138,11 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.settings.showSoftLimitNotice,
 			toolbar,
 			() => this.settings.unifiedToolbar,
+			() => ({
+				applicationKey: this.settings.myscriptAppKey,
+				hmacKey: this.settings.myscriptHmacKey,
+				language: this.settings.recognitionLanguage,
+			}),
 		);
 		this.registry = registry;
 		registry.register();

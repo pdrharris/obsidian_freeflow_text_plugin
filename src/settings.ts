@@ -3,7 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-07-23A';
+export const FREEFLOW_BUILD_MARKER = '2026-07-23B';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width
@@ -53,6 +53,12 @@ export interface FreeFlowInkSettings {
 	unifiedToolbar: boolean;
 	// Last dragged position of the floating toolbar (viewport px, clamped on restore).
 	toolbarPosition: { x: number; y: number } | null;
+	// Handwriting recognition (MyScript). Each user supplies their own free developer keys — the
+	// plugin is open-source, so a baked-in key would leak. Empty keys just disable "Copy as text".
+	myscriptAppKey: string;
+	myscriptHmacKey: string;
+	// MyScript recognition locale, e.g. "en_US", "en_GB", "fr_FR".
+	recognitionLanguage: string;
 }
 
 export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
@@ -81,6 +87,9 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	showSoftLimitNotice: false,
 	unifiedToolbar: true,
 	toolbarPosition: null,
+	myscriptAppKey: '',
+	myscriptHmacKey: '',
+	recognitionLanguage: 'en_US',
 };
 
 export class FreeFlowInkSettingTab extends PluginSettingTab {
@@ -498,6 +507,53 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 					}),
 			)
 			.controlEl.appendChild(advanceLineValueEl);
+
+		new Setting(containerEl).setName('Handwriting recognition (MyScript)').setHeading();
+
+		new Setting(containerEl).setDesc(
+			'"Copy as text" on a block sends its strokes to MyScript and copies back the recognised text. ' +
+				'Create a free developer account at developer.myscript.com (about 2,000 recognitions/month at ' +
+				'no cost) and paste your two keys below. They are stored only in this vault. Handwriting is ' +
+				'sent to MyScript’s cloud when you use the feature.',
+		);
+
+		new Setting(containerEl)
+			.setName('MyScript application key')
+			.setDesc('The application key from your MyScript developer dashboard.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Application key')
+					.setValue(this.plugin.settings.myscriptAppKey)
+					.onChange(async (value) => {
+						this.plugin.settings.myscriptAppKey = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('MyScript HMAC key')
+			.setDesc('The HMAC key that pairs with the application key above.')
+			.addText((text) => {
+				text
+					.setValue(this.plugin.settings.myscriptHmacKey)
+					.onChange(async (value) => {
+						this.plugin.settings.myscriptHmacKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password'; // it's a secret; don't show it in the clear
+			});
+
+		new Setting(containerEl)
+			.setName('Recognition language')
+			.setDesc('MyScript locale used for recognition, for example en_US, en_GB or fr_FR.')
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.recognitionLanguage)
+					.onChange(async (value) => {
+						this.plugin.settings.recognitionLanguage = value.trim() || 'en_US';
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		new Setting(containerEl).setName('Block size guardrails').setHeading();
 

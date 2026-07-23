@@ -31,4 +31,13 @@ export default tseslint.config(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		rules: {
+			// Proper nouns / acronyms / locale codes the sentence-case rule shouldn't "correct".
+			'obsidianmd/ui/sentence-case': [
+				'error',
+				{ ignoreWords: ['MyScript', 'HMAC', 'US', 'GB', 'FR', 'en_US', 'en_GB', 'fr_FR'] },
+			],
+		},
+	},
 );

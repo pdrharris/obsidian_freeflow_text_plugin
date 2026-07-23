@@ -36,6 +36,7 @@ import {
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
+import { buildRecognitionStrokes } from '../src/ink/recognize';
 import { compactInkBlocksInContent } from '../src/ink/compact';
 import { Text } from '@codemirror/state';
 import { editViolatesInkBlock, inkBlockAt } from '../src/ink/guard';
@@ -398,6 +399,35 @@ test('isScribbleGesture: straight strokes and short strokes are not scribbles', 
 	const vertical = Array.from({ length: 20 }, (_, i) => ({ x: 0, y: i * 6 }));
 	ok(!isScribbleGesture(vertical), 'a straight vertical line is not a scribble');
 	ok(!isScribbleGesture([{ x: 0, y: 0 }, { x: 5, y: 5 }]), 'too few points is not a scribble');
+});
+
+test('buildRecognitionStrokes: one stroke per stroke, equal-length x/y/t, monotonic time', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	const strokes = buildRecognitionStrokes(d, null);
+	eq(strokes.length, 2, 'two strokes across two lines');
+	let lastT = -Infinity;
+	for (const s of strokes) {
+		eq(s.x.length, s.y.length, 'x and y same length');
+		eq(s.x.length, s.t.length, 'x and t same length');
+		for (const t of s.t) {
+			ok(t > lastT, 'time strictly increases across all points');
+			lastT = t;
+		}
+	}
+});
+
+test('buildRecognitionStrokes: lines are separated vertically (no wrap stacking)', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	const [first, second] = buildRecognitionStrokes(d, null);
+	const avg = (ys: number[]): number => ys.reduce((s, y) => s + y, 0) / ys.length;
+	ok(avg(second!.y) > avg(first!.y), 'the second line sits below the first');
+});
+
+test('buildRecognitionStrokes: a selection limits recognition to the selected words', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	const selection = { anchor: { line: 1, word: 0 }, focus: { line: 1, word: 1 } };
+	const strokes = buildRecognitionStrokes(d, selection);
+	eq(strokes.length, 1, 'only the selected line-1 word is included');
 });
 
 test('eraseAtCursor at line start joins with the previous line', () => {

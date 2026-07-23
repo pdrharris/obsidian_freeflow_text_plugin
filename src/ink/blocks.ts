@@ -29,6 +29,8 @@ import {
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions, renderInkImage, StrokeNib } from './render';
+import { buildRecognitionStrokes } from './recognize';
+import { hasMyScriptKeys, MyScriptCredentials, recognizeText } from './myscript';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
 import { InkToolbar, ToolbarTarget } from './toolbar';
@@ -109,6 +111,7 @@ export class InkBlockRegistry {
 	private readonly getShowSoftLimitNotice: () => boolean;
 	private readonly toolbar: InkToolbar | null;
 	private readonly getUnifiedToolbar: () => boolean;
+	private readonly getRecognitionCredentials: () => MyScriptCredentials;
 	private activeKey: string | null = null;
 	// Re-render callbacks for every mounted inline canvas (edit + reading), so a global toggle like
 	// the writing-line guide updates all visible blocks at once.
@@ -136,6 +139,7 @@ export class InkBlockRegistry {
 		getShowSoftLimitNotice: () => boolean,
 		toolbar: InkToolbar | null,
 		getUnifiedToolbar: () => boolean,
+		getRecognitionCredentials: () => MyScriptCredentials,
 	) {
 		this.plugin = plugin;
 		this.drawer = drawer;
@@ -158,6 +162,7 @@ export class InkBlockRegistry {
 		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
 		this.toolbar = toolbar;
 		this.getUnifiedToolbar = getUnifiedToolbar;
+		this.getRecognitionCredentials = getRecognitionCredentials;
 	}
 
 	refreshAllInline(): void {
@@ -346,6 +351,8 @@ export class InkBlockRegistry {
 		// Copy-as-image writes a PNG to the OS clipboard for pasting into other apps (whole block, or
 		// the selection when there is one). Unlike Copy/Cut it works with no selection, so never disabled.
 		const copyImageButtonEl = makeMetaButton('🖼', 'Copy as image');
+		// Copy-as-text runs handwriting recognition (MyScript) and copies the text (whole block or selection).
+		const copyTextButtonEl = makeMetaButton('Aa', 'Copy as text');
 		const actionEl = makeMetaButton('✏️', 'Open drawer');
 
 		const updateMetaButtons = (): void => {
@@ -692,6 +699,39 @@ export class InkBlockRegistry {
 			})();
 		};
 
+		const onCopyText = (): void => {
+			void (async () => {
+				const creds = this.getRecognitionCredentials();
+				if (!hasMyScriptKeys(creds)) {
+					new Notice('Set your recognition keys in settings to copy as text.');
+					return;
+				}
+				const selection = selectionIsEmpty(documentModel.meta.selection)
+					? null
+					: documentModel.meta.selection;
+				const strokes = buildRecognitionStrokes(documentModel, selection);
+				if (strokes.length === 0) {
+					new Notice('There is no handwriting here to recognise.');
+					return;
+				}
+				const progress = new Notice('Recognising handwriting…', 0);
+				try {
+					const text = await recognizeText(strokes, creds);
+					progress.hide();
+					if (!text) {
+						new Notice('No text was recognised.');
+						return;
+					}
+					await navigator.clipboard.writeText(text);
+					new Notice(selection ? 'Copied selection as text.' : 'Copied handwriting as text.');
+				} catch (error) {
+					progress.hide();
+					const message = error instanceof Error ? error.message : 'recognition failed';
+					new Notice(`Recognition failed: ${message}`);
+				}
+			})();
+		};
+
 		const onBold = (): void => {
 			if (selectionIsEmpty(documentModel.meta.selection)) {
 				return;
@@ -877,6 +917,7 @@ export class InkBlockRegistry {
 		cutButtonEl.addEventListener('click', onCut);
 		pasteButtonEl.addEventListener('click', onPaste);
 		copyImageButtonEl.addEventListener('click', onCopyImage);
+		copyTextButtonEl.addEventListener('click', onCopyText);
 		actionEl.addEventListener('click', onActionClick);
 		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;
@@ -920,6 +961,7 @@ export class InkBlockRegistry {
 					cutButtonEl.removeEventListener('click', onCut);
 					pasteButtonEl.removeEventListener('click', onPaste);
 					copyImageButtonEl.removeEventListener('click', onCopyImage);
+					copyTextButtonEl.removeEventListener('click', onCopyText);
 					actionEl.removeEventListener('click', onActionClick);
 					deleteButtonEl.removeEventListener('click', onDelete);
 					colorPopup?.close();
