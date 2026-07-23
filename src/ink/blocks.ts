@@ -28,7 +28,7 @@ import {
 	toggleLineChecked,
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
-import { drawInlineCanvas, inlineLayout, InlineRenderOptions, StrokeNib } from './render';
+import { drawInlineCanvas, inlineLayout, InlineRenderOptions, renderInkImage, StrokeNib } from './render';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
 import { InkToolbar, ToolbarTarget } from './toolbar';
@@ -343,6 +343,9 @@ export class InkBlockRegistry {
 		const copyButtonEl = makeMetaButton('⧉', 'Copy');
 		const cutButtonEl = makeMetaButton('✂', 'Cut');
 		const pasteButtonEl = makeMetaButton('📋', 'Paste');
+		// Copy-as-image writes a PNG to the OS clipboard for pasting into other apps (whole block, or
+		// the selection when there is one). Unlike Copy/Cut it works with no selection, so never disabled.
+		const copyImageButtonEl = makeMetaButton('🖼', 'Copy as image');
 		const actionEl = makeMetaButton('✏️', 'Open drawer');
 
 		const updateMetaButtons = (): void => {
@@ -661,6 +664,34 @@ export class InkBlockRegistry {
 			applyInlineEdit();
 		};
 
+		const onCopyImage = (): void => {
+			void (async () => {
+				const rect = canvasEl.getBoundingClientRect();
+				const cssWidth = rect.width || canvasEl.clientWidth || 400;
+				const selection = selectionIsEmpty(documentModel.meta.selection)
+					? null
+					: documentModel.meta.selection;
+				let blob: Blob | null = null;
+				try {
+					blob = await renderInkImage(documentModel, this.blockRenderOptions(), cssWidth, selection);
+				} catch {
+					blob = null;
+				}
+				if (!blob) {
+					new Notice('Could not render the handwriting image.');
+					return;
+				}
+				try {
+					await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+					new Notice(selection ? 'Copied selection as image.' : 'Copied handwriting as image.');
+				} catch (error) {
+					// iOS webviews in particular can reject image clipboard writes; say so rather than fail silently.
+					const message = error instanceof Error ? error.message : 'clipboard write was blocked';
+					new Notice(`FreeFlow Ink image copy failed (${message}).`);
+				}
+			})();
+		};
+
 		const onBold = (): void => {
 			if (selectionIsEmpty(documentModel.meta.selection)) {
 				return;
@@ -845,6 +876,7 @@ export class InkBlockRegistry {
 		copyButtonEl.addEventListener('click', onCopy);
 		cutButtonEl.addEventListener('click', onCut);
 		pasteButtonEl.addEventListener('click', onPaste);
+		copyImageButtonEl.addEventListener('click', onCopyImage);
 		actionEl.addEventListener('click', onActionClick);
 		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;
@@ -887,6 +919,7 @@ export class InkBlockRegistry {
 					copyButtonEl.removeEventListener('click', onCopy);
 					cutButtonEl.removeEventListener('click', onCut);
 					pasteButtonEl.removeEventListener('click', onPaste);
+					copyImageButtonEl.removeEventListener('click', onCopyImage);
 					actionEl.removeEventListener('click', onActionClick);
 					deleteButtonEl.removeEventListener('click', onDelete);
 					colorPopup?.close();
