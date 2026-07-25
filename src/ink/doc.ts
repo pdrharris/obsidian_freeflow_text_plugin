@@ -80,6 +80,14 @@ export interface InkDocument {
 		// with the block so a resized block keeps its width on every device and through sync. When
 		// absent, the block uses the global "Displayed line width" default.
 		widthScale?: number;
+		// Search sidecar. The recognised words live in the note's frontmatter (keyed by `id`), so a
+		// search hit opens the note's properties, not the stroke JSON. Only bookkeeping is kept here:
+		// `id` is a stable per-block key for the frontmatter entry; `textHash` is the ink signature the
+		// stored text was recognised from (differs from the current strokes ⇒ stale). `text` is legacy
+		// (older builds stored the words here) — still parsed so it can be migrated, never written.
+		id?: string;
+		text?: string;
+		textHash?: string;
 	};
 	lines: InkLine[];
 }
@@ -114,6 +122,10 @@ export function createWordId(): string {
 }
 export function createLineId(): string {
 	return nextId('l');
+}
+// Stable per-block id used to key this block's entry in the note's frontmatter search sidecar.
+export function createBlockId(): string {
+	return nextId('b');
 }
 
 export function createEmptyLine(): InkLine {
@@ -249,11 +261,16 @@ export function serializeInkDocument(doc: InkDocument): string {
 	if (doc.meta.widthScale !== undefined) {
 		meta.widthScale = Math.round(doc.meta.widthScale * 1000) / 1000;
 	}
-	return JSON.stringify({
-		version: INK_DOC_VERSION,
-		meta,
-		lines: doc.lines.map(packLine),
-	});
+	// Search sidecar bookkeeping (the words themselves live in the note frontmatter, not here): the
+	// stable block id and the ink signature the stored text was recognised from. `meta.text` is still
+	// *parsed* (older blocks stored the words here) so it can be migrated, but it is never written.
+	if (typeof doc.meta.id === 'string' && doc.meta.id.length > 0) {
+		meta.id = doc.meta.id;
+	}
+	if (typeof doc.meta.textHash === 'string' && doc.meta.textHash.length > 0) {
+		meta.textHash = doc.meta.textHash;
+	}
+	return JSON.stringify({ version: INK_DOC_VERSION, meta, lines: doc.lines.map(packLine) });
 }
 
 function packLine(line: InkLine): PackedLine {
@@ -341,9 +358,25 @@ export function parseInkDocument(source: string): InkDocument {
 			? clampWidthScale(rawWidthScale)
 			: undefined;
 
+	const rawId = value.meta?.id;
+	const id = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
+	const rawText = value.meta?.text;
+	const text = typeof rawText === 'string' && rawText.length > 0 ? rawText : undefined;
+	const rawTextHash = value.meta?.textHash;
+	const textHash =
+		typeof rawTextHash === 'string' && rawTextHash.length > 0 ? rawTextHash : undefined;
+
 	return {
 		version: INK_DOC_VERSION,
-		meta: { lineHeight, cursor, selection, ...(widthScale !== undefined ? { widthScale } : {}) },
+		meta: {
+			lineHeight,
+			cursor,
+			selection,
+			...(widthScale !== undefined ? { widthScale } : {}),
+			...(id !== undefined ? { id } : {}),
+			...(text !== undefined ? { text } : {}),
+			...(textHash !== undefined ? { textHash } : {}),
+		},
 		lines,
 	};
 }

@@ -143,6 +143,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 				hmacKey: this.settings.myscriptHmacKey,
 				language: this.settings.recognitionLanguage,
 			}),
+			() => this.settings.autoIndexForSearch,
 		);
 		this.registry = registry;
 		registry.register();

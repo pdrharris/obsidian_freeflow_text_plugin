@@ -3,7 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-07-23C';
+export const FREEFLOW_BUILD_MARKER = '2026-07-25A';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width
@@ -59,6 +59,10 @@ export interface FreeFlowInkSettings {
 	myscriptHmacKey: string;
 	// MyScript recognition locale, e.g. "en_US", "en_GB", "fr_FR".
 	recognitionLanguage: string;
+	// When on, a block's searchable text is refreshed automatically a few seconds after you finish
+	// editing it (only when the strokes changed). Off by default: automatic means handwriting is sent
+	// to MyScript's cloud without an explicit action.
+	autoIndexForSearch: boolean;
 }
 
 export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
@@ -90,6 +94,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	myscriptAppKey: '',
 	myscriptHmacKey: '',
 	recognitionLanguage: 'en_US',
+	autoIndexForSearch: false,
 };
 
 export class FreeFlowInkSettingTab extends PluginSettingTab {
@@ -553,6 +558,20 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 						this.plugin.settings.recognitionLanguage = value.trim() || 'en_US';
 						await this.plugin.saveSettings();
 					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Index for search automatically')
+			.setDesc(
+				'Refresh a block’s searchable text a few seconds after you finish editing it (only when ' +
+					'the handwriting changed). Off by default: leaving it off means handwriting is sent to ' +
+					'MyScript only when you tap a block’s search button.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.autoIndexForSearch).onChange(async (value) => {
+					this.plugin.settings.autoIndexForSearch = value;
+					await this.plugin.saveSettings();
+				}),
 			);
 
 		new Setting(containerEl).setName('Block size guardrails').setHeading();

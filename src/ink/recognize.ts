@@ -24,6 +24,31 @@ export interface RecognitionStroke {
 const POINT_MS = 8; // synthetic time step per point
 const STROKE_GAP_MS = 80; // synthetic pen-up gap between strokes
 
+// A compact signature of a document's ink (FNV-1a over rounded stroke coordinates). It changes iff
+// the handwriting changes, so the search sidecar can tell when its stored text has gone stale and
+// skip re-recognising (and re-spending MyScript quota) when the strokes are unchanged. Independent
+// of layout/render settings — only the drawn geometry matters.
+export function inkSignature(doc: InkDocument): string {
+	let h = 0x811c9dc5;
+	const mix = (n: number): void => {
+		h ^= n;
+		h = Math.imul(h, 0x01000193);
+	};
+	for (const line of doc.lines) {
+		for (const word of line.words) {
+			for (const stroke of word.strokes) {
+				for (const p of stroke.points) {
+					mix(Math.round(p.x * 100));
+					mix(Math.round(p.y * 100));
+				}
+				mix(0x7fffffff); // stroke boundary
+			}
+		}
+		mix(0x5eeeeee5); // line boundary
+	}
+	return (h >>> 0).toString(16);
+}
+
 function round2(n: number): number {
 	return Math.round(n * 100) / 100;
 }

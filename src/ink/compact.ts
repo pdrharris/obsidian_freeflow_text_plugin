@@ -15,8 +15,9 @@ export interface CompactContentResult {
 // left byte-for-byte untouched and counted in `blocksFailed`; empty bodies are skipped.
 export function compactInkBlocksInContent(content: string): CompactContentResult {
 	const escapedLanguage = escapeRegExp(INK_CODE_BLOCK_LANGUAGE);
-	// Open fence line, single-line-JSON body (serialized docs never contain a newline), close
-	// fence at the start of a line. Lazy body match stops at the first newline+``` pair.
+	// Open fence line, JSON body (may span multiple lines), close fence at the start of a line. The
+	// lazy `[\s\S]*?` body match spans newlines and stops at the first newline+``` pair (body lines
+	// never start with ```), so multi-line serialized docs are handled too.
 	const pattern = new RegExp(
 		'(```' + escapedLanguage + '[^\\r\\n]*\\r?\\n)([\\s\\S]*?)(\\r?\\n```)',
 		'g',

@@ -6,6 +6,7 @@ import {
 	Modal,
 	Notice,
 	Plugin,
+	TFile,
 } from 'obsidian';
 import { InkDrawer } from './drawer';
 import {
@@ -13,6 +14,7 @@ import {
 	InkDocument,
 	InkWord,
 	clampCursor,
+	createBlockId,
 	clampWidthScale,
 	fragmentIsEmpty,
 	parseInkDocument,
@@ -29,13 +31,22 @@ import {
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions, renderInkImage, StrokeNib } from './render';
-import { buildRecognitionStrokes } from './recognize';
+import { buildRecognitionStrokes, inkSignature } from './recognize';
 import { hasMyScriptKeys, MyScriptCredentials, recognizeText } from './myscript';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
-import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
+import {
+	persistInkCodeBlock,
+	persistInkSearchFrontmatter,
+	persistInkSearchText,
+	removeInkCodeBlock,
+	SectionInfoLike,
+} from './storage';
 import { InkToolbar, ToolbarTarget } from './toolbar';
 
 const SAVE_DEBOUNCE_MS = 320;
+// Automatic search-indexing waits longer than a save: it only wants to fire once writing has
+// settled, and every run is a MyScript request, so we err well on the side of quiet.
+const AUTO_INDEX_DEBOUNCE_MS = 4000;
 
 // The ink colour at the caret: the colour of the nearest stroke just before the cursor (so the
 // swatch previews "what you're writing in here"), falling back to the next stroke to the right,
@@ -89,6 +100,44 @@ function confirmModal(app: App, title: string, body: string, confirmText: string
 	});
 }
 
+// Pull one block's stored lines out of the note frontmatter's "Indexed text" map (keyed by block
+// id). Takes `unknown` because Obsidian types frontmatter as `any`; narrows defensively.
+function indexedLinesFor(frontmatter: unknown, id: string | undefined): string[] {
+	if (!id || !frontmatter || typeof frontmatter !== 'object') {
+		return [];
+	}
+	const map = (frontmatter as Record<string, unknown>)['Indexed text'];
+	if (!map || typeof map !== 'object') {
+		return [];
+	}
+	const entry = (map as Record<string, unknown>)[id];
+	if (Array.isArray(entry)) {
+		return entry.filter((line): line is string => typeof line === 'string');
+	}
+	if (typeof entry === 'string' && entry.length > 0) {
+		return entry.split('\n');
+	}
+	return [];
+}
+
+// Show a block's recognised (indexed) text in a popup, with line breaks preserved. The text is
+// stored hidden in the note frontmatter for search; this is how the user reads it on demand.
+function showIndexedTextModal(app: App, lines: string[]): void {
+	const modal = new Modal(app);
+	modal.setTitle('Indexed text');
+	if (lines.length === 0) {
+		modal.contentEl.createEl('p', {
+			text: 'This block hasn’t been indexed yet. Tap the search button (🔍) to index it.',
+		});
+	} else {
+		const wrap = modal.contentEl.createDiv({ cls: 'freeflow-ink-indexed-text' });
+		for (const line of lines) {
+			wrap.createDiv({ cls: 'freeflow-ink-indexed-line', text: line });
+		}
+	}
+	modal.open();
+}
+
 export class InkBlockRegistry {
 	private readonly plugin: Plugin;
 	private readonly drawer: InkDrawer;
@@ -112,6 +161,7 @@ export class InkBlockRegistry {
 	private readonly toolbar: InkToolbar | null;
 	private readonly getUnifiedToolbar: () => boolean;
 	private readonly getRecognitionCredentials: () => MyScriptCredentials;
+	private readonly getAutoIndexForSearch: () => boolean;
 	private activeKey: string | null = null;
 	// Re-render callbacks for every mounted inline canvas (edit + reading), so a global toggle like
 	// the writing-line guide updates all visible blocks at once.
@@ -140,6 +190,7 @@ export class InkBlockRegistry {
 		toolbar: InkToolbar | null,
 		getUnifiedToolbar: () => boolean,
 		getRecognitionCredentials: () => MyScriptCredentials,
+		getAutoIndexForSearch: () => boolean,
 	) {
 		this.plugin = plugin;
 		this.drawer = drawer;
@@ -163,6 +214,7 @@ export class InkBlockRegistry {
 		this.toolbar = toolbar;
 		this.getUnifiedToolbar = getUnifiedToolbar;
 		this.getRecognitionCredentials = getRecognitionCredentials;
+		this.getAutoIndexForSearch = getAutoIndexForSearch;
 	}
 
 	refreshAllInline(): void {
@@ -294,6 +346,8 @@ export class InkBlockRegistry {
 		let colorPopup: ColorPopupHandle | null = null;
 		let lastSelectionColor = DEFAULT_INK_COLOR;
 		let saveTimeout = 0;
+		let autoIndexTimeout = 0;
+		let indexing = false;
 		let isDisposed = false;
 		let pendingInlineRefreshWhileActive = false;
 		let softWarned = false;
@@ -353,6 +407,10 @@ export class InkBlockRegistry {
 		const copyImageButtonEl = makeMetaButton('🖼', 'Copy as image');
 		// Copy-as-text runs handwriting recognition (MyScript) and copies the text (whole block or selection).
 		const copyTextButtonEl = makeMetaButton('Aa', 'Copy as text');
+		// Index-for-search recognises the whole block and stores the text (hidden) in the note frontmatter.
+		const indexSearchButtonEl = makeMetaButton('🔍', 'Index for search');
+		// The stored text is hidden from the Properties panel; this shows it on demand in a popup.
+		const viewTextButtonEl = makeMetaButton('👁', 'See indexed text');
 		const actionEl = makeMetaButton('✏️', 'Open drawer');
 
 		const updateMetaButtons = (): void => {
@@ -453,6 +511,121 @@ export class InkBlockRegistry {
 				saveTimeout = 0;
 				void flushSave();
 			}, SAVE_DEBOUNCE_MS);
+			scheduleAutoIndex();
+		};
+
+		const blockHasInk = (): boolean =>
+			documentModel.lines.some((line) => line.words.some((w) => w.strokes.length > 0));
+
+		const freshSection = (): SectionInfoLike =>
+			toSectionInfoLike(ctx.getSectionInfo(el)) ?? section;
+
+		// Write (or, for empty text, clear) this block's search text. The words go into the note
+		// frontmatter keyed by the block's stable id; `signature` (or null) is stored in the block as
+		// the freshness marker. Any leftover `%%…%%` comment from the 0.0.29 build is stripped first —
+		// done before the frontmatter edit, while the block's line numbers are still stable.
+		const applySearchText = async (text: string, signature: string | null): Promise<void> => {
+			const id = documentModel.meta.id ?? createBlockId();
+			documentModel.meta.id = id;
+			delete documentModel.meta.text; // never keep the words in the block JSON
+			if (signature) {
+				documentModel.meta.textHash = signature;
+			} else {
+				delete documentModel.meta.textHash;
+			}
+			await flushSave();
+			try {
+				await persistInkSearchText(this.plugin.app, ctx.sourcePath, freshSection(), ''); // strip legacy comment
+				await persistInkSearchFrontmatter(this.plugin.app, ctx.sourcePath, id, text);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
+				new Notice(`Search index save failed: ${message}`);
+			}
+		};
+
+		// Recognise the whole block and store its text in the note frontmatter for search. Skips the
+		// MyScript call when the stored signature already matches the current ink. `announce` drives
+		// Notices for the manual button; the automatic path is silent.
+		const runRecognitionIndex = async (announce: boolean): Promise<void> => {
+			if (isDisposed || indexing) {
+				return;
+			}
+			const creds = this.getRecognitionCredentials();
+			if (!hasMyScriptKeys(creds)) {
+				if (announce) {
+					new Notice('Set your recognition keys in settings to index for search.');
+				}
+				return;
+			}
+			if (!blockHasInk()) {
+				// No ink: clear the stored signature and remove the frontmatter entry for deleted writing.
+				if (documentModel.meta.text || documentModel.meta.textHash) {
+					await applySearchText('', null);
+				}
+				if (announce) {
+					new Notice('There is no handwriting here to index.');
+				}
+				return;
+			}
+			const signature = inkSignature(documentModel);
+			if (documentModel.meta.textHash === signature) {
+				// Already recognised. Older builds kept the words in the JSON (meta.text) or a comment;
+				// migrate them into the frontmatter now — no MyScript call.
+				if (documentModel.meta.text) {
+					await applySearchText(documentModel.meta.text, signature);
+				}
+				if (announce) {
+					new Notice('Search text is already up to date.');
+				}
+				return;
+			}
+			indexing = true;
+			const progress = announce ? new Notice('Recognising handwriting…', 0) : null;
+			try {
+				const text = await recognizeText(buildRecognitionStrokes(documentModel, null), creds);
+				if (isDisposed) {
+					return;
+				}
+				await applySearchText(text, signature);
+				progress?.hide();
+				if (announce) {
+					new Notice(text ? 'Indexed for search.' : 'Indexed (no text recognised).');
+				}
+			} catch (error) {
+				progress?.hide();
+				if (announce) {
+					const message = error instanceof Error ? error.message : 'recognition failed';
+					new Notice(`Search indexing failed: ${message}`);
+				}
+			} finally {
+				indexing = false;
+			}
+		};
+
+		const scheduleAutoIndex = (): void => {
+			if (!this.getAutoIndexForSearch()) {
+				return;
+			}
+			if (autoIndexTimeout) {
+				window.clearTimeout(autoIndexTimeout);
+			}
+			autoIndexTimeout = window.setTimeout(() => {
+				autoIndexTimeout = 0;
+				void runRecognitionIndex(false);
+			}, AUTO_INDEX_DEBOUNCE_MS);
+		};
+
+		const onIndexForSearch = (): void => {
+			void runRecognitionIndex(true);
+		};
+
+		// Read this block's stored lines from the note frontmatter and show them in a popup.
+		const onViewIndexedText = (): void => {
+			const file = this.plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
+			const id = documentModel.meta.id;
+			const frontmatter =
+				file instanceof TFile ? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+			showIndexedTextModal(this.plugin.app, indexedLinesFor(frontmatter, id));
 		};
 
 		// Re-render the inline view from the document; defer persistence until the drawer closes
@@ -484,6 +657,7 @@ export class InkBlockRegistry {
 						renderInline();
 					}
 					void flushSave();
+					scheduleAutoIndex();
 				},
 			});
 		};
@@ -827,6 +1001,10 @@ export class InkBlockRegistry {
 				}
 				try {
 					await removeInkCodeBlock(this.plugin.app, ctx.sourcePath, section);
+					// Drop this block's search entry from the note frontmatter so it doesn't linger.
+					if (documentModel.meta.id) {
+						await persistInkSearchFrontmatter(this.plugin.app, ctx.sourcePath, documentModel.meta.id, '');
+					}
 				} catch (error) {
 					isDisposed = false; // delete failed; let the block keep working
 					const message = error instanceof Error ? error.message : 'Unknown delete error.';
@@ -918,6 +1096,8 @@ export class InkBlockRegistry {
 		pasteButtonEl.addEventListener('click', onPaste);
 		copyImageButtonEl.addEventListener('click', onCopyImage);
 		copyTextButtonEl.addEventListener('click', onCopyText);
+		indexSearchButtonEl.addEventListener('click', onIndexForSearch);
+		viewTextButtonEl.addEventListener('click', onViewIndexedText);
 		actionEl.addEventListener('click', onActionClick);
 		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;
@@ -962,6 +1142,8 @@ export class InkBlockRegistry {
 					pasteButtonEl.removeEventListener('click', onPaste);
 					copyImageButtonEl.removeEventListener('click', onCopyImage);
 					copyTextButtonEl.removeEventListener('click', onCopyText);
+					indexSearchButtonEl.removeEventListener('click', onIndexForSearch);
+					viewTextButtonEl.removeEventListener('click', onViewIndexedText);
 					actionEl.removeEventListener('click', onActionClick);
 					deleteButtonEl.removeEventListener('click', onDelete);
 					colorPopup?.close();
@@ -969,6 +1151,10 @@ export class InkBlockRegistry {
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
 						saveTimeout = 0;
+					}
+					if (autoIndexTimeout) {
+						window.clearTimeout(autoIndexTimeout);
+						autoIndexTimeout = 0;
 					}
 					if (isActiveKey(blockKey)) {
 						drawer.close();

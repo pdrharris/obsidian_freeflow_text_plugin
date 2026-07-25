@@ -496,3 +496,23 @@
 		font-size: 12px;
 	}
 }
+
+/* The "See indexed text" popup: one recognised line per row, preserving the handwriting's line breaks. */
+.freeflow-ink-indexed-text {
+	white-space: pre-wrap;
+	line-height: 1.5;
+	font-size: var(--font-text-size);
+}
+.freeflow-ink-indexed-text .freeflow-ink-indexed-line:empty::before {
+	content: '\00a0'; /* keep blank lines visible */
+}
+
+/* Hide the "Indexed text" search sidecar from the note's Properties panel: it exists only so
+   Obsidian search matches the recognised words, and it reads as noise (a blockId -> lines map) in
+   the UI. Still fully searchable and indexed — just not shown. The 👁 "See indexed text" button
+   surfaces it on demand in a popup. (Confirmed not to affect code-block rendering: this rule was
+   removed while debugging the raw-JSON issue and the block still failed, so the cause lay elsewhere.)
+   The key is matched case-insensitively because Obsidian normalises data-property-key to lowercase. */
+.metadata-property[data-property-key='indexed text' i] {
+	display: none;
+}

@@ -36,7 +36,7 @@ import {
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
-import { buildRecognitionStrokes } from '../src/ink/recognize';
+import { buildRecognitionStrokes, inkSignature } from '../src/ink/recognize';
 import { compactInkBlocksInContent } from '../src/ink/compact';
 import { Text } from '@codemirror/state';
 import { editViolatesInkBlock, inkBlockAt } from '../src/ink/guard';
@@ -428,6 +428,38 @@ test('buildRecognitionStrokes: a selection limits recognition to the selected wo
 	const selection = { anchor: { line: 1, word: 0 }, focus: { line: 1, word: 1 } };
 	const strokes = buildRecognitionStrokes(d, selection);
 	eq(strokes.length, 1, 'only the selected line-1 word is included');
+});
+
+test('inkSignature is stable for identical ink and changes when the ink moves', () => {
+	const a = mkDoc([W('a')], [W('b')]);
+	const b = mkDoc([W('a')], [W('b')]);
+	eq(inkSignature(a), inkSignature(b), 'identical ink -> identical signature');
+	const moved = mkDoc([W('a')], [Wx('b', 200)]);
+	ok(inkSignature(a) !== inkSignature(moved), 'a moved stroke -> different signature');
+});
+
+test('serialize keeps id + signature but never writes text into the block JSON', () => {
+	const d = mkDoc([W('a')]);
+	d.meta.id = 'b-xyz';
+	d.meta.text = 'hello world';
+	d.meta.textHash = 'abc123';
+	const json = serializeInkDocument(d);
+	ok(!json.includes('hello world'), 'recognised words are not stored in the block');
+	const back = parseInkDocument(json);
+	eq(back.meta.text, undefined, 'text is not persisted in the block (it lives in frontmatter)');
+	eq(back.meta.id, 'b-xyz', 'the block id is persisted to key the frontmatter entry');
+	eq(back.meta.textHash, 'abc123', 'the ink signature is persisted for the stale check');
+});
+
+test('parse still reads legacy in-JSON text so old blocks can be migrated', () => {
+	const raw = JSON.stringify({
+		version: INK_DOC_VERSION,
+		meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null, text: 'legacy words', textHash: 'sig' },
+		lines: [{ words: [] }],
+	});
+	const doc = parseInkDocument(raw);
+	eq(doc.meta.text, 'legacy words');
+	eq(doc.meta.textHash, 'sig');
 });
 
 test('eraseAtCursor at line start joins with the previous line', () => {
