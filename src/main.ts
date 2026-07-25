@@ -548,7 +548,11 @@ export default class FreeFlowInkPlugin extends Plugin {
 	private insertInkBlockAtCursor(editor: Editor): void {
 		const cursor = editor.getCursor();
 		const onBlankLine = editor.getLine(cursor.line).trim().length === 0;
-		const prefix = onBlankLine ? '' : '\n';
+		// A block whose opening fence is the very first line of a note isn't reliably drawn by Live
+		// Preview until the editor is scrolled (a CodeMirror viewport quirk), so never place one there —
+		// always keep at least a blank line above it. Otherwise reuse the current blank line if we're on
+		// one, else start on a fresh line.
+		const prefix = cursor.line === 0 || !onBlankLine ? '\n' : '';
 		// An empty body parses to an empty document, ready to write into.
 		const block = `${prefix}\`\`\`${INK_CODE_BLOCK_LANGUAGE}\n\n\`\`\`\n`;
 		editor.replaceSelection(block);
