@@ -17,9 +17,13 @@ build`) **also deploys** `main.js`, `manifest.json`, and `styles.css` into the l
 `<Vault>/.obsidian/plugins/obsidian_freeflow_text_plugin/` (see the `deploy-to-vault` esbuild
 plugin in `esbuild.config.mjs`; override the destinations with the `OBSIDIAN_PLUGIN_DIR` env var —
 a single path, or several separated by commas — or set it empty to skip). The default destinations
-are three vaults: `../../Documents/Obsidian/Notes`, `../../Documents/Obsidian/Work`, and
+are three local dev vaults: `../../Documents/Obsidian/Notes`, `../../Documents/Obsidian/Work`, and
 `../../Documents/Obsidian/Theology` (each `+ /.obsidian/plugins/obsidian_freeflow_text_plugin`).
-After a build just reload Obsidian (Ctrl+R) to test. The vault copy carries only those runtime
+**A `npm run build` (production) also deploys into the three OneDrive remotely-save copies** at
+`C:/Users/Peter/OneDrive/Apps/remotely-save/{Notes,Work,Theology}/…` — those are the copies the
+iPad and Mac actually sync (via remotely-save's config-dir sync), so a release reaches every device
+with no manual copy. The watch build (`npm run dev`) skips the OneDrive targets so it doesn't churn
+OneDrive on every rebuild. After a build just reload Obsidian (Ctrl+R) to test. The vault copy carries only those runtime
 files (plus `data.json` settings) and is committed with each notes repo, so the plugin syncs to
 mobile through those repos. The pen UI can't be driven from the CLI; interactive write/erase/cursor
 tests require a human in Obsidian.

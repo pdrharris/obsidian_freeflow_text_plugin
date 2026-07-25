@@ -17,11 +17,25 @@ const prod = process.argv[2] === 'production';
 // path, or several separated by commas) if the vaults live elsewhere. Set it to
 // an empty string to skip deployment.
 const pluginSubpath = '.obsidian/plugins/obsidian_freeflow_text_plugin';
-const defaultDeployDirs = [
+const localVaults = [
 	'../../Documents/Obsidian/Notes',
 	'../../Documents/Obsidian/Work',
 	'../../Documents/Obsidian/Theology',
-].map((vault) => path.resolve(vault, pluginSubpath));
+];
+// The copies the iPad and Mac actually sync live in the OneDrive remotely-save folder — the local
+// vaults above are just the desktop dev shells. Deploy there too so a release reaches every device
+// with no manual copy, but ONLY on production builds (`npm run build`): a watch build (`npm run
+// dev`) would otherwise push every half-finished rebuild into OneDrive/remotely-save.
+const oneDriveVaults = prod
+	? [
+			'C:/Users/Peter/OneDrive/Apps/remotely-save/Notes',
+			'C:/Users/Peter/OneDrive/Apps/remotely-save/Work',
+			'C:/Users/Peter/OneDrive/Apps/remotely-save/Theology',
+		]
+	: [];
+const defaultDeployDirs = [...localVaults, ...oneDriveVaults].map((vault) =>
+	path.resolve(vault, pluginSubpath),
+);
 
 const deployDirs =
 	process.env.OBSIDIAN_PLUGIN_DIR !== undefined
