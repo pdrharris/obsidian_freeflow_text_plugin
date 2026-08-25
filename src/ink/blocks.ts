@@ -1114,6 +1114,19 @@ export class InkBlockRegistry {
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
+					// Flush any pending save BEFORE marking disposed: flushSave() bails out early
+					// once isDisposed is true, so closing the drawer (or firing a debounced save)
+					// after that flag flips would silently drop the pending content instead of
+					// persisting it — losing whatever was just written when navigating straight to
+					// another note without visiting Reading view first.
+					if (saveTimeout) {
+						window.clearTimeout(saveTimeout);
+						saveTimeout = 0;
+						void flushSave();
+					}
+					if (isActiveKey(blockKey)) {
+						drawer.close();
+					}
 					isDisposed = true;
 					toolbar?.unbind(toolbarTarget);
 					inlineRefreshers.delete(renderInline);
@@ -1148,16 +1161,9 @@ export class InkBlockRegistry {
 					deleteButtonEl.removeEventListener('click', onDelete);
 					colorPopup?.close();
 					colorPopup = null;
-					if (saveTimeout) {
-						window.clearTimeout(saveTimeout);
-						saveTimeout = 0;
-					}
 					if (autoIndexTimeout) {
 						window.clearTimeout(autoIndexTimeout);
 						autoIndexTimeout = 0;
-					}
-					if (isActiveKey(blockKey)) {
-						drawer.close();
 					}
 				}
 			})(el),

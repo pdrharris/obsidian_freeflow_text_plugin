@@ -156,6 +156,36 @@ export class InkToolbar {
 
 		this.attachDrag();
 		activeDocument.body.appendChild(this.rootEl);
+		this.attachOutsideDismiss();
+	}
+
+	// Hide the toolbar when a click/tap lands somewhere unrelated to ink editing — the app menu,
+	// the sidebar, or plain typed text elsewhere in the note. A tap that's still part of ink
+	// editing (another block, the open drawer, the colour popup) is left alone: those either
+	// rebind the toolbar themselves (clicking a block) or manage their own dismissal (the popup).
+	private attachOutsideDismiss(): void {
+		const onOutsidePointerDown = (event: PointerEvent): void => {
+			if (!this.target) {
+				return;
+			}
+			const el = event.target;
+			if (!(el instanceof HTMLElement)) {
+				return;
+			}
+			if (
+				this.rootEl.contains(el) ||
+				el.closest('.freeflow-ink-block') ||
+				el.closest('.freeflow-ink-drawer-root') ||
+				el.closest('.freeflow-ink-color-popup')
+			) {
+				return;
+			}
+			this.hide();
+		};
+		activeDocument.addEventListener('pointerdown', onOutsidePointerDown, true);
+		this.cleanups.push(() =>
+			activeDocument.removeEventListener('pointerdown', onOutsidePointerDown, true),
+		);
 	}
 
 	destroy(): void {

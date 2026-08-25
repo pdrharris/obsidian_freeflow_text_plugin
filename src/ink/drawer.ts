@@ -49,6 +49,12 @@ const MIN_POINT_DISTANCE_SQ = 0.35;
 const ADVANCE_TARGET_RATIO = 0.4; // after advancing, the caret lands at this fraction of width
 const ADVANCE_MIN_CARET_RATIO = 0.4; // don't bother advancing while there's still room to the left
 const RAW_LOG_MAX = 4000; // ring buffer of raw pointer samples for iPad diagnostics
+// isScribbleGesture's purely-geometric heuristic (reversals + path-length-vs-width) is firing on
+// ordinary handwriting for at least one user, silently deleting an earlier word on the line
+// whenever a normal stroke's x-range happens to overlap it. Disabled until the heuristic can be
+// tightened; flip back on (or replace with an explicit gesture, e.g. requiring the pen to hover/
+// pause first) once it reliably tells scratch-outs from fast cursive.
+const SCRIBBLE_TO_ERASE_ENABLED = false;
 
 export interface DrawerRuntimeConfig {
 	wrapWidth: number;
@@ -980,7 +986,7 @@ export class InkDrawer {
 		// Scribble-to-erase: a scratch-out gesture drawn over existing (shown) ink deletes the words
 		// it covers instead of committing as new writing. A scribble in empty space isn't an erase —
 		// it falls through and is drawn normally, so the gesture is only destructive over real ink.
-		if (isScribbleGesture(points)) {
+		if (SCRIBBLE_TO_ERASE_ENABLED && isScribbleGesture(points)) {
 			const targets: number[] = [];
 			for (let i = 0; i < cursor.word; i += 1) {
 				const word = line.words[i];
