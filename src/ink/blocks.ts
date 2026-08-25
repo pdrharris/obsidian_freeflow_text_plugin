@@ -31,7 +31,7 @@ import {
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions, renderInkImage, StrokeNib } from './render';
-import { buildRecognitionStrokes, inkSignature } from './recognize';
+import { applyListMarkupToRecognizedText, buildRecognitionStrokes, inkSignature } from './recognize';
 import { hasMyScriptKeys, MyScriptCredentials, recognizeText } from './myscript';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
 import {
@@ -896,7 +896,8 @@ export class InkBlockRegistry {
 						new Notice('No text was recognised.');
 						return;
 					}
-					await navigator.clipboard.writeText(text);
+					const markedUp = applyListMarkupToRecognizedText(documentModel, selection, text);
+					await navigator.clipboard.writeText(markedUp);
 					new Notice(selection ? 'Copied selection as text.' : 'Copied handwriting as text.');
 				} catch (error) {
 					progress.hide();
@@ -949,9 +950,6 @@ export class InkBlockRegistry {
 
 		const onCanvasClick = (event: MouseEvent): void => {
 			bindToolbar();
-			if (selectMode) {
-				return; // selection is handled by the pointer drag handlers
-			}
 			const rect = canvasEl.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) {
 				showInlineCaret = true;
@@ -959,7 +957,31 @@ export class InkBlockRegistry {
 				return;
 			}
 			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions());
-			const cursor = layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+			const x = event.clientX - rect.left;
+			const y = event.clientY - rect.top;
+			// Tap a checkbox to (un)check it — the same interaction reading mode offers, now available
+			// without leaving the editor. Takes priority over cursor placement/select mode: a tap that
+			// lands on the box is unambiguously "toggle this item", not "put the caret here".
+			if (documentModel.lines.some((line) => line.checkbox)) {
+				for (const box of layout.checkboxes) {
+					const pad = box.size * 0.6; // generous target for fingers
+					if (
+						x >= box.x - pad &&
+						x <= box.x + box.size + pad &&
+						y >= box.y - pad &&
+						y <= box.y + box.size + pad
+					) {
+						if (toggleLineChecked(documentModel, box.line) !== null) {
+							applyInlineEdit();
+						}
+						return;
+					}
+				}
+			}
+			if (selectMode) {
+				return; // selection is handled by the pointer drag handlers
+			}
+			const cursor = layout.cursorFromPoint(x, y);
 			documentModel.meta.cursor = cursor;
 			documentModel.meta.selection = null;
 			showInlineCaret = true;
@@ -1215,7 +1237,10 @@ export class InkBlockRegistry {
 		inlineRefreshers.add(render);
 
 		// Checkbox toggling is the ONE mutation reading mode supports: tap a box to (un)check it,
-		// with the new state persisted to the vault. Everything else stays read-only.
+		// with the new state persisted to the vault. Everything else stays read-only. (The editable
+		// path offers the same tap-to-check interaction — see onCanvasClick — so checking an item
+		// off doesn't require leaving the editor; this read-only copy is duplicated rather than
+		// shared because it has no cursor/selection/drawer state to thread through.)
 		let saveTimeout = 0;
 		let disposed = false;
 		const persistChecked = (): void => {

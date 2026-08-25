@@ -10,7 +10,7 @@
 // stroke points would stack all lines on top of each other. Laying out first is what gives each
 // line its own vertical band and lets multi-line recognition come back with real line breaks.
 
-import { InkDocument, InkSelection, orderCursors, selectionIsEmpty } from './doc';
+import { InkDocument, InkLine, InkSelection, orderCursors, selectionIsEmpty } from './doc';
 import { layoutDocument } from './layout';
 
 // One stroke as parallel coordinate/time arrays (the MyScript batch stroke shape). x/y are CSS px
@@ -103,4 +103,52 @@ export function buildRecognitionStrokes(
 		}
 	}
 	return strokes;
+}
+
+// The recognizer only ever sees pen strokes — it has no idea a line is a bullet or checkbox
+// item, so plain recognized text loses that structure. Re-apply it afterwards by matching
+// recognized lines, in order, against the document lines that actually contributed strokes to
+// the request (the same lines buildRecognitionStrokes would have drawn from: any line with words
+// in the requested range). If the counts don't agree — the recognizer merged or split a line,
+// which it's free to do — there's no reliable way to attribute markup to the right line, so the
+// original text comes back unchanged rather than risking a prefix on the wrong line.
+export function applyListMarkupToRecognizedText(
+	doc: InkDocument,
+	selection: InkSelection | null,
+	text: string,
+): string {
+	if (!text) {
+		return text;
+	}
+	let from = 0;
+	let to = doc.lines.length - 1;
+	if (selection && !selectionIsEmpty(selection)) {
+		const [start, end] = orderCursors(selection.anchor, selection.focus);
+		from = start.line;
+		to = end.line;
+	}
+	const sourceLines: InkLine[] = [];
+	for (let i = from; i <= to; i += 1) {
+		const line = doc.lines[i];
+		if (line && line.words.length > 0) {
+			sourceLines.push(line);
+		}
+	}
+	const textLines = text.split('\n');
+	if (sourceLines.length !== textLines.length) {
+		return text;
+	}
+	return textLines
+		.map((lineText, i) => {
+			const line = sourceLines[i]!;
+			const indent = '\t'.repeat(line.indent ?? 0);
+			if (line.checkbox) {
+				return `${indent}- [${line.checked ? 'x' : ' '}] ${lineText}`;
+			}
+			if (line.bullet) {
+				return `${indent}- ${lineText}`;
+			}
+			return lineText;
+		})
+		.join('\n');
 }

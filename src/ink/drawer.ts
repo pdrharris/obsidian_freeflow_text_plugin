@@ -122,6 +122,7 @@ export class InkDrawer {
 	private readonly canvasEl: HTMLCanvasElement;
 	private readonly pasteButtonEl: HTMLButtonElement;
 	private readonly undoButtonEl: HTMLButtonElement;
+	private readonly redoButtonEl: HTMLButtonElement;
 	private readonly eraseButtonEl: HTMLButtonElement;
 	private readonly newLineButtonEl: HTMLButtonElement;
 	private readonly boldButtonEl: HTMLButtonElement;
@@ -139,6 +140,10 @@ export class InkDrawer {
 	// action (stroke commit, scribble-erase, backspace, new line, paste, list toggles, indent).
 	// Kept in-drawer (not persisted) and cleared when a new block is opened.
 	private readonly undoStack: string[] = [];
+	// Redo history: snapshots of states undo has moved AWAY from, so redo can step back to them.
+	// Cleared whenever a fresh mutation is snapshotted (pushUndoSnapshot) — once you write
+	// something new, the "future" that undo would have redone into no longer exists.
+	private readonly redoStack: string[] = [];
 	private activeStroke: ActivePoint[] | null = null;
 	private activePointerId: number | null = null;
 	private activeTouchId: number | null = null;
@@ -218,9 +223,10 @@ export class InkDrawer {
 		toolbar.appendChild(this.colorButtonEl);
 
 		this.pasteButtonEl = makeIconButton('📋', 'Paste');
-		// Undo is a writing mechanic (like New line / Backspace) so it always stays visible even
-		// when the unified toolbar hides the style/list/clipboard duplicates.
+		// Undo/redo are writing mechanics (like New line / Backspace) so they always stay visible
+		// even when the unified toolbar hides the style/list/clipboard duplicates.
 		this.undoButtonEl = makeIconButton('↶', 'Undo');
+		this.redoButtonEl = makeIconButton('↷', 'Redo');
 		this.newLineButtonEl = makeIconButton('↵', 'New line');
 		this.eraseButtonEl = makeIconButton('⌫', 'Backspace');
 
@@ -308,7 +314,8 @@ export class InkDrawer {
 			this.close();
 		}
 		this.session = session;
-		this.undoStack.length = 0; // undo history is per-session
+		this.undoStack.length = 0; // undo/redo history is per-session
+		this.redoStack.length = 0;
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		// Pin the glyph scale from the full document for this whole session (see field comment).
 		this.sessionHeightRatio = estimateSourceStrokeHeightRatio(session.doc, session.doc.meta.lineHeight);
@@ -320,7 +327,7 @@ export class InkDrawer {
 		this.sheetEl.classList.toggle('is-unified', this.getRuntimeConfig().unifiedToolbar);
 		this.rootEl.classList.add('is-open');
 		this.resetScrollX();
-		this.updateUndoButton();
+		this.updateUndoRedoButtons();
 		this.requestDraw();
 		this.uiStateListener?.();
 	}
@@ -631,6 +638,7 @@ export class InkDrawer {
 		this.colorButtonEl.addEventListener('click', this.onColorButton);
 		this.pasteButtonEl.addEventListener('click', this.onPaste);
 		this.undoButtonEl.addEventListener('click', this.onUndo);
+		this.redoButtonEl.addEventListener('click', this.onRedo);
 		this.closeButtonEl.addEventListener('click', this.onCloseClick);
 		this.rootEl.addEventListener('pointerdown', this.onBackdropPointerDown);
 		// Ctrl/Cmd+Z drives undo while the drawer is the active overlay (desktop convenience;
@@ -652,6 +660,7 @@ export class InkDrawer {
 		this.bindButtonTouch(this.colorButtonEl, this.onColorButton);
 		this.bindButtonTouch(this.pasteButtonEl, this.onPaste);
 		this.bindButtonTouch(this.undoButtonEl, this.onUndo);
+		this.bindButtonTouch(this.redoButtonEl, this.onRedo);
 		this.bindButtonTouch(this.closeButtonEl, this.onCloseClick);
 	}
 
@@ -693,6 +702,7 @@ export class InkDrawer {
 		this.colorButtonEl.removeEventListener('click', this.onColorButton);
 		this.pasteButtonEl.removeEventListener('click', this.onPaste);
 		this.undoButtonEl.removeEventListener('click', this.onUndo);
+		this.redoButtonEl.removeEventListener('click', this.onRedo);
 		this.closeButtonEl.removeEventListener('click', this.onCloseClick);
 		this.rootEl.removeEventListener('pointerdown', this.onBackdropPointerDown);
 		activeWindow.removeEventListener('keydown', this.onKeyDown);
@@ -1085,12 +1095,14 @@ export class InkDrawer {
 		this.requestDraw();
 	}
 
-	// ----------------------------------------------------------------- undo
+	// ----------------------------------------------------------------- undo / redo
 
 	private static readonly UNDO_LIMIT = 80;
 
 	// Snapshot the document BEFORE a mutating action so undo can restore this exact state. Call it
 	// at the point of no return in each action (after early-out guards, before the first mutation).
+	// A fresh mutation invalidates whatever redo history existed (the "future" it would have
+	// stepped back into no longer exists once you've written something new).
 	private pushUndoSnapshot(): void {
 		const session = this.session;
 		if (!session) {
@@ -1100,16 +1112,15 @@ export class InkDrawer {
 		if (this.undoStack.length > InkDrawer.UNDO_LIMIT) {
 			this.undoStack.shift();
 		}
-		this.updateUndoButton();
+		this.redoStack.length = 0;
+		this.updateUndoRedoButtons();
 	}
 
-	private onUndo = (): void => {
-		const session = this.session;
-		const snapshot = this.undoStack.pop();
-		if (!session || snapshot === undefined) {
-			return;
-		}
-		// Abandon any half-drawn stroke so pen-up doesn't commit it over the restored state.
+	// Shared by onUndo/onRedo: abandon any half-drawn stroke (so pen-up doesn't commit it over the
+	// restored state), then swap the session doc's content in place. session.doc is shared by
+	// reference with the inline block (blocks.ts) and this drawer's callbacks, so it's restored by
+	// mutating its fields — never reassign session.doc.
+	private restoreSnapshot(session: DrawerSession, snapshot: string): boolean {
 		this.activeStroke = null;
 		this.activePointerId = null;
 		this.activeTouchId = null;
@@ -1118,34 +1129,71 @@ export class InkDrawer {
 		try {
 			restored = parseInkDocument(snapshot);
 		} catch {
-			return; // corrupt snapshot: drop it rather than throwing mid-session
+			return false; // corrupt snapshot: drop it rather than throwing mid-session
 		}
-		// session.doc is shared by reference with the inline block (blocks.ts) and this drawer's
-		// callbacks, so restore by mutating its fields in place — never reassign session.doc.
 		session.doc.lines = restored.lines;
 		session.doc.meta = restored.meta;
 		session.doc.meta.cursor = clampCursor(session.doc.meta.cursor, session.doc.lines);
 		session.doc.meta.selection = null;
 		this.syncPenStyleToContext();
 		this.scrollCaretIntoView();
-		this.updateUndoButton();
+		this.updateUndoRedoButtons();
 		session.onContentChanged();
 		session.onCursorChanged();
 		this.requestDraw();
+		return true;
+	}
+
+	private onUndo = (): void => {
+		const session = this.session;
+		const snapshot = this.undoStack.pop();
+		if (!session || snapshot === undefined) {
+			return;
+		}
+		// Capture the state undo is leaving so redo can step back to it — but only once we know
+		// the snapshot we're restoring is actually valid, so a corrupt undo entry can't leave a
+		// bogus entry sitting on the redo stack.
+		const leaving = serializeInkDocument(session.doc);
+		if (this.restoreSnapshot(session, snapshot)) {
+			this.redoStack.push(leaving);
+		}
+	};
+
+	private onRedo = (): void => {
+		const session = this.session;
+		const snapshot = this.redoStack.pop();
+		if (!session || snapshot === undefined) {
+			return;
+		}
+		const leaving = serializeInkDocument(session.doc);
+		if (this.restoreSnapshot(session, snapshot)) {
+			this.undoStack.push(leaving);
+			if (this.undoStack.length > InkDrawer.UNDO_LIMIT) {
+				this.undoStack.shift();
+			}
+		}
 	};
 
 	private onKeyDown = (event: KeyboardEvent): void => {
 		if (!this.session) {
 			return;
 		}
-		if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z') {
+		if (!(event.ctrlKey || event.metaKey) || event.altKey) {
+			return;
+		}
+		const key = event.key.toLowerCase();
+		if (key === 'z' && !event.shiftKey) {
 			event.preventDefault();
 			this.onUndo();
+		} else if ((key === 'z' && event.shiftKey) || key === 'y') {
+			event.preventDefault();
+			this.onRedo();
 		}
 	};
 
-	private updateUndoButton(): void {
+	private updateUndoRedoButtons(): void {
 		this.undoButtonEl.disabled = this.undoStack.length === 0;
+		this.redoButtonEl.disabled = this.redoStack.length === 0;
 	}
 
 	// ----------------------------------------------------------------- buttons

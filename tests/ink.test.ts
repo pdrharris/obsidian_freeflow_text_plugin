@@ -36,7 +36,7 @@ import {
 	wordFromStroke,
 } from '../src/ink/edit';
 import { layoutDocument } from '../src/ink/layout';
-import { buildRecognitionStrokes, inkSignature } from '../src/ink/recognize';
+import { applyListMarkupToRecognizedText, buildRecognitionStrokes, inkSignature } from '../src/ink/recognize';
 import { compactInkBlocksInContent } from '../src/ink/compact';
 import { Text } from '@codemirror/state';
 import { editViolatesInkBlock, inkBlockAt } from '../src/ink/guard';
@@ -436,6 +436,52 @@ test('inkSignature is stable for identical ink and changes when the ink moves', 
 	eq(inkSignature(a), inkSignature(b), 'identical ink -> identical signature');
 	const moved = mkDoc([W('a')], [Wx('b', 200)]);
 	ok(inkSignature(a) !== inkSignature(moved), 'a moved stroke -> different signature');
+});
+
+test('applyListMarkupToRecognizedText: prefixes bullet/checkbox lines and leaves plain lines alone', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	d.lines[0]!.bullet = true;
+	d.lines[1]!.checkbox = true;
+	d.lines[1]!.checked = true;
+	eq(
+		applyListMarkupToRecognizedText(d, null, 'milk\neggs'),
+		'- milk\n- [x] eggs',
+	);
+});
+
+test('applyListMarkupToRecognizedText: indents nest as tabs', () => {
+	const d = mkDoc([W('a')]);
+	d.lines[0]!.bullet = true;
+	d.lines[0]!.indent = 2;
+	eq(applyListMarkupToRecognizedText(d, null, 'milk'), '\t\t- milk');
+});
+
+test('applyListMarkupToRecognizedText: a line with no words drops out of the recognizer input, so it is skipped when matching', () => {
+	const d = mkDoc([W('a')], [W('c')]);
+	d.lines.splice(1, 0, { id: 'blank', words: [] }); // an empty line between two written ones
+	d.lines[0]!.bullet = true;
+	d.lines[2]!.bullet = true;
+	eq(applyListMarkupToRecognizedText(d, null, 'first\nlast'), '- first\n- last');
+});
+
+test('applyListMarkupToRecognizedText: falls back to the plain text when line counts disagree', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	d.lines[0]!.bullet = true;
+	// The recognizer merged two source lines into one text line.
+	eq(applyListMarkupToRecognizedText(d, null, 'milk and eggs'), 'milk and eggs');
+});
+
+test('applyListMarkupToRecognizedText: a selection restricts which lines supply markup', () => {
+	const d = mkDoc([W('a')], [W('b')]);
+	d.lines[0]!.bullet = true;
+	d.lines[1]!.bullet = true;
+	const selection = { anchor: { line: 1, word: 0 }, focus: { line: 1, word: 1 } };
+	eq(applyListMarkupToRecognizedText(d, selection, 'eggs'), '- eggs');
+});
+
+test('applyListMarkupToRecognizedText: empty text is returned unchanged', () => {
+	const d = mkDoc([W('a')]);
+	eq(applyListMarkupToRecognizedText(d, null, ''), '');
 });
 
 test('serialize keeps id + signature but never writes text into the block JSON', () => {
