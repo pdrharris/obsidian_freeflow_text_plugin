@@ -669,10 +669,73 @@ export class InkBlockRegistry {
 			}
 		};
 
-		const cursorAtEvent = (event: PointerEvent): ReturnType<typeof clampCursor> => {
+		const cursorFromClientPoint = (clientX: number, clientY: number): ReturnType<typeof clampCursor> => {
 			const rect = canvasEl.getBoundingClientRect();
 			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions());
-			return layout.cursorFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+			return layout.cursorFromPoint(clientX - rect.left, clientY - rect.top);
+		};
+		const cursorAtEvent = (event: PointerEvent): ReturnType<typeof clampCursor> =>
+			cursorFromClientPoint(event.clientX, event.clientY);
+
+		// --- drag-select auto-scroll --------------------------------------------------------------
+		// A block can be taller than the visible note pane, so a drag-selection can run off the top
+		// or bottom edge with more content beyond it. Pointer capture keeps the drag alive once the
+		// pointer leaves the canvas, but nothing scrolls the pane to reveal the rest — so once near
+		// an edge, auto-scroll it (faster the closer to the edge) and keep re-deriving the selection
+		// focus from the last known pointer position on every scroll tick, since the pointer itself
+		// may simply be parked at the edge rather than still moving.
+		const AUTO_SCROLL_EDGE_PX = 56;
+		const AUTO_SCROLL_MAX_SPEED = 18; // px per animation frame at/beyond the pane edge
+		let scrollEl: HTMLElement | null = null;
+		let autoScrollSpeed = 0; // px/frame; 0 = inactive, negative = up, positive = down
+		let autoScrollRAF = 0;
+		let lastPointerClientX = 0;
+		let lastPointerClientY = 0;
+
+		const stopAutoScroll = (): void => {
+			autoScrollSpeed = 0;
+			if (autoScrollRAF) {
+				window.cancelAnimationFrame(autoScrollRAF);
+				autoScrollRAF = 0;
+			}
+		};
+		const autoScrollTick = (): void => {
+			autoScrollRAF = 0;
+			if (!selecting || autoScrollSpeed === 0 || !scrollEl) {
+				return;
+			}
+			scrollEl.scrollTop += autoScrollSpeed;
+			const focus = cursorFromClientPoint(lastPointerClientX, lastPointerClientY);
+			if (documentModel.meta.selection) {
+				documentModel.meta.selection.focus = focus;
+			}
+			documentModel.meta.cursor = focus;
+			renderInline();
+			autoScrollRAF = window.requestAnimationFrame(autoScrollTick);
+		};
+		const updateAutoScroll = (clientY: number): void => {
+			if (!scrollEl) {
+				stopAutoScroll();
+				return;
+			}
+			const rect = scrollEl.getBoundingClientRect();
+			const topGap = clientY - rect.top;
+			const bottomGap = rect.bottom - clientY;
+			const ramp = (gap: number): number =>
+				Math.min(1, Math.max(0, (AUTO_SCROLL_EDGE_PX - gap) / AUTO_SCROLL_EDGE_PX));
+			if (topGap < AUTO_SCROLL_EDGE_PX) {
+				autoScrollSpeed = -AUTO_SCROLL_MAX_SPEED * ramp(topGap);
+			} else if (bottomGap < AUTO_SCROLL_EDGE_PX) {
+				autoScrollSpeed = AUTO_SCROLL_MAX_SPEED * ramp(bottomGap);
+			} else {
+				autoScrollSpeed = 0;
+			}
+			if (autoScrollSpeed !== 0 && !autoScrollRAF) {
+				autoScrollRAF = window.requestAnimationFrame(autoScrollTick);
+			} else if (autoScrollSpeed === 0 && autoScrollRAF) {
+				window.cancelAnimationFrame(autoScrollRAF);
+				autoScrollRAF = 0;
+			}
 		};
 
 		const applyInlineEdit = (): void => {
@@ -768,6 +831,10 @@ export class InkBlockRegistry {
 			documentModel.meta.selection = { anchor: cur, focus: cur };
 			documentModel.meta.cursor = cur;
 			selecting = true;
+			lastPointerClientX = event.clientX;
+			lastPointerClientY = event.clientY;
+			const pane = containerEl.closest('.markdown-preview-view, .cm-scroller');
+			scrollEl = pane instanceof HTMLElement ? pane : null;
 			try {
 				canvasEl.setPointerCapture(event.pointerId);
 			} catch {
@@ -782,12 +849,15 @@ export class InkBlockRegistry {
 				return;
 			}
 			event.preventDefault();
+			lastPointerClientX = event.clientX;
+			lastPointerClientY = event.clientY;
 			const focus = cursorAtEvent(event);
 			if (documentModel.meta.selection) {
 				documentModel.meta.selection.focus = focus;
 			}
 			documentModel.meta.cursor = focus;
 			renderInline();
+			updateAutoScroll(event.clientY);
 		};
 
 		const onCanvasPointerUp = (event: PointerEvent): void => {
@@ -796,6 +866,7 @@ export class InkBlockRegistry {
 			}
 			event.preventDefault();
 			selecting = false;
+			stopAutoScroll();
 			if (selectionIsEmpty(documentModel.meta.selection)) {
 				documentModel.meta.selection = null; // a tap just places the cursor
 			}
@@ -1136,6 +1207,11 @@ export class InkBlockRegistry {
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
+					// A drag-select that's mid-auto-scroll when the block is torn down (e.g. the note
+					// is switched away from without releasing the pointer) would otherwise leave its
+					// requestAnimationFrame loop running indefinitely, scrolling a pane that no longer
+					// has anything to do with this block.
+					stopAutoScroll();
 					// Flush any pending save BEFORE marking disposed: flushSave() bails out early
 					// once isDisposed is true, so closing the drawer (or firing a debounced save)
 					// after that flag flips would silently drop the pending content instead of
