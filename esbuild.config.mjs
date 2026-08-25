@@ -24,12 +24,10 @@ const oneDriveVaultRoot = path.join(
 	os.homedir(),
 	'Library/CloudStorage/OneDrive-Personal/Apps/remotely-save',
 );
-// A default vault that doesn't exist yet is skipped rather than created, so a
-// build never plants a phantom vault folder in OneDrive; the vault starts
-// receiving copies as soon as Remotely Save creates it.
-const defaultVaultDirs = ['Notes', 'Work', 'Theology'].map((name) =>
-	path.join(oneDriveVaultRoot, name),
-);
+// Only Notes is actively maintained (Work and Theology were merged into it), but a default
+// vault that doesn't exist yet is skipped rather than created either way, so a build never
+// plants a phantom vault folder in OneDrive.
+const defaultVaultDirs = ['Notes'].map((name) => path.join(oneDriveVaultRoot, name));
 
 const deployTargets =
 	process.env.OBSIDIAN_PLUGIN_DIR !== undefined

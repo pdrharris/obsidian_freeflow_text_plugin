@@ -17,21 +17,22 @@ build`) **also deploys** `main.js`, `manifest.json`, and `styles.css` into the l
 `<Vault>/.obsidian/plugins/obsidian_freeflow_text_plugin/` (see the `deploy-to-vault` esbuild
 plugin in `esbuild.config.mjs`; override the destinations with the `OBSIDIAN_PLUGIN_DIR` env var —
 a single path, or several separated by commas — or set it empty to skip). The default destinations
-are the Remotely Save vault copies in the user's personal OneDrive:
-`~/Library/CloudStorage/OneDrive-Personal/Apps/remotely-save/{Notes,Work,Theology}` (each
-`+ /.obsidian/plugins/obsidian_freeflow_text_plugin`). A vault folder that doesn't exist yet is
-skipped, not created (as of 2026-07 `Theology` hasn't been synced by Remotely Save yet). The
-OneDrive client uploads the copies automatically while it's running (`pgrep OneDrive` to check);
-there is no CLI to force a sync — if it seems stuck, restart it with
+the Remotely Save vault copy in the user's personal OneDrive:
+`~/Library/CloudStorage/OneDrive-Personal/Apps/remotely-save/Notes`
+`+ /.obsidian/plugins/obsidian_freeflow_text_plugin`. `Notes` is the only vault still maintained
+(as of 2026-08 `Work` and `Theology` were merged into it); the deploy target list in
+`esbuild.config.mjs` reflects that. If the vault folder doesn't exist yet, deploy skips it rather
+than creating it. The OneDrive client uploads the copy automatically while it's running (`pgrep
+OneDrive` to check); there is no CLI to force a sync — if it seems stuck, restart it with
 `killall OneDrive && open -a OneDrive`. Devices then pull the update via the Remotely Save plugin
 inside Obsidian. **When shipping a plugin change, run `npm run build` (which deploys) as well as
 committing.** Obsidian is not installed on this Mac — the plugin runs on the user's other devices
 (e.g. iPad), so the pen UI can't be driven from the CLI; interactive write/erase/cursor tests
 require a human in Obsidian, after a sync round-trip.
 
-(On the Windows dev machine, `OBSIDIAN_PLUGIN_DIR`/the equivalent local vaults and the
-`C:/Users/Peter/OneDrive/Apps/remotely-save/{Notes,Work,Theology}` targets are used instead — see
-that machine's checkout of `esbuild.config.mjs` for the actual paths in effect there.)
+(On the Windows dev machine, `OBSIDIAN_PLUGIN_DIR`/the equivalent local vaults and OneDrive targets
+are used instead — see that machine's checkout of `esbuild.config.mjs` for the actual paths in
+effect there; it should also be trimmed to `Notes` only if it still lists `Work`/`Theology`.)
 
 tsconfig is strict with `noUncheckedIndexedAccess` — array/index access is `T | undefined`, so
 guard before use. Note `console.log` is an eslint error via `obsidianmd/rule-custom-message`.
