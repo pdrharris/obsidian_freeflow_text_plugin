@@ -29,6 +29,10 @@ committing.** Obsidian is not installed on this Mac — the plugin runs on the u
 (e.g. iPad), so the pen UI can't be driven from the CLI; interactive write/erase/cursor tests
 require a human in Obsidian, after a sync round-trip.
 
+(On the Windows dev machine, `OBSIDIAN_PLUGIN_DIR`/the equivalent local vaults and the
+`C:/Users/Peter/OneDrive/Apps/remotely-save/{Notes,Work,Theology}` targets are used instead — see
+that machine's checkout of `esbuild.config.mjs` for the actual paths in effect there.)
+
 tsconfig is strict with `noUncheckedIndexedAccess` — array/index access is `T | undefined`, so
 guard before use. Note `console.log` is an eslint error via `obsidianmd/rule-custom-message`.
 
@@ -53,7 +57,8 @@ the GitHub release with the bare version number (no `v` prefix).
 
 This plugin lets users write handwriting directly in Obsidian notes. Handwriting is stored as
 `fii-ink` fenced code blocks whose body is a serialized `InkDocument` JSON object
-(`version: 2`).
+(`version: 4`, the compact packed-point wire format; older v2/v3 formats are no longer
+readable — see the header of `src/ink/doc.ts`).
 
 ### Data model (`src/ink/doc.ts`)
 
@@ -104,7 +109,7 @@ a single-line capture surface) — the structure shows in the inline block.
 |---|---|
 | `src/main.ts` | Plugin lifecycle, adaptive metrics (viewport-responsive sizing), runtime CSS, diagnostics commands |
 | `src/settings.ts` | `FreeFlowInkSettings` interface, defaults, settings tab UI |
-| `src/ink/doc.ts` | v2 model types, `parseInkDocument`/`serializeInkDocument`, geometry + cursor/selection helpers |
+| `src/ink/doc.ts` | Model types, `parseInkDocument`/`serializeInkDocument` (v4 wire format), geometry + cursor/selection helpers |
 | `src/ink/layout.ts` | `layoutDocument` — pure layout engine + hit-testing (the single geometry source of truth) |
 | `src/ink/edit.ts` | Logical editing operations (tree splices) shared by the drawer |
 | `src/ink/render.ts` | Canvas painting: `drawInlineCanvas`, `inlineLayout` (shared by render + click hit-testing), `drawLaidStroke` (variable-width when points carry `w`), `wordUnderline`/`drawUnderline` |

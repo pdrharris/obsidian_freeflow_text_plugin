@@ -35,6 +35,7 @@ const INDENT_STEP_RATIO = 1.1; // left inset added per indent level
 const BULLET_RESERVE_RATIO = 0.85; // gap reserved between the bullet and the line's first word
 const BULLET_RADIUS_RATIO = 0.085; // bullet dot radius
 const BULLET_RISE_RATIO = 0.2; // how far above the baseline the bullet centre sits
+const CHECKBOX_SIZE_RATIO = 0.44; // checkbox side length as a fraction of the row height
 const DEFAULT_BULLET_COLOR = '#111827';
 
 export interface LayoutConfig {
@@ -115,9 +116,22 @@ export interface BulletMark {
 	color: string;
 }
 
+// A checkbox to paint at a line start (css px, top-left + side length). Emitted once per checkbox
+// logical line on its first visual row. `line` ties the mark back to the logical line so a tap on
+// the box (its rect, generously padded by the caller) can toggle that line's checked state.
+export interface CheckboxMark {
+	x: number;
+	y: number;
+	size: number;
+	line: number;
+	checked: boolean;
+	color: string;
+}
+
 export interface LayoutResult {
 	words: LaidWord[];
 	bullets: BulletMark[];
+	checkboxes: CheckboxMark[];
 	width: number; // css px (wrap width if finite, else content extent)
 	height: number; // css px
 	rowHeight: number; // effective visual line height, css px
@@ -189,6 +203,7 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 
 	const laidWords: LaidWord[] = [];
 	const bullets: BulletMark[] = [];
+	const checkboxes: CheckboxMark[] = [];
 	// The left inset (css px) of each logical line's content, for caret placement on empty/indented
 	// lines. Continuation (wrapped) rows hang to this same inset, so they align under the first word.
 	const lineInsets = new Map<number, number>();
@@ -215,8 +230,9 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 		// rows hang under the first word rather than under the bullet.
 		const indentLevel = clamp(line.indent ?? 0, 0, MAX_INDENT_LEVEL);
 		const hasBullet = line.bullet === true;
+		const hasCheckbox = line.checkbox === true;
 		const indentCss = marginX + indentLevel * indentStep;
-		const contentLeft = indentCss + (hasBullet ? bulletReserve : 0);
+		const contentLeft = indentCss + (hasBullet || hasCheckbox ? bulletReserve : 0);
 		lineInsets.set(lineIndex, contentLeft);
 		const availableWidth = Number.isFinite(config.contentWidthCss)
 			? Math.max(20, config.contentWidthCss - contentLeft - marginX)
@@ -300,6 +316,20 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 				color: lineColor,
 			});
 		}
+		if (hasCheckbox) {
+			// One box per checkbox line, centred where the bullet would sit.
+			const size = Math.max(6, rowHeight * CHECKBOX_SIZE_RATIO);
+			const cx = indentCss + bulletReserve * 0.4;
+			const cy = firstVisualRow * rowHeight + baselineOffset - rowHeight * BULLET_RISE_RATIO;
+			checkboxes.push({
+				x: cx - size / 2,
+				y: cy - size / 2,
+				size,
+				line: lineIndex,
+				checked: line.checked === true,
+				color: lineColor,
+			});
+		}
 
 		visualRow += 1; // next logical line starts on a fresh row
 	}
@@ -315,6 +345,7 @@ export function layoutDocument(doc: InkDocument, config: LayoutConfig): LayoutRe
 	return {
 		words: laidWords,
 		bullets,
+		checkboxes,
 		width,
 		height,
 		rowHeight,

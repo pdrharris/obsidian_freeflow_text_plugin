@@ -3,7 +3,7 @@ import type FreeFlowInkPlugin from './main';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-06-24A';
+export const FREEFLOW_BUILD_MARKER = '2026-07-25A';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width
@@ -47,6 +47,22 @@ export interface FreeFlowInkSettings {
 	softBlockLimitKb: number;
 	hardBlockLimitKb: number;
 	showSoftLimitNotice: boolean;
+	// One floating, draggable toolbar shared by the inline blocks and the drawer, replacing the
+	// per-block button row and the drawer's duplicated style buttons. Context-sensitive: with a
+	// selection the style buttons restyle it; without one (drawer open) they set the pen.
+	unifiedToolbar: boolean;
+	// Last dragged position of the floating toolbar (viewport px, clamped on restore).
+	toolbarPosition: { x: number; y: number } | null;
+	// Handwriting recognition (MyScript). Each user supplies their own free developer keys — the
+	// plugin is open-source, so a baked-in key would leak. Empty keys just disable "Copy as text".
+	myscriptAppKey: string;
+	myscriptHmacKey: string;
+	// MyScript recognition locale, e.g. "en_US", "en_GB", "fr_FR".
+	recognitionLanguage: string;
+	// When on, a block's searchable text is refreshed automatically a few seconds after you finish
+	// editing it (only when the strokes changed). Off by default: automatic means handwriting is sent
+	// to MyScript's cloud without an explicit action.
+	autoIndexForSearch: boolean;
 }
 
 export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
@@ -73,6 +89,12 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	softBlockLimitKb: 2048,
 	hardBlockLimitKb: 8192,
 	showSoftLimitNotice: false,
+	unifiedToolbar: true,
+	toolbarPosition: null,
+	myscriptAppKey: '',
+	myscriptHmacKey: '',
+	recognitionLanguage: 'en_US',
+	autoIndexForSearch: false,
 };
 
 export class FreeFlowInkSettingTab extends PluginSettingTab {
@@ -135,6 +157,19 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 		lineWidthValueEl.setText(`${lineWidthPercent}%`);
 
 		new Setting(containerEl)
+			.setName('Unified floating toolbar')
+			.setDesc(
+				'One draggable toolbar shared by the rendered blocks and the drawer, instead of a button row at the bottom of every block. With a selection its style buttons restyle the selection; while the drawer is open they set the pen. Blocks already on screen pick the change up after reopening the note.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.unifiedToolbar).onChange(async (value) => {
+					this.plugin.settings.unifiedToolbar = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshInlineBlocks();
+				}),
+			);
+
+		new Setting(containerEl)
 			.setName('Match text width')
 			.setDesc(
 				'Render handwriting at the same width as Obsidian’s text (readable line length) so it lines up with surrounding notes. Turn this off to use the width slider below. The per-block resize handle still overrides both.',
@@ -155,9 +190,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(30, 100, 1)
-					.setValue(lineWidthPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(lineWidthPercent)					.onChange(async (value) => {
 						this.plugin.settings.lineWidthScale = value / 100;
 						lineWidthValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -180,9 +213,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(80, 250, 5)
-					.setValue(wordGapPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(wordGapPercent)					.onChange(async (value) => {
 						this.plugin.settings.wordGapScale = value / 100;
 						wordGapValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -205,9 +236,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(10, 400, 1)
-					.setValue(renderLineSpacingPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(renderLineSpacingPercent)					.onChange(async (value) => {
 						this.plugin.settings.renderLineHeightScale = value / 100;
 						renderLineSpacingValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -231,9 +260,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(40, 160, 1)
-					.setValue(renderStrokeFillPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(renderStrokeFillPercent)					.onChange(async (value) => {
 						this.plugin.settings.renderStrokeFillScale = value / 100;
 						renderStrokeFillValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -255,9 +282,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(30, 150, 1)
-					.setValue(drawerHeightPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(drawerHeightPercent)					.onChange(async (value) => {
 						this.plugin.settings.drawerHeightScale = value / 100;
 						drawerHeightValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -289,9 +314,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(50, 300, 5)
-					.setValue(strokeWeightPercent)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(strokeWeightPercent)					.onChange(async (value) => {
 						this.plugin.settings.strokeWeightScale = value / 100;
 						strokeWeightValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -339,9 +362,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 100, 5)
-					.setValue(Math.round(this.plugin.settings.handwritingSmoothing * 100))
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(Math.round(this.plugin.settings.handwritingSmoothing * 100))					.onChange(async (value) => {
 						this.plugin.settings.handwritingSmoothing = value / 100;
 						smoothingValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -390,9 +411,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(-90, 90, 1)
-					.setValue(Math.round(this.plugin.settings.nibAngle))
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(Math.round(this.plugin.settings.nibAngle))					.onChange(async (value) => {
 						this.plugin.settings.nibAngle = value;
 						nibAngleValueEl.setText(`${value}°`);
 						await this.plugin.saveSettings();
@@ -406,9 +425,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 100, 5)
-					.setValue(Math.round(this.plugin.settings.nibContrast * 100))
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(Math.round(this.plugin.settings.nibContrast * 100))					.onChange(async (value) => {
 						this.plugin.settings.nibContrast = value / 100;
 						nibContrastValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
@@ -455,9 +472,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(500, 5000, 100)
-					.setValue(this.plugin.settings.idleAdvanceMs)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.idleAdvanceMs)					.onChange(async (value) => {
 						this.plugin.settings.idleAdvanceMs = value;
 						idleAdvanceValueEl.setText(`${value} ms`);
 						await this.plugin.saveSettings();
@@ -474,9 +489,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 1200, 25)
-					.setValue(this.plugin.settings.releaseAdvanceDelayMs)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.releaseAdvanceDelayMs)					.onChange(async (value) => {
 						this.plugin.settings.releaseAdvanceDelayMs = value;
 						releaseAdvanceDelayValueEl.setText(`${value} ms`);
 						await this.plugin.saveSettings();
@@ -492,15 +505,74 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(50, 95, 1)
-					.setValue(this.plugin.settings.advanceLinePosition)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.advanceLinePosition)					.onChange(async (value) => {
 						this.plugin.settings.advanceLinePosition = value;
 						advanceLineValueEl.setText(`${value}%`);
 						await this.plugin.saveSettings();
 					}),
 			)
 			.controlEl.appendChild(advanceLineValueEl);
+
+		new Setting(containerEl).setName('Handwriting recognition (MyScript)').setHeading();
+
+		new Setting(containerEl).setDesc(
+			'"Copy as text" on a block sends its strokes to MyScript and copies back the recognised text. ' +
+				'Create a free developer account at developer.myscript.com (about 2,000 recognitions/month at ' +
+				'no cost) and paste your two keys below. They are stored only in this vault. Handwriting is ' +
+				'sent to MyScript’s cloud when you use the feature.',
+		);
+
+		new Setting(containerEl)
+			.setName('MyScript application key')
+			.setDesc('The application key from your MyScript developer dashboard.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Application key')
+					.setValue(this.plugin.settings.myscriptAppKey)
+					.onChange(async (value) => {
+						this.plugin.settings.myscriptAppKey = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('MyScript HMAC key')
+			.setDesc('The HMAC key that pairs with the application key above.')
+			.addText((text) => {
+				text
+					.setValue(this.plugin.settings.myscriptHmacKey)
+					.onChange(async (value) => {
+						this.plugin.settings.myscriptHmacKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password'; // it's a secret; don't show it in the clear
+			});
+
+		new Setting(containerEl)
+			.setName('Recognition language')
+			.setDesc('MyScript locale used for recognition, for example en_US, en_GB or fr_FR.')
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.recognitionLanguage)
+					.onChange(async (value) => {
+						this.plugin.settings.recognitionLanguage = value.trim() || 'en_US';
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Index for search automatically')
+			.setDesc(
+				'Refresh a block’s searchable text a few seconds after you finish editing it (only when ' +
+					'the handwriting changed). Off by default: leaving it off means handwriting is sent to ' +
+					'MyScript only when you tap a block’s search button.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.autoIndexForSearch).onChange(async (value) => {
+					this.plugin.settings.autoIndexForSearch = value;
+					await this.plugin.saveSettings();
+				}),
+			);
 
 		new Setting(containerEl).setName('Block size guardrails').setHeading();
 
@@ -526,9 +598,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(200, 12000, 100)
-					.setValue(this.plugin.settings.softBlockLimitKb)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.softBlockLimitKb)					.onChange(async (value) => {
 						this.plugin.settings.softBlockLimitKb = value;
 						if (this.plugin.settings.hardBlockLimitKb <= value) {
 							this.plugin.settings.hardBlockLimitKb = Math.min(16000, value + 256);
@@ -549,9 +619,7 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 			.addSlider((slider) =>
 				slider
 					.setLimits(512, 16000, 256)
-					.setValue(this.plugin.settings.hardBlockLimitKb)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
+					.setValue(this.plugin.settings.hardBlockLimitKb)					.onChange(async (value) => {
 						this.plugin.settings.hardBlockLimitKb = value;
 						if (this.plugin.settings.softBlockLimitKb >= value) {
 							this.plugin.settings.softBlockLimitKb = Math.max(200, value - 256);

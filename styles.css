@@ -27,6 +27,88 @@
 	overflow: visible;
 }
 
+/* Never expose the raw fii-ink JSON in live preview: hide Obsidian's hover "edit block"
+   button on ink widgets (clicking it swaps the widget for the editable source, where one
+   stray keystroke can corrupt the block). Source mode remains the debug escape hatch. */
+.cm-embed-block:has(.freeflow-ink-block) .edit-block-button {
+	display: none;
+}
+
+/* ---- unified floating toolbar ------------------------------------------------------------ */
+
+.freeflow-ink-toolbar {
+	position: fixed;
+	/* Default perch: right edge, upper third; a drag (persisted) overrides via left/top. */
+	right: 18px;
+	top: 30%;
+	z-index: 1200; /* above the drawer overlay so it stays usable while writing */
+	display: none;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	max-width: 272px;
+	padding: 6px;
+	border-radius: 12px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	box-shadow: 0 6px 24px rgba(15, 23, 42, 0.18);
+	touch-action: none;
+}
+
+.freeflow-ink-toolbar.is-open {
+	display: flex;
+}
+
+.freeflow-ink-toolbar-grip {
+	cursor: grab;
+	padding: 2px 4px;
+	color: var(--text-faint);
+	font-size: 14px;
+	line-height: 1;
+	user-select: none;
+	touch-action: none;
+}
+
+.freeflow-ink-toolbar-btn {
+	min-width: 34px;
+	height: 34px;
+	padding: 0 6px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.freeflow-ink-toolbar-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.freeflow-ink-toolbar-btn.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+
+.freeflow-ink-toolbar-btn.is-bold-glyph {
+	font-weight: 800;
+}
+
+.freeflow-ink-toolbar-btn.is-underline-glyph {
+	text-decoration: underline;
+}
+
+/* Buttons duplicated by the unified toolbar are hidden while it is enabled. Specificity must
+   beat the later `.freeflow-ink-meta-action.freeflow-ink-color-btn { display: inline-block }`
+   rule, or the colour button alone survives the cull. */
+.freeflow-ink-meta .freeflow-ink-meta-action.is-toolbar-dup,
+.freeflow-ink-drawer-sheet.is-unified .freeflow-ink-drawer-dup {
+	display: none;
+}
+
 /* Per-block width drag handle on the right edge. */
 .freeflow-ink-resize-handle {
 	position: absolute;
@@ -413,4 +495,24 @@
 		padding: 0 8px;
 		font-size: 12px;
 	}
+}
+
+/* The "See indexed text" popup: one recognised line per row, preserving the handwriting's line breaks. */
+.freeflow-ink-indexed-text {
+	white-space: pre-wrap;
+	line-height: 1.5;
+	font-size: var(--font-text-size);
+}
+.freeflow-ink-indexed-text .freeflow-ink-indexed-line:empty::before {
+	content: '\00a0'; /* keep blank lines visible */
+}
+
+/* Hide the "Indexed text" search sidecar from the note's Properties panel: it exists only so
+   Obsidian search matches the recognised words, and it reads as noise (a blockId -> lines map) in
+   the UI. Still fully searchable and indexed — just not shown. The 👁 "See indexed text" button
+   surfaces it on demand in a popup. (Confirmed not to affect code-block rendering: this rule was
+   removed while debugging the raw-JSON issue and the block still failed, so the cause lay elsewhere.)
+   The key is matched case-insensitively because Obsidian normalises data-property-key to lowercase. */
+.metadata-property[data-property-key='indexed text' i] {
+	display: none;
 }

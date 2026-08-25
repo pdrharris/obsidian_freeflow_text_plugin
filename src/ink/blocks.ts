@@ -6,6 +6,7 @@ import {
 	Modal,
 	Notice,
 	Plugin,
+	TFile,
 } from 'obsidian';
 import { InkDrawer } from './drawer';
 import {
@@ -13,6 +14,7 @@ import {
 	InkDocument,
 	InkWord,
 	clampCursor,
+	createBlockId,
 	clampWidthScale,
 	fragmentIsEmpty,
 	parseInkDocument,
@@ -25,13 +27,26 @@ import {
 	extractSelection,
 	insertFragmentAtCursor,
 	selectionStyleFlags,
+	toggleLineChecked,
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
-import { drawInlineCanvas, inlineLayout, InlineRenderOptions, StrokeNib } from './render';
+import { drawInlineCanvas, inlineLayout, InlineRenderOptions, renderInkImage, StrokeNib } from './render';
+import { buildRecognitionStrokes, inkSignature } from './recognize';
+import { hasMyScriptKeys, MyScriptCredentials, recognizeText } from './myscript';
 import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
-import { persistInkCodeBlock, removeInkCodeBlock, SectionInfoLike } from './storage';
+import {
+	persistInkCodeBlock,
+	persistInkSearchFrontmatter,
+	persistInkSearchText,
+	removeInkCodeBlock,
+	SectionInfoLike,
+} from './storage';
+import { InkToolbar, ToolbarTarget } from './toolbar';
 
 const SAVE_DEBOUNCE_MS = 320;
+// Automatic search-indexing waits longer than a save: it only wants to fire once writing has
+// settled, and every run is a MyScript request, so we err well on the side of quiet.
+const AUTO_INDEX_DEBOUNCE_MS = 4000;
 
 // The ink colour at the caret: the colour of the nearest stroke just before the cursor (so the
 // swatch previews "what you're writing in here"), falling back to the next stroke to the right,
@@ -85,6 +100,44 @@ function confirmModal(app: App, title: string, body: string, confirmText: string
 	});
 }
 
+// Pull one block's stored lines out of the note frontmatter's "Indexed text" map (keyed by block
+// id). Takes `unknown` because Obsidian types frontmatter as `any`; narrows defensively.
+function indexedLinesFor(frontmatter: unknown, id: string | undefined): string[] {
+	if (!id || !frontmatter || typeof frontmatter !== 'object') {
+		return [];
+	}
+	const map = (frontmatter as Record<string, unknown>)['Indexed text'];
+	if (!map || typeof map !== 'object') {
+		return [];
+	}
+	const entry = (map as Record<string, unknown>)[id];
+	if (Array.isArray(entry)) {
+		return entry.filter((line): line is string => typeof line === 'string');
+	}
+	if (typeof entry === 'string' && entry.length > 0) {
+		return entry.split('\n');
+	}
+	return [];
+}
+
+// Show a block's recognised (indexed) text in a popup, with line breaks preserved. The text is
+// stored hidden in the note frontmatter for search; this is how the user reads it on demand.
+function showIndexedTextModal(app: App, lines: string[]): void {
+	const modal = new Modal(app);
+	modal.setTitle('Indexed text');
+	if (lines.length === 0) {
+		modal.contentEl.createEl('p', {
+			text: 'This block hasn’t been indexed yet. Tap the search button (🔍) to index it.',
+		});
+	} else {
+		const wrap = modal.contentEl.createDiv({ cls: 'freeflow-ink-indexed-text' });
+		for (const line of lines) {
+			wrap.createDiv({ cls: 'freeflow-ink-indexed-line', text: line });
+		}
+	}
+	modal.open();
+}
+
 export class InkBlockRegistry {
 	private readonly plugin: Plugin;
 	private readonly drawer: InkDrawer;
@@ -105,6 +158,10 @@ export class InkBlockRegistry {
 	private readonly getSoftBlockLimitBytes: () => number;
 	private readonly getHardBlockLimitBytes: () => number;
 	private readonly getShowSoftLimitNotice: () => boolean;
+	private readonly toolbar: InkToolbar | null;
+	private readonly getUnifiedToolbar: () => boolean;
+	private readonly getRecognitionCredentials: () => MyScriptCredentials;
+	private readonly getAutoIndexForSearch: () => boolean;
 	private activeKey: string | null = null;
 	// Re-render callbacks for every mounted inline canvas (edit + reading), so a global toggle like
 	// the writing-line guide updates all visible blocks at once.
@@ -130,6 +187,10 @@ export class InkBlockRegistry {
 		getSoftBlockLimitBytes: () => number,
 		getHardBlockLimitBytes: () => number,
 		getShowSoftLimitNotice: () => boolean,
+		toolbar: InkToolbar | null,
+		getUnifiedToolbar: () => boolean,
+		getRecognitionCredentials: () => MyScriptCredentials,
+		getAutoIndexForSearch: () => boolean,
 	) {
 		this.plugin = plugin;
 		this.drawer = drawer;
@@ -150,6 +211,10 @@ export class InkBlockRegistry {
 		this.getSoftBlockLimitBytes = getSoftBlockLimitBytes;
 		this.getHardBlockLimitBytes = getHardBlockLimitBytes;
 		this.getShowSoftLimitNotice = getShowSoftLimitNotice;
+		this.toolbar = toolbar;
+		this.getUnifiedToolbar = getUnifiedToolbar;
+		this.getRecognitionCredentials = getRecognitionCredentials;
+		this.getAutoIndexForSearch = getAutoIndexForSearch;
 	}
 
 	refreshAllInline(): void {
@@ -236,6 +301,7 @@ export class InkBlockRegistry {
 		attempt = 0,
 	): void {
 		const drawer = this.drawer;
+		const toolbar = this.toolbar;
 		const inlineRefreshers = this.inlineRefreshers;
 		const setActiveKey = (value: string | null): void => {
 			this.activeKey = value;
@@ -255,7 +321,7 @@ export class InkBlockRegistry {
 
 		// Reading mode (and previews/exports): render read-only, no chrome, no border.
 		if (this.isReadingMode(el, ctx)) {
-			this.mountReadOnly(containerEl, documentModel, el, ctx);
+			this.mountReadOnly(source, containerEl, documentModel, el, ctx);
 			return;
 		}
 
@@ -280,6 +346,8 @@ export class InkBlockRegistry {
 		let colorPopup: ColorPopupHandle | null = null;
 		let lastSelectionColor = DEFAULT_INK_COLOR;
 		let saveTimeout = 0;
+		let autoIndexTimeout = 0;
+		let indexing = false;
 		let isDisposed = false;
 		let pendingInlineRefreshWhileActive = false;
 		let softWarned = false;
@@ -334,6 +402,15 @@ export class InkBlockRegistry {
 		const copyButtonEl = makeMetaButton('⧉', 'Copy');
 		const cutButtonEl = makeMetaButton('✂', 'Cut');
 		const pasteButtonEl = makeMetaButton('📋', 'Paste');
+		// Copy-as-image writes a PNG to the OS clipboard for pasting into other apps (whole block, or
+		// the selection when there is one). Unlike Copy/Cut it works with no selection, so never disabled.
+		const copyImageButtonEl = makeMetaButton('🖼', 'Copy as image');
+		// Copy-as-text runs handwriting recognition (MyScript) and copies the text (whole block or selection).
+		const copyTextButtonEl = makeMetaButton('Aa', 'Copy as text');
+		// Index-for-search recognises the whole block and stores the text (hidden) in the note frontmatter.
+		const indexSearchButtonEl = makeMetaButton('🔍', 'Index for search');
+		// The stored text is hidden from the Properties panel; this shows it on demand in a popup.
+		const viewTextButtonEl = makeMetaButton('👁', 'See indexed text');
 		const actionEl = makeMetaButton('✏️', 'Open drawer');
 
 		const updateMetaButtons = (): void => {
@@ -358,6 +435,7 @@ export class InkBlockRegistry {
 				underlineButtonEl.classList.remove('is-active');
 			}
 			hintEl.textContent = selectMode ? 'Drag to select words' : 'Tap to place cursor';
+			this.toolbar?.refresh(); // mirror selection/cursor state on the floating toolbar
 		};
 
 		const renderInline = (): void => {
@@ -433,6 +511,121 @@ export class InkBlockRegistry {
 				saveTimeout = 0;
 				void flushSave();
 			}, SAVE_DEBOUNCE_MS);
+			scheduleAutoIndex();
+		};
+
+		const blockHasInk = (): boolean =>
+			documentModel.lines.some((line) => line.words.some((w) => w.strokes.length > 0));
+
+		const freshSection = (): SectionInfoLike =>
+			toSectionInfoLike(ctx.getSectionInfo(el)) ?? section;
+
+		// Write (or, for empty text, clear) this block's search text. The words go into the note
+		// frontmatter keyed by the block's stable id; `signature` (or null) is stored in the block as
+		// the freshness marker. Any leftover `%%…%%` comment from the 0.0.29 build is stripped first —
+		// done before the frontmatter edit, while the block's line numbers are still stable.
+		const applySearchText = async (text: string, signature: string | null): Promise<void> => {
+			const id = documentModel.meta.id ?? createBlockId();
+			documentModel.meta.id = id;
+			delete documentModel.meta.text; // never keep the words in the block JSON
+			if (signature) {
+				documentModel.meta.textHash = signature;
+			} else {
+				delete documentModel.meta.textHash;
+			}
+			await flushSave();
+			try {
+				await persistInkSearchText(this.plugin.app, ctx.sourcePath, freshSection(), ''); // strip legacy comment
+				await persistInkSearchFrontmatter(this.plugin.app, ctx.sourcePath, id, text);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
+				new Notice(`Search index save failed: ${message}`);
+			}
+		};
+
+		// Recognise the whole block and store its text in the note frontmatter for search. Skips the
+		// MyScript call when the stored signature already matches the current ink. `announce` drives
+		// Notices for the manual button; the automatic path is silent.
+		const runRecognitionIndex = async (announce: boolean): Promise<void> => {
+			if (isDisposed || indexing) {
+				return;
+			}
+			const creds = this.getRecognitionCredentials();
+			if (!hasMyScriptKeys(creds)) {
+				if (announce) {
+					new Notice('Set your recognition keys in settings to index for search.');
+				}
+				return;
+			}
+			if (!blockHasInk()) {
+				// No ink: clear the stored signature and remove the frontmatter entry for deleted writing.
+				if (documentModel.meta.text || documentModel.meta.textHash) {
+					await applySearchText('', null);
+				}
+				if (announce) {
+					new Notice('There is no handwriting here to index.');
+				}
+				return;
+			}
+			const signature = inkSignature(documentModel);
+			if (documentModel.meta.textHash === signature) {
+				// Already recognised. Older builds kept the words in the JSON (meta.text) or a comment;
+				// migrate them into the frontmatter now — no MyScript call.
+				if (documentModel.meta.text) {
+					await applySearchText(documentModel.meta.text, signature);
+				}
+				if (announce) {
+					new Notice('Search text is already up to date.');
+				}
+				return;
+			}
+			indexing = true;
+			const progress = announce ? new Notice('Recognising handwriting…', 0) : null;
+			try {
+				const text = await recognizeText(buildRecognitionStrokes(documentModel, null), creds);
+				if (isDisposed) {
+					return;
+				}
+				await applySearchText(text, signature);
+				progress?.hide();
+				if (announce) {
+					new Notice(text ? 'Indexed for search.' : 'Indexed (no text recognised).');
+				}
+			} catch (error) {
+				progress?.hide();
+				if (announce) {
+					const message = error instanceof Error ? error.message : 'recognition failed';
+					new Notice(`Search indexing failed: ${message}`);
+				}
+			} finally {
+				indexing = false;
+			}
+		};
+
+		const scheduleAutoIndex = (): void => {
+			if (!this.getAutoIndexForSearch()) {
+				return;
+			}
+			if (autoIndexTimeout) {
+				window.clearTimeout(autoIndexTimeout);
+			}
+			autoIndexTimeout = window.setTimeout(() => {
+				autoIndexTimeout = 0;
+				void runRecognitionIndex(false);
+			}, AUTO_INDEX_DEBOUNCE_MS);
+		};
+
+		const onIndexForSearch = (): void => {
+			void runRecognitionIndex(true);
+		};
+
+		// Read this block's stored lines from the note frontmatter and show them in a popup.
+		const onViewIndexedText = (): void => {
+			const file = this.plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
+			const id = documentModel.meta.id;
+			const frontmatter =
+				file instanceof TFile ? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+			showIndexedTextModal(this.plugin.app, indexedLinesFor(frontmatter, id));
 		};
 
 		// Re-render the inline view from the document; defer persistence until the drawer closes
@@ -449,6 +642,7 @@ export class InkBlockRegistry {
 		const openDrawer = (): void => {
 			showInlineCaret = true;
 			setActiveKey(blockKey);
+			bindToolbar();
 			drawer.open({
 				key: blockKey,
 				doc: documentModel,
@@ -463,6 +657,7 @@ export class InkBlockRegistry {
 						renderInline();
 					}
 					void flushSave();
+					scheduleAutoIndex();
 				},
 			});
 		};
@@ -650,6 +845,67 @@ export class InkBlockRegistry {
 			applyInlineEdit();
 		};
 
+		const onCopyImage = (): void => {
+			void (async () => {
+				const rect = canvasEl.getBoundingClientRect();
+				const cssWidth = rect.width || canvasEl.clientWidth || 400;
+				const selection = selectionIsEmpty(documentModel.meta.selection)
+					? null
+					: documentModel.meta.selection;
+				let blob: Blob | null = null;
+				try {
+					blob = await renderInkImage(documentModel, this.blockRenderOptions(), cssWidth, selection);
+				} catch {
+					blob = null;
+				}
+				if (!blob) {
+					new Notice('Could not render the handwriting image.');
+					return;
+				}
+				try {
+					await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+					new Notice(selection ? 'Copied selection as image.' : 'Copied handwriting as image.');
+				} catch (error) {
+					// iOS webviews in particular can reject image clipboard writes; say so rather than fail silently.
+					const message = error instanceof Error ? error.message : 'clipboard write was blocked';
+					new Notice(`FreeFlow Ink image copy failed (${message}).`);
+				}
+			})();
+		};
+
+		const onCopyText = (): void => {
+			void (async () => {
+				const creds = this.getRecognitionCredentials();
+				if (!hasMyScriptKeys(creds)) {
+					new Notice('Set your recognition keys in settings to copy as text.');
+					return;
+				}
+				const selection = selectionIsEmpty(documentModel.meta.selection)
+					? null
+					: documentModel.meta.selection;
+				const strokes = buildRecognitionStrokes(documentModel, selection);
+				if (strokes.length === 0) {
+					new Notice('There is no handwriting here to recognise.');
+					return;
+				}
+				const progress = new Notice('Recognising handwriting…', 0);
+				try {
+					const text = await recognizeText(strokes, creds);
+					progress.hide();
+					if (!text) {
+						new Notice('No text was recognised.');
+						return;
+					}
+					await navigator.clipboard.writeText(text);
+					new Notice(selection ? 'Copied selection as text.' : 'Copied handwriting as text.');
+				} catch (error) {
+					progress.hide();
+					const message = error instanceof Error ? error.message : 'recognition failed';
+					new Notice(`Recognition failed: ${message}`);
+				}
+			})();
+		};
+
 		const onBold = (): void => {
 			if (selectionIsEmpty(documentModel.meta.selection)) {
 				return;
@@ -692,6 +948,7 @@ export class InkBlockRegistry {
 		};
 
 		const onCanvasClick = (event: MouseEvent): void => {
+			bindToolbar();
 			if (selectMode) {
 				return; // selection is handled by the pointer drag handlers
 			}
@@ -744,6 +1001,10 @@ export class InkBlockRegistry {
 				}
 				try {
 					await removeInkCodeBlock(this.plugin.app, ctx.sourcePath, section);
+					// Drop this block's search entry from the note frontmatter so it doesn't linger.
+					if (documentModel.meta.id) {
+						await persistInkSearchFrontmatter(this.plugin.app, ctx.sourcePath, documentModel.meta.id, '');
+					}
 				} catch (error) {
 					isDisposed = false; // delete failed; let the block keep working
 					const message = error instanceof Error ? error.message : 'Unknown delete error.';
@@ -751,6 +1012,67 @@ export class InkBlockRegistry {
 				}
 			})();
 		};
+
+		// Unified floating toolbar: this block's duplicated meta-row buttons are hidden and the
+		// singleton toolbar acts on the block instead. The toolbar binds to whichever block was
+		// interacted with last (cursor placed / drawer opened).
+		const unified = this.getUnifiedToolbar();
+		const toolbarTarget: ToolbarTarget = {
+			key: blockKey,
+			doc: documentModel,
+			applyEdit: applyInlineEdit,
+			renderOnly: renderInline,
+			isSelectMode: () => selectMode,
+			toggleSelectMode: onToggleSelect,
+			openDrawer,
+		};
+		const bindToolbar = (): void => {
+			if (unified) {
+				this.toolbar?.bind(toolbarTarget);
+			}
+		};
+		if (unified) {
+			for (const dup of [
+				writingLineButtonEl,
+				selectButtonEl,
+				boldButtonEl,
+				underlineButtonEl,
+				colorButtonEl,
+				copyButtonEl,
+				cutButtonEl,
+				pasteButtonEl,
+			]) {
+				dup.classList.add('is-toolbar-dup');
+			}
+			// Every persisted edit remounts this block (the save splices the note and the code block
+			// processor re-runs). If the toolbar was bound to this block before the remount, re-bind
+			// it to the fresh target so it doesn't vanish mid-interaction.
+			if (this.toolbar?.wasBoundTo(blockKey)) {
+				this.toolbar.bind(toolbarTarget);
+			}
+		}
+
+		// Never let pointer/click events bubble out of the block into CodeMirror: a click that
+		// reaches the editor places the text cursor inside the fii-ink source range, and live
+		// preview then unfolds the widget into the raw JSON, where a stray keystroke can corrupt
+		// the whole block. Bubble phase, so the block's own handlers (canvas, buttons) run first;
+		// the colour popup's outside-click dismiss still works (document capture listener).
+		const editorSuppressedEvents = [
+			'pointerdown',
+			'pointerup',
+			'mousedown',
+			'mouseup',
+			'click',
+			'dblclick',
+			'touchstart',
+			'touchend',
+		] as const;
+		const stopEditorPropagation = (event: Event): void => {
+			event.stopPropagation();
+		};
+		for (const type of editorSuppressedEvents) {
+			containerEl.addEventListener(type, stopEditorPropagation);
+		}
 
 		canvasEl.addEventListener('click', onCanvasClick);
 		canvasEl.addEventListener('dblclick', onCanvasDoubleClick);
@@ -772,6 +1094,10 @@ export class InkBlockRegistry {
 		copyButtonEl.addEventListener('click', onCopy);
 		cutButtonEl.addEventListener('click', onCut);
 		pasteButtonEl.addEventListener('click', onPaste);
+		copyImageButtonEl.addEventListener('click', onCopyImage);
+		copyTextButtonEl.addEventListener('click', onCopyText);
+		indexSearchButtonEl.addEventListener('click', onIndexForSearch);
+		viewTextButtonEl.addEventListener('click', onViewIndexedText);
 		actionEl.addEventListener('click', onActionClick);
 		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;
@@ -789,8 +1115,12 @@ export class InkBlockRegistry {
 			new (class extends MarkdownRenderChild {
 				onunload(): void {
 					isDisposed = true;
+					toolbar?.unbind(toolbarTarget);
 					inlineRefreshers.delete(renderInline);
 					resizeObserver.disconnect();
+					for (const type of editorSuppressedEvents) {
+						containerEl.removeEventListener(type, stopEditorPropagation);
+					}
 					canvasEl.removeEventListener('click', onCanvasClick);
 					canvasEl.removeEventListener('dblclick', onCanvasDoubleClick);
 					canvasEl.removeEventListener('keydown', onCanvasKeyDown);
@@ -810,6 +1140,10 @@ export class InkBlockRegistry {
 					copyButtonEl.removeEventListener('click', onCopy);
 					cutButtonEl.removeEventListener('click', onCut);
 					pasteButtonEl.removeEventListener('click', onPaste);
+					copyImageButtonEl.removeEventListener('click', onCopyImage);
+					copyTextButtonEl.removeEventListener('click', onCopyText);
+					indexSearchButtonEl.removeEventListener('click', onIndexForSearch);
+					viewTextButtonEl.removeEventListener('click', onViewIndexedText);
 					actionEl.removeEventListener('click', onActionClick);
 					deleteButtonEl.removeEventListener('click', onDelete);
 					colorPopup?.close();
@@ -817,6 +1151,10 @@ export class InkBlockRegistry {
 					if (saveTimeout) {
 						window.clearTimeout(saveTimeout);
 						saveTimeout = 0;
+					}
+					if (autoIndexTimeout) {
+						window.clearTimeout(autoIndexTimeout);
+						autoIndexTimeout = 0;
 					}
 					if (isActiveKey(blockKey)) {
 						drawer.close();
@@ -833,6 +1171,13 @@ export class InkBlockRegistry {
 		if (el.closest('.markdown-source-view')) {
 			return false;
 		}
+		// PDF export (and print) renders the note into a detached `.print` container that is neither
+		// the source nor the reading-view wrapper. Without this it fell through to the editor path,
+		// which needs section info the export DOM can't supply — so the block came out blank/errored
+		// in the PDF. Treat it as read-only so the inline canvas paints for the snapshot.
+		if (el.closest('.print, .markdown-rendered.markdown-preview-view')) {
+			return true;
+		}
 		if (el.closest('.markdown-reading-view')) {
 			return true;
 		}
@@ -844,6 +1189,7 @@ export class InkBlockRegistry {
 	}
 
 	private mountReadOnly(
+		source: string,
 		containerEl: HTMLDivElement,
 		documentModel: InkDocument,
 		el: HTMLElement,
@@ -861,17 +1207,107 @@ export class InkBlockRegistry {
 		// Re-render once layout has settled so the canvas matches the final width (see editable path).
 		window.requestAnimationFrame(() => render());
 		inlineRefreshers.add(render);
+
+		// Checkbox toggling is the ONE mutation reading mode supports: tap a box to (un)check it,
+		// with the new state persisted to the vault. Everything else stays read-only.
+		let saveTimeout = 0;
+		let disposed = false;
+		const persistChecked = (): void => {
+			if (saveTimeout) {
+				window.clearTimeout(saveTimeout);
+			}
+			saveTimeout = window.setTimeout(() => {
+				saveTimeout = 0;
+				// Section info is read at save time (it can be unavailable at mount). Without it the
+				// full-file range makes persistInkCodeBlock's section splice scan the whole note, which
+				// matches the FIRST ink block — correct for single-block notes, and no worse than the
+				// existing regex fallback for multi-block ones.
+				const section = toSectionInfoLike(ctx.getSectionInfo(el)) ?? {
+					lineStart: 0,
+					lineEnd: Number.MAX_SAFE_INTEGER,
+				};
+				persistInkCodeBlock(
+					this.plugin.app,
+					ctx.sourcePath,
+					section,
+					serializeInkDocument(documentModel),
+				).catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
+					new Notice(`FreeFlow Ink checkbox save failed: ${message}`);
+				});
+			}, SAVE_DEBOUNCE_MS);
+		};
+		const onReadingClick = (event: MouseEvent): void => {
+			if (disposed || documentModel.lines.every((line) => !line.checkbox)) {
+				return;
+			}
+			const rect = canvasEl.getBoundingClientRect();
+			const { layout } = inlineLayout(canvasEl, documentModel, this.blockRenderOptions());
+			const x = event.clientX - rect.left;
+			const y = event.clientY - rect.top;
+			for (const box of layout.checkboxes) {
+				const pad = box.size * 0.6; // generous target for fingers
+				if (
+					x >= box.x - pad &&
+					x <= box.x + box.size + pad &&
+					y >= box.y - pad &&
+					y <= box.y + box.size + pad
+				) {
+					if (toggleLineChecked(documentModel, box.line) !== null) {
+						render();
+						persistChecked();
+					}
+					return;
+				}
+			}
+		};
+		canvasEl.addEventListener('click', onReadingClick);
+
 		// Observe the pane ancestor (see the editable path) so fill-width blocks track pane resizes.
 		const resizeObserver = new ResizeObserver(() => render());
 		resizeObserver.observe(containerEl.parentElement ?? containerEl);
-		ctx.addChild(
-			new (class extends MarkdownRenderChild {
-				onunload(): void {
-					inlineRefreshers.delete(render);
-					resizeObserver.disconnect();
-				}
-			})(el),
-		);
+
+		const cleanup = (): void => {
+			if (disposed) {
+				return;
+			}
+			disposed = true;
+			canvasEl.removeEventListener('click', onReadingClick);
+			if (saveTimeout) {
+				window.clearTimeout(saveTimeout);
+				saveTimeout = 0;
+			}
+			inlineRefreshers.delete(render);
+			resizeObserver.disconnect();
+		};
+
+		// Self-heal for a race seen on iPad: the mode probe can mis-read an *editing* block as reading
+		// (the element often isn't attached when the processor runs, so it falls back to the active
+		// view's mode). That mounts it read-only — no border, no buttons — and because switching modes
+		// doesn't re-run the code-block processor it stayed stuck until the note was reopened. Once the
+		// element is in the DOM we can tell for certain we're inside an editor (a source/live-preview
+		// ancestor); if so, tear this read-only mount down and rebuild it as a full editable block.
+		const healIfInEditor = (): void => {
+			if (disposed || !el.isConnected || !el.closest('.markdown-source-view')) {
+				return;
+			}
+			cleanup();
+			this.mountBlock(source, el, ctx);
+		};
+
+		const child = new (class extends MarkdownRenderChild {
+			onunload(): void {
+				cleanup();
+			}
+		})(el);
+		// Component-scoped so these are dropped when the block unloads.
+		child.registerEvent(this.plugin.app.workspace.on('layout-change', healIfInEditor));
+		child.registerEvent(this.plugin.app.workspace.on('active-leaf-change', healIfInEditor));
+		ctx.addChild(child);
+		// Probe shortly after mount too, so the common case heals on its own without needing a
+		// workspace event (the element is usually attached a frame or two later).
+		window.setTimeout(healIfInEditor, 60);
+		window.setTimeout(healIfInEditor, 250);
 	}
 
 	private parseWithError(source: string, containerEl: HTMLDivElement): InkDocument | null {

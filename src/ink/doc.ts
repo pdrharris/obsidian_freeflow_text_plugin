@@ -1,4 +1,4 @@
-// Flowing-text ink document model (v3).
+// Flowing-text ink document model (v4).
 //
 // Content is a logical tree: Document -> Lines -> Words -> Strokes. Stroke points are stored
 // in LINE-ABSOLUTE coordinates: x is the position along the line (so the whitespace you draw
@@ -7,10 +7,17 @@
 // affect spacing. The layout engine scales these coordinates and wraps lines to width, but it
 // never re-spaces what you drew. Editing is a tree splice + relayout (no coordinate patching).
 //
-// v2 (the previous convention) stored points in word-local space and normalised inter-word
-// gaps; `parseInkDocument` migrates v2 docs to line-absolute on load.
+// Wire format: v4 only. Points are packed fixed-point arrays [x*100, y*100, pressure*100,
+// ms since the stroke's first point] and ids are omitted (parse regenerates them). Two
+// decimals is sub-hundredth-of-a-pixel at render scale, and layout only ever uses
+// within-stroke time deltas, so nothing visible is lost — files are ~5x smaller than v3.
+//
+// Earlier formats (v3 object points, v2 word-local coordinates) are deliberately NOT readable:
+// all existing notes were bulk-migrated to v4 in July 2026 and the old test content was not
+// worth the code. If an old block ever resurfaces (e.g. restored from git/OneDrive history),
+// parse it with a pre-0.0.22 build — the readers live in this repo's git history.
 
-export const INK_DOC_VERSION = 3 as const;
+export const INK_DOC_VERSION = 4 as const;
 export const DEFAULT_LINE_HEIGHT = 180;
 export const INK_CODE_BLOCK_LANGUAGE = 'fii-ink';
 
@@ -43,6 +50,10 @@ export interface InkLine {
 	// a left inset and a bullet glyph at render time. Absent = a normal flush-left line.
 	indent?: number; // indent level, integer 0..MAX_INDENT_LEVEL
 	bullet?: boolean; // draw a list bullet at the line start
+	// Checkbox list item (shopping lists): draws a tappable box instead of a bullet. `checked`
+	// persists with the document, and a checked line renders struck-through and dimmed.
+	checkbox?: boolean;
+	checked?: boolean; // only meaningful when checkbox is true
 }
 
 export const MAX_INDENT_LEVEL = 8;
@@ -69,6 +80,14 @@ export interface InkDocument {
 		// with the block so a resized block keeps its width on every device and through sync. When
 		// absent, the block uses the global "Displayed line width" default.
 		widthScale?: number;
+		// Search sidecar. The recognised words live in the note's frontmatter (keyed by `id`), so a
+		// search hit opens the note's properties, not the stroke JSON. Only bookkeeping is kept here:
+		// `id` is a stable per-block key for the frontmatter entry; `textHash` is the ink signature the
+		// stored text was recognised from (differs from the current strokes ⇒ stale). `text` is legacy
+		// (older builds stored the words here) — still parsed so it can be migrated, never written.
+		id?: string;
+		text?: string;
+		textHash?: string;
 	};
 	lines: InkLine[];
 }
@@ -103,6 +122,10 @@ export function createWordId(): string {
 }
 export function createLineId(): string {
 	return nextId('l');
+}
+// Stable per-block id used to key this block's entry in the note's frontmatter search sidecar.
+export function createBlockId(): string {
+	return nextId('b');
 }
 
 export function createEmptyLine(): InkLine {
@@ -205,8 +228,95 @@ export function wordBounds(word: InkWord): InkBounds | null {
 // Serialization
 // ---------------------------------------------------------------------------
 
+// v4 packed point: [x*100, y*100, pressure*100, ms since the stroke's first point], all
+// integers. See the wire-format notes at the top of this file.
+type PackedPoint = [number, number, number, number];
+
+interface PackedStroke {
+	points: PackedPoint[];
+	width: number;
+	color: string;
+	bold?: true;
+	underline?: true;
+}
+
+interface PackedWord {
+	strokes: PackedStroke[];
+}
+
+interface PackedLine {
+	words: PackedWord[];
+	indent?: number;
+	bullet?: true;
+	checkbox?: true;
+	checked?: true;
+}
+
 export function serializeInkDocument(doc: InkDocument): string {
-	return JSON.stringify(doc);
+	const meta: Record<string, unknown> = {
+		lineHeight: doc.meta.lineHeight,
+		cursor: doc.meta.cursor,
+		selection: doc.meta.selection,
+	};
+	if (doc.meta.widthScale !== undefined) {
+		meta.widthScale = Math.round(doc.meta.widthScale * 1000) / 1000;
+	}
+	// Search sidecar bookkeeping (the words themselves live in the note frontmatter, not here): the
+	// stable block id and the ink signature the stored text was recognised from. `meta.text` is still
+	// *parsed* (older blocks stored the words here) so it can be migrated, but it is never written.
+	if (typeof doc.meta.id === 'string' && doc.meta.id.length > 0) {
+		meta.id = doc.meta.id;
+	}
+	if (typeof doc.meta.textHash === 'string' && doc.meta.textHash.length > 0) {
+		meta.textHash = doc.meta.textHash;
+	}
+	return JSON.stringify({ version: INK_DOC_VERSION, meta, lines: doc.lines.map(packLine) });
+}
+
+function packLine(line: InkLine): PackedLine {
+	const packed: PackedLine = { words: line.words.map(packWord) };
+	if (typeof line.indent === 'number' && line.indent > 0) {
+		packed.indent = line.indent;
+	}
+	if (line.bullet === true) {
+		packed.bullet = true;
+	}
+	if (line.checkbox === true) {
+		packed.checkbox = true;
+		if (line.checked === true) {
+			packed.checked = true;
+		}
+	}
+	return packed;
+}
+
+function packWord(word: InkWord): PackedWord {
+	return { strokes: word.strokes.map(packStroke) };
+}
+
+function packStroke(stroke: InkStroke): PackedStroke {
+	// Rebase times to the stroke's first point — layout only ever uses within-stroke deltas,
+	// so absolute epoch values are pure waste. Idempotent: a rebased stroke rebases to itself.
+	const t0 = stroke.points[0]?.time ?? 0;
+	const packed: PackedStroke = {
+		points: stroke.points.map(
+			(p): PackedPoint => [
+				Math.round(p.x * 100),
+				Math.round(p.y * 100),
+				Math.round(p.pressure * 100),
+				Math.max(0, Math.round(p.time - t0)),
+			],
+		),
+		width: Math.round(stroke.width * 100) / 100,
+		color: stroke.color,
+	};
+	if (stroke.bold === true) {
+		packed.bold = true;
+	}
+	if (stroke.underline === true) {
+		packed.underline = true;
+	}
+	return packed;
 }
 
 export function parseInkDocument(source: string): InkDocument {
@@ -224,8 +334,7 @@ export function parseInkDocument(source: string): InkDocument {
 	}
 	const value = raw as Partial<InkDocument>;
 	const version: unknown = (raw as { version?: unknown }).version;
-	// Accept the current version and the previous one (which we migrate below).
-	if ((version !== INK_DOC_VERSION && version !== 2) || !Array.isArray(value.lines)) {
+	if (version !== INK_DOC_VERSION || !Array.isArray(value.lines)) {
 		throw new Error(`Invalid fii-ink JSON: expected { version: ${INK_DOC_VERSION}, lines: [] }.`);
 	}
 
@@ -241,12 +350,6 @@ export function parseInkDocument(source: string): InkDocument {
 		lines.push(createEmptyLine());
 	}
 
-	if (version === 2) {
-		// v2 stored word-local coordinates with normalised gaps. Spread each line's words to
-		// line-absolute positions with a default gap so old content stays readable.
-		migrateWordLocalToLineAbsolute(lines, lineHeight);
-	}
-
 	const cursor = clampCursor(value.meta?.cursor, lines);
 	const selection = normalizeSelection(value.meta?.selection, lines);
 	const rawWidthScale = value.meta?.widthScale;
@@ -255,31 +358,27 @@ export function parseInkDocument(source: string): InkDocument {
 			? clampWidthScale(rawWidthScale)
 			: undefined;
 
+	const rawId = value.meta?.id;
+	const id = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
+	const rawText = value.meta?.text;
+	const text = typeof rawText === 'string' && rawText.length > 0 ? rawText : undefined;
+	const rawTextHash = value.meta?.textHash;
+	const textHash =
+		typeof rawTextHash === 'string' && rawTextHash.length > 0 ? rawTextHash : undefined;
+
 	return {
 		version: INK_DOC_VERSION,
-		meta: { lineHeight, cursor, selection, ...(widthScale !== undefined ? { widthScale } : {}) },
+		meta: {
+			lineHeight,
+			cursor,
+			selection,
+			...(widthScale !== undefined ? { widthScale } : {}),
+			...(id !== undefined ? { id } : {}),
+			...(text !== undefined ? { text } : {}),
+			...(textHash !== undefined ? { textHash } : {}),
+		},
 		lines,
 	};
-}
-
-function migrateWordLocalToLineAbsolute(lines: InkLine[], lineHeight: number): void {
-	const defaultGap = lineHeight * 0.35;
-	for (const line of lines) {
-		let runningX = 0;
-		for (const word of line.words) {
-			const bounds = wordBounds(word);
-			if (!bounds) {
-				continue;
-			}
-			const shift = runningX - bounds.minX;
-			for (const stroke of word.strokes) {
-				for (const point of stroke.points) {
-					point.x += shift;
-				}
-			}
-			runningX += bounds.maxX - bounds.minX + defaultGap;
-		}
-	}
 }
 
 function normalizeLine(value: unknown): InkLine | null {
@@ -293,8 +392,9 @@ function normalizeLine(value: unknown): InkLine | null {
 	const words = maybe.words
 		.map((word) => normalizeWord(word))
 		.filter((word): word is InkWord => word !== null);
+	// Ids are never serialized; every parse mints fresh ones.
 	const line: InkLine = {
-		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createLineId(),
+		id: createLineId(),
 		words,
 	};
 	if (typeof maybe.indent === 'number' && Number.isFinite(maybe.indent) && maybe.indent > 0) {
@@ -302,6 +402,12 @@ function normalizeLine(value: unknown): InkLine | null {
 	}
 	if (maybe.bullet === true) {
 		line.bullet = true;
+	}
+	if (maybe.checkbox === true) {
+		line.checkbox = true;
+		if (maybe.checked === true) {
+			line.checked = true;
+		}
 	}
 	return line;
 }
@@ -320,10 +426,7 @@ function normalizeWord(value: unknown): InkWord | null {
 	if (strokes.length === 0) {
 		return null;
 	}
-	return {
-		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createWordId(),
-		strokes,
-	};
+	return { id: createWordId(), strokes };
 }
 
 function normalizeStroke(value: unknown): InkStroke | null {
@@ -341,7 +444,7 @@ function normalizeStroke(value: unknown): InkStroke | null {
 		return null;
 	}
 	const stroke: InkStroke = {
-		id: typeof maybe.id === 'string' && maybe.id ? maybe.id : createStrokeId(),
+		id: createStrokeId(),
 		points,
 		width:
 			typeof maybe.width === 'number' && Number.isFinite(maybe.width)
@@ -359,24 +462,22 @@ function normalizeStroke(value: unknown): InkStroke | null {
 }
 
 function normalizePoint(value: unknown): InkPoint | null {
-	if (!value || typeof value !== 'object') {
+	// v4 packed form: [x*100, y*100, pressure*100, ms since stroke start].
+	if (!Array.isArray(value)) {
 		return null;
 	}
-	const maybe = value as Partial<InkPoint>;
-	const x = Number(maybe.x);
-	const y = Number(maybe.y);
+	const x = Number(value[0]);
+	const y = Number(value[1]);
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		return null;
 	}
+	const pressure = Number(value[2]);
+	const time = Number(value[3]);
 	return {
-		x,
-		y,
-		pressure:
-			typeof maybe.pressure === 'number' && Number.isFinite(maybe.pressure)
-				? maybe.pressure
-				: 0.5,
-		time:
-			typeof maybe.time === 'number' && Number.isFinite(maybe.time) ? maybe.time : 0,
+		x: x / 100,
+		y: y / 100,
+		pressure: Number.isFinite(pressure) ? pressure / 100 : 0.5,
+		time: Number.isFinite(time) ? time : 0,
 	};
 }
 

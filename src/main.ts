@@ -1,5 +1,8 @@
-import { Editor, MarkdownView, Modal, Notice, Platform, Plugin } from 'obsidian';
+import { Editor, MarkdownView, Modal, Notice, Platform, Plugin, editorLivePreviewField } from 'obsidian';
 import { INK_CODE_BLOCK_LANGUAGE } from './ink/doc';
+import { compactInkBlocksInContent } from './ink/compact';
+import { inkBlockGuard } from './ink/guard';
+import { InkToolbar } from './ink/toolbar';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import { StrokeNib } from './ink/render';
@@ -24,6 +27,7 @@ export interface FreeFlowInkAdaptiveMetrics {
 export default class FreeFlowInkPlugin extends Plugin {
 	settings: FreeFlowInkSettings = { ...DEFAULT_FREEFLOW_SETTINGS };
 	private drawer: InkDrawer | null = null;
+	private toolbar: InkToolbar | null = null;
 	private registry: InkBlockRegistry | null = null;
 	private runtimeStyleEl: HTMLStyleElement | null = null;
 
@@ -31,6 +35,11 @@ export default class FreeFlowInkPlugin extends Plugin {
 		await this.loadSettings();
 		this.ensureRuntimeStyle();
 		this.applyRuntimeStyles();
+
+		// Live preview only: source mode must stay editable so the raw JSON remains inspectable.
+		this.registerEditorExtension(
+			inkBlockGuard((state) => state.field(editorLivePreviewField, false) === true),
+		);
 
 		this.drawer = new InkDrawer(() => this.getDrawerRuntimeConfig());
 		this.addCommand({
@@ -75,9 +84,35 @@ export default class FreeFlowInkPlugin extends Plugin {
 				this.insertInkBlockAtCursor(editor);
 			},
 		});
+		this.addCommand({
+			id: 'compact-ink-blocks-vault',
+			name: 'Compact all ink blocks in vault',
+			callback: () => {
+				void this.compactAllInkBlocks();
+			},
+		});
 		this.addRibbonIcon('pencil-line', 'New handwriting block', () => {
 			this.insertInkBlockFromRibbon();
 		});
+		// The unified floating toolbar (singleton, like the drawer). Constructed regardless of the
+		// setting — blocks only bind to it when the setting is on, so toggling needs no reload logic.
+		const toolbar = new InkToolbar({
+			penHost: this.drawer,
+			getShowWritingLine: () => this.settings.showRenderWritingLine,
+			setShowWritingLine: (value) => {
+				this.settings.showRenderWritingLine = value;
+				void this.saveSettings();
+			},
+			refreshAllInline: () => this.refreshInlineBlocks(),
+			getPosition: () => this.settings.toolbarPosition,
+			setPosition: (pos) => {
+				this.settings.toolbarPosition = pos;
+				void this.saveSettings();
+			},
+		});
+		this.toolbar = toolbar;
+		this.drawer.setUiStateListener(() => toolbar.refresh());
+
 		const registry = new InkBlockRegistry(
 			this,
 			this.drawer,
@@ -101,6 +136,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 			() => this.getSoftBlockLimitBytes(),
 			() => this.getHardBlockLimitBytes(),
 			() => this.settings.showSoftLimitNotice,
+			toolbar,
+			() => this.settings.unifiedToolbar,
+			() => ({
+				applicationKey: this.settings.myscriptAppKey,
+				hmacKey: this.settings.myscriptHmacKey,
+				language: this.settings.recognitionLanguage,
+			}),
+			() => this.settings.autoIndexForSearch,
 		);
 		this.registry = registry;
 		registry.register();
@@ -124,6 +167,8 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.register(() => {
 			this.drawer?.destroy();
 			this.drawer = null;
+			this.toolbar?.destroy();
+			this.toolbar = null;
 			this.registry = null;
 			this.runtimeStyleEl?.remove();
 			this.runtimeStyleEl = null;
@@ -145,12 +190,14 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.applyRuntimeStyles();
 	}
 
-	// When the active note flips to Reading view, close the drawer so its content is committed.
-	// A no-op when the drawer is already closed or the view is still editable.
+	// When the active note flips to Reading view, close the drawer so its content is committed,
+	// and hide the floating toolbar (the editing widgets stay mounted in the background, so the
+	// toolbar would otherwise linger over the read-only page). A no-op while the view is editable.
 	private closeDrawerIfReadingMode(): void {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (view && view.getMode() === 'preview') {
 			this.drawer?.close();
+			this.toolbar?.hide();
 		}
 	}
 
@@ -172,6 +219,7 @@ export default class FreeFlowInkPlugin extends Plugin {
 			palmRejection: this.settings.palmRejection,
 			usePointerCapture: !iosLike,
 			allowAnyNonMousePointer: iosLike,
+			unifiedToolbar: this.settings.unifiedToolbar,
 		};
 	}
 
@@ -501,10 +549,50 @@ export default class FreeFlowInkPlugin extends Plugin {
 	private insertInkBlockAtCursor(editor: Editor): void {
 		const cursor = editor.getCursor();
 		const onBlankLine = editor.getLine(cursor.line).trim().length === 0;
-		const prefix = onBlankLine ? '' : '\n';
+		// A block whose opening fence is the very first line of a note isn't reliably drawn by Live
+		// Preview until the editor is scrolled (a CodeMirror viewport quirk), so never place one there —
+		// always keep at least a blank line above it. Otherwise reuse the current blank line if we're on
+		// one, else start on a fresh line.
+		const prefix = cursor.line === 0 || !onBlankLine ? '\n' : '';
 		// An empty body parses to an empty document, ready to write into.
 		const block = `${prefix}\`\`\`${INK_CODE_BLOCK_LANGUAGE}\n\n\`\`\`\n`;
 		editor.replaceSelection(block);
+	}
+
+	// Re-serialize every fii-ink block in every markdown note into the current compact wire
+	// format. Blocks that fail to parse are left untouched. Notes are only written when their
+	// content actually changes (so sync tools don't re-upload untouched files).
+	private async compactAllInkBlocks(): Promise<void> {
+		const fenceMarker = `\`\`\`${INK_CODE_BLOCK_LANGUAGE}`;
+		let notesChanged = 0;
+		let blocksCompacted = 0;
+		let blocksFailed = 0;
+		let bytesSaved = 0;
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const content = await this.app.vault.cachedRead(file);
+			if (!content.includes(fenceMarker)) {
+				continue;
+			}
+			const result = compactInkBlocksInContent(content);
+			blocksFailed += result.blocksFailed;
+			if (result.content === content) {
+				continue;
+			}
+			// Re-run the transform inside `process` so the write is atomic against concurrent
+			// edits of the same file.
+			await this.app.vault.process(file, (current) => compactInkBlocksInContent(current).content);
+			notesChanged += 1;
+			blocksCompacted += result.blocksCompacted;
+			bytesSaved += result.bytesSaved;
+		}
+		const savedKb = Math.round(bytesSaved / 1024);
+		const failNote = blocksFailed > 0 ? ` ${blocksFailed} block(s) failed to parse and were left unchanged.` : '';
+		new Notice(
+			notesChanged === 0
+				? `FreeFlow Ink: all ink blocks are already compact.${failNote}`
+				: `FreeFlow Ink: compacted ${blocksCompacted} block(s) in ${notesChanged} note(s), saved ${savedKb} KB.${failNote}`,
+			8000,
+		);
 	}
 }
 

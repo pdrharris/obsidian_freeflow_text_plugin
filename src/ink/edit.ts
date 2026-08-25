@@ -44,6 +44,55 @@ function placeRun(words: InkWord[], startX: number): number {
 	return right;
 }
 
+// A "scribble erase" is a scratch-out gesture: several quick back-and-forth passes, usually
+// drawn over existing ink to strike it out. We classify purely on the stroke's own geometry so
+// the drawer can drop the stroke and delete what it covers instead of committing it as writing.
+// Points are in any consistent space (the drawer passes line-absolute source coords).
+//
+// The test is deliberately conservative — it must clear ALL of: enough samples, several genuine
+// horizontal direction reversals, a path far longer than the bounding box is wide, and a box that
+// is roughly as wide as it is tall. That rejects straight strokes (a vertical `l`/`t`, a dash) and
+// ordinary letters, which don't double back repeatedly across their own width.
+export function isScribbleGesture(points: ReadonlyArray<{ x: number; y: number }>): boolean {
+	if (points.length < 8) {
+		return false;
+	}
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let minY = Infinity;
+	let maxY = -Infinity;
+	for (const p of points) {
+		if (p.x < minX) minX = p.x;
+		if (p.x > maxX) maxX = p.x;
+		if (p.y < minY) minY = p.y;
+		if (p.y > maxY) maxY = p.y;
+	}
+	const width = maxX - minX;
+	const height = maxY - minY;
+	if (width <= 0 || width < height * 0.8) {
+		return false; // too narrow/tall to be a horizontal scratch-out
+	}
+	// Ignore sub-jitter horizontal motion so a slightly wavy line isn't read as reversing.
+	const eps = width * 0.06;
+	let pathLen = 0;
+	let reversals = 0;
+	let dir = 0; // last significant horizontal direction: -1, 0, or +1
+	for (let i = 1; i < points.length; i += 1) {
+		const p = points[i]!;
+		const prev = points[i - 1]!;
+		const dx = p.x - prev.x;
+		pathLen += Math.hypot(dx, p.y - prev.y);
+		if (Math.abs(dx) > eps) {
+			const nd = dx > 0 ? 1 : -1;
+			if (dir !== 0 && nd !== dir) {
+				reversals += 1;
+			}
+			dir = nd;
+		}
+	}
+	return reversals >= 3 && pathLen >= width * 2.5;
+}
+
 // After words are removed starting at `index`, pull the remaining right-hand words left so a
 // mid-line delete closes the hole instead of leaving the drawn whitespace behind. The first
 // surviving word is re-seated a normal word gap after the word now before it (or at the line
@@ -116,8 +165,10 @@ export function splitLineAtCursor(doc: InkDocument): InkCursor {
 	if (!line) {
 		return cursor;
 	}
-	if (line.bullet && line.words.length === 0) {
+	if ((line.bullet || line.checkbox) && line.words.length === 0) {
 		delete line.bullet;
+		delete line.checkbox;
+		delete line.checked;
 		doc.meta.selection = null;
 		return cursor;
 	}
@@ -129,6 +180,9 @@ export function splitLineAtCursor(doc: InkDocument): InkCursor {
 	}
 	if (line.bullet) {
 		newLine.bullet = true;
+	}
+	if (line.checkbox) {
+		newLine.checkbox = true; // a new list item starts unchecked
 	}
 	doc.lines.splice(cursor.line + 1, 0, newLine);
 	const next: InkCursor = { line: cursor.line + 1, word: 0 };
@@ -189,14 +243,90 @@ export function toggleBulletAtCursor(doc: InkDocument): void {
 			delete line.bullet;
 		} else {
 			line.bullet = true;
+			delete line.checkbox; // bullet and checkbox are mutually exclusive
+			delete line.checked;
 		}
 	}
+}
+
+// Toggle checkboxes on the target lines, same all-or-nothing rule as toggleBulletAtCursor.
+// Turning a line into a checkbox replaces any bullet; turning it off clears the checked state.
+export function toggleCheckboxAtCursor(doc: InkDocument): void {
+	const { from, to } = targetLineRange(doc);
+	let allCheckboxes = true;
+	for (let i = from; i <= to; i += 1) {
+		if (!doc.lines[i]?.checkbox) {
+			allCheckboxes = false;
+			break;
+		}
+	}
+	for (let i = from; i <= to; i += 1) {
+		const line = doc.lines[i];
+		if (!line) {
+			continue;
+		}
+		if (allCheckboxes) {
+			delete line.checkbox;
+			delete line.checked;
+		} else {
+			line.checkbox = true;
+			delete line.bullet;
+		}
+	}
+}
+
+// Flip a checkbox line's checked state (reading-mode tap). Returns the new state, or null when
+// the line isn't a checkbox item.
+export function toggleLineChecked(doc: InkDocument, lineIndex: number): boolean | null {
+	const line = doc.lines[lineIndex];
+	if (!line?.checkbox) {
+		return null;
+	}
+	if (line.checked) {
+		delete line.checked;
+		return false;
+	}
+	line.checked = true;
+	return true;
+}
+
+// The ink colour at the caret: the colour of the nearest stroke just before the cursor (so a
+// swatch previews "what you're writing in here"), falling back to the next stroke to the right,
+// then the supplied default. Used by the inline recolour button and the floating toolbar.
+export function colorAtCursor(doc: InkDocument, fallback: string): string {
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	const lastColor = (word: InkWord | undefined): string | null => {
+		const stroke = word?.strokes[word.strokes.length - 1];
+		return stroke ? stroke.color : null;
+	};
+	const line = doc.lines[cursor.line];
+	if (line) {
+		for (let w = Math.min(cursor.word, line.words.length) - 1; w >= 0; w -= 1) {
+			const color = lastColor(line.words[w]);
+			if (color) {
+				return color;
+			}
+		}
+		for (let w = cursor.word; w < line.words.length; w += 1) {
+			const color = lastColor(line.words[w]);
+			if (color) {
+				return color;
+			}
+		}
+	}
+	return fallback;
 }
 
 // Whether the line under the cursor is currently a bullet (for reflecting the toolbar button state).
 export function cursorLineIsBulleted(doc: InkDocument): boolean {
 	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
 	return doc.lines[cursor.line]?.bullet === true;
+}
+
+// Whether the line under the cursor is currently a checkbox item (for the toolbar button state).
+export function cursorLineIsCheckbox(doc: InkDocument): boolean {
+	const cursor = clampCursorToDoc(doc, doc.meta.cursor);
+	return doc.lines[cursor.line]?.checkbox === true;
 }
 
 // Erase: delete the selection if present; otherwise delete the word before the cursor, or
