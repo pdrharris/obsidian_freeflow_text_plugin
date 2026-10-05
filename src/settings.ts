@@ -1,9 +1,10 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, ColorComponent, PluginSettingTab, Setting } from 'obsidian';
 import type FreeFlowInkPlugin from './main';
+import { DEFAULT_INK_COLOR } from './ink/palette';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-07-25A';
+export const FREEFLOW_BUILD_MARKER = '2026-10-05A';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width
@@ -27,6 +28,9 @@ export interface FreeFlowInkSettings {
 	// re-weights existing handwriting too). Above 1 = heavier/bolder lines.
 	strokeWeightScale: number;
 	velocityWidth: boolean;
+	// Colour a fresh pen starts in (a new block, or the start of a line with no ink to continue).
+	// Hex `#rrggbb`. Only affects new strokes; existing ink keeps its colour.
+	defaultInkColor: string;
 	// Fold Apple Pencil pressure (Touch.force, captured per point) into stroke width. Finger/mouse
 	// report no real pressure (a constant mid value), so this is a no-op there and falls back to
 	// velocity width.
@@ -79,6 +83,7 @@ export const DEFAULT_FREEFLOW_SETTINGS: FreeFlowInkSettings = {
 	showRenderWritingLine: true,
 	strokeWeightScale: 1.3,
 	velocityWidth: true,
+	defaultInkColor: DEFAULT_INK_COLOR,
 	pressureWidth: true,
 	taperStrokeEnds: true,
 	calligraphyNib: false,
@@ -321,6 +326,30 @@ export class FreeFlowInkSettingTab extends PluginSettingTab {
 					}),
 			)
 			.controlEl.appendChild(strokeWeightValueEl);
+
+		let inkColorPicker: ColorComponent | null = null;
+		new Setting(containerEl)
+			.setName('Default ink colour')
+			.setDesc(
+				'The colour the pen starts in for a new block, or at the start of a line with no ink to carry on from. Writing next to existing ink still continues in that ink’s colour. Doesn’t change handwriting you’ve already written.',
+			)
+			.addColorPicker((picker) => {
+				inkColorPicker = picker;
+				picker.setValue(this.plugin.settings.defaultInkColor).onChange(async (value) => {
+					this.plugin.settings.defaultInkColor = value; // saveSettings syncs the live default
+					await this.plugin.saveSettings();
+				});
+			})
+			.addExtraButton((button) =>
+				button
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						this.plugin.settings.defaultInkColor = DEFAULT_INK_COLOR;
+						inkColorPicker?.setValue(DEFAULT_INK_COLOR);
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName('Variable width by pen speed')

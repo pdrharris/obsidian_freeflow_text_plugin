@@ -86,7 +86,13 @@ export function inlineLayout(
 		cssWidthOverride ?? canvas.parentElement?.clientWidth ?? canvas.clientWidth ?? 160,
 	);
 	const contentWidth = Math.min(cssWidth, Math.max(120, options.wrapWidth));
-	const targetLineHeight = clamp(INLINE_BASE_LINE_HEIGHT_PX * options.renderLineHeightScale, 10, 220);
+	// The block's own line-spacing multiplier (meta.lineScale) stacks on the global setting, so a
+	// single block can be grown/shrunk; living here keeps render, hit-testing and export in step.
+	const targetLineHeight = clamp(
+		INLINE_BASE_LINE_HEIGHT_PX * options.renderLineHeightScale * (doc.meta.lineScale ?? 1),
+		10,
+		220,
+	);
 	const layout = layoutDocument(doc, {
 		contentWidthCss: contentWidth,
 		targetLineHeightCss: targetLineHeight,

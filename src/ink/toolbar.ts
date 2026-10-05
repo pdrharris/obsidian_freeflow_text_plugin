@@ -26,7 +26,7 @@ import {
 	toggleCheckboxAtCursor,
 } from './edit';
 import { getClipboard, setClipboard } from './clipboard';
-import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
+import { ColorPopupHandle, getDefaultInkColor, openColorPopup } from './palette';
 
 export interface PenStyle {
 	color: string;
@@ -278,7 +278,7 @@ export class InkToolbar {
 
 		const swatchColor = penActive
 			? this.opts.penHost.getPen().color
-			: colorAtCursor(doc, DEFAULT_INK_COLOR);
+			: colorAtCursor(doc, getDefaultInkColor());
 		this.colorSwatchEl.style.backgroundColor = swatchColor;
 		this.colorSwatchEl.style.color = swatchColor;
 	}
@@ -319,7 +319,7 @@ export class InkToolbar {
 		const penActive = this.opts.penHost.isOpen();
 		const current = penActive
 			? this.opts.penHost.getPen().color
-			: colorAtCursor(target.doc, DEFAULT_INK_COLOR);
+			: colorAtCursor(target.doc, getDefaultInkColor());
 		this.colorPopup = openColorPopup(this.colorBtn, current, (color) => {
 			this.colorPopup = null;
 			this.withStyleContext(

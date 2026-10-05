@@ -80,6 +80,10 @@ export interface InkDocument {
 		// with the block so a resized block keeps its width on every device and through sync. When
 		// absent, the block uses the global "Displayed line width" default.
 		widthScale?: number;
+		// Per-block rendered line-spacing multiplier (0.5..3), applied on top of the global
+		// "Rendered line spacing". Glyphs scale with the line height, so this effectively grows or
+		// shrinks the block's rendered handwriting. Absent = 1. Inline view only; the drawer ignores it.
+		lineScale?: number;
 		// Search sidecar. The recognised words live in the note's frontmatter (keyed by `id`), so a
 		// search hit opens the note's properties, not the stroke JSON. Only bookkeeping is kept here:
 		// `id` is a stable per-block key for the frontmatter entry; `textHash` is the ink signature the
@@ -103,6 +107,14 @@ export function clampWidthScale(value: number): number {
 
 export const MIN_WIDTH_SCALE = 0.3;
 export const MAX_WIDTH_SCALE = 1;
+
+export const MIN_LINE_SCALE = 0.5;
+export const MAX_LINE_SCALE = 3;
+
+// Clamp a per-block line-spacing multiplier to the supported range.
+export function clampLineScale(value: number): number {
+	return value < MIN_LINE_SCALE ? MIN_LINE_SCALE : value > MAX_LINE_SCALE ? MAX_LINE_SCALE : value;
+}
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -261,6 +273,9 @@ export function serializeInkDocument(doc: InkDocument): string {
 	if (doc.meta.widthScale !== undefined) {
 		meta.widthScale = Math.round(doc.meta.widthScale * 1000) / 1000;
 	}
+	if (doc.meta.lineScale !== undefined) {
+		meta.lineScale = Math.round(doc.meta.lineScale * 1000) / 1000;
+	}
 	// Search sidecar bookkeeping (the words themselves live in the note frontmatter, not here): the
 	// stable block id and the ink signature the stored text was recognised from. `meta.text` is still
 	// *parsed* (older blocks stored the words here) so it can be migrated, but it is never written.
@@ -357,6 +372,11 @@ export function parseInkDocument(source: string): InkDocument {
 		typeof rawWidthScale === 'number' && Number.isFinite(rawWidthScale)
 			? clampWidthScale(rawWidthScale)
 			: undefined;
+	const rawLineScale = value.meta?.lineScale;
+	const lineScale =
+		typeof rawLineScale === 'number' && Number.isFinite(rawLineScale)
+			? clampLineScale(rawLineScale)
+			: undefined;
 
 	const rawId = value.meta?.id;
 	const id = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
@@ -373,6 +393,7 @@ export function parseInkDocument(source: string): InkDocument {
 			cursor,
 			selection,
 			...(widthScale !== undefined ? { widthScale } : {}),
+			...(lineScale !== undefined ? { lineScale } : {}),
 			...(id !== undefined ? { id } : {}),
 			...(text !== undefined ? { text } : {}),
 			...(textHash !== undefined ? { textHash } : {}),

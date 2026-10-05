@@ -13,9 +13,12 @@ import {
 	INK_CODE_BLOCK_LANGUAGE,
 	InkDocument,
 	InkWord,
+	MAX_LINE_SCALE,
+	MIN_LINE_SCALE,
 	clampCursor,
-	createBlockId,
+	clampLineScale,
 	clampWidthScale,
+	createBlockId,
 	fragmentIsEmpty,
 	parseInkDocument,
 	selectionIsEmpty,
@@ -33,7 +36,7 @@ import { getClipboard, setClipboard } from './clipboard';
 import { drawInlineCanvas, inlineLayout, InlineRenderOptions, renderInkImage, StrokeNib } from './render';
 import { applyListMarkupToRecognizedText, buildRecognitionStrokes, inkSignature } from './recognize';
 import { hasMyScriptKeys, MyScriptCredentials, recognizeText } from './myscript';
-import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
+import { ColorPopupHandle, getDefaultInkColor, openColorPopup } from './palette';
 import {
 	persistInkCodeBlock,
 	persistInkSearchFrontmatter,
@@ -44,6 +47,8 @@ import {
 import { InkToolbar, ToolbarTarget } from './toolbar';
 
 const SAVE_DEBOUNCE_MS = 320;
+// Per-tap change of a block's size (line-spacing multiplier) from the meta row's A−/A+ buttons.
+const LINE_SCALE_STEP = 0.1;
 // Automatic search-indexing waits longer than a save: it only wants to fire once writing has
 // settled, and every run is a MyScript request, so we err well on the side of quiet.
 const AUTO_INDEX_DEBOUNCE_MS = 4000;
@@ -72,7 +77,7 @@ function colorAtCursor(doc: InkDocument): string {
 			}
 		}
 	}
-	return DEFAULT_INK_COLOR;
+	return getDefaultInkColor();
 }
 
 function confirmModal(app: App, title: string, body: string, confirmText: string): Promise<boolean> {
@@ -344,7 +349,7 @@ export class InkBlockRegistry {
 		let selectMode = false;
 		let selecting = false;
 		let colorPopup: ColorPopupHandle | null = null;
-		let lastSelectionColor = DEFAULT_INK_COLOR;
+		let lastSelectionColor = getDefaultInkColor();
 		let saveTimeout = 0;
 		let autoIndexTimeout = 0;
 		let indexing = false;
@@ -411,6 +416,12 @@ export class InkBlockRegistry {
 		const indexSearchButtonEl = makeMetaButton('🔍', 'Index for search');
 		// The stored text is hidden from the Properties panel; this shows it on demand in a popup.
 		const viewTextButtonEl = makeMetaButton('👁', 'See indexed text');
+		// Per-block size: steps the block's line spacing (and with it the glyph size) down/up. The
+		// percentage between them shows the current size; tapping it resets to 100%.
+		const shrinkButtonEl = makeMetaButton('A−', 'Smaller handwriting (this block)');
+		const sizeResetButtonEl = makeMetaButton('', 'Reset handwriting size (this block)');
+		sizeResetButtonEl.classList.add('freeflow-ink-size-label');
+		const growButtonEl = makeMetaButton('A+', 'Larger handwriting (this block)');
 		const actionEl = makeMetaButton('✏️', 'Open drawer');
 
 		const updateMetaButtons = (): void => {
@@ -435,6 +446,10 @@ export class InkBlockRegistry {
 				underlineButtonEl.classList.remove('is-active');
 			}
 			hintEl.textContent = selectMode ? 'Drag to select words' : 'Tap to place cursor';
+			const lineScale = documentModel.meta.lineScale ?? 1;
+			sizeResetButtonEl.setText(`${Math.round(lineScale * 100)}%`);
+			shrinkButtonEl.disabled = lineScale <= MIN_LINE_SCALE + 1e-6;
+			growButtonEl.disabled = lineScale >= MAX_LINE_SCALE - 1e-6;
 			this.toolbar?.refresh(); // mirror selection/cursor state on the floating toolbar
 		};
 
@@ -758,7 +773,7 @@ export class InkBlockRegistry {
 			const parent = containerEl.parentElement;
 			return Math.max(200, parent?.clientWidth ?? containerEl.clientWidth ?? 400);
 		};
-		const persistWidth = (): void => {
+		const persistBlockMeta = (): void => {
 			if (isActiveKey(blockKey)) {
 				// Drawer is open for this block; let its close flush persist the new width.
 				pendingInlineRefreshWhileActive = true;
@@ -809,8 +824,32 @@ export class InkBlockRegistry {
 			} catch {
 				/* ignore */
 			}
-			persistWidth();
+			persistBlockMeta();
 		};
+		// --- per-block size (line spacing) ------------------------------------------------------
+		// Rounded to whole 10% steps so repeated taps can't drift; 100% drops the field entirely so
+		// an unscaled block's JSON stays unchanged.
+		const setLineScale = (next: number): void => {
+			const scale = clampLineScale(Math.round(next * 10) / 10);
+			if (Math.abs(scale - 1) < 1e-6) {
+				delete documentModel.meta.lineScale;
+			} else {
+				documentModel.meta.lineScale = scale;
+			}
+			renderInline();
+			updateMetaButtons();
+			persistBlockMeta();
+		};
+		const onShrink = (): void => {
+			setLineScale((documentModel.meta.lineScale ?? 1) - LINE_SCALE_STEP);
+		};
+		const onGrow = (): void => {
+			setLineScale((documentModel.meta.lineScale ?? 1) + LINE_SCALE_STEP);
+		};
+		const onSizeReset = (): void => {
+			setLineScale(1);
+		};
+
 		// Double-click/tap the handle clears the per-block width (back to the global default).
 		const onResizeReset = (): void => {
 			delete documentModel.meta.widthScale;
@@ -819,7 +858,7 @@ export class InkBlockRegistry {
 			if (isActiveKey(blockKey)) {
 				drawer.refreshLayout();
 			}
-			persistWidth();
+			persistBlockMeta();
 		};
 
 		const onCanvasPointerDown = (event: PointerEvent): void => {
@@ -1191,6 +1230,9 @@ export class InkBlockRegistry {
 		copyTextButtonEl.addEventListener('click', onCopyText);
 		indexSearchButtonEl.addEventListener('click', onIndexForSearch);
 		viewTextButtonEl.addEventListener('click', onViewIndexedText);
+		shrinkButtonEl.addEventListener('click', onShrink);
+		sizeResetButtonEl.addEventListener('click', onSizeReset);
+		growButtonEl.addEventListener('click', onGrow);
 		actionEl.addEventListener('click', onActionClick);
 		deleteButtonEl.addEventListener('click', onDelete);
 		canvasEl.tabIndex = 0;

@@ -81,6 +81,11 @@ source of truth for caret/selection and are persisted. `meta.widthScale?: number
 per-block display width (a fraction 0.3–1 of the content column) set by dragging the block's
 right-edge handle; when absent the block uses the global "Displayed line width" default. It is
 device-independent (a fraction, not px) so it survives sync between desktop and iPad.
+`meta.lineScale?: number` (0.5–3, absent = 1) is a per-block multiplier on the global "Rendered
+line spacing", stepped by the block's A−/A+ meta-row buttons; since glyphs scale with line height it
+grows/shrinks the block's rendered handwriting. Applied in `inlineLayout` (inline view only — the
+drawer ignores it). The pen's starting colour comes from the "Default ink colour" setting, held
+process-wide in `palette.ts` (`getDefaultInkColor`).
 
 ### Layout engine (`src/ink/layout.ts`)
 

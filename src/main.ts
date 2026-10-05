@@ -6,6 +6,7 @@ import { InkToolbar } from './ink/toolbar';
 import { InkBlockRegistry } from './ink/blocks';
 import { DrawerRuntimeConfig, InkDiagnosticResult, InkDrawer } from './ink/drawer';
 import { StrokeNib } from './ink/render';
+import { DEFAULT_INK_COLOR, isHexColor, setDefaultInkColor } from './ink/palette';
 import {
 	DEFAULT_FREEFLOW_SETTINGS,
 	FreeFlowInkSettingTab,
@@ -342,6 +343,10 @@ export default class FreeFlowInkPlugin extends Plugin {
 		this.settings.handwritingSmoothing = clamp(this.settings.handwritingSmoothing, 0, 1);
 		this.settings.renderLineHeightScale = clamp(this.settings.renderLineHeightScale, 0.1, 4.0);
 		this.settings.renderStrokeFillScale = clamp(this.settings.renderStrokeFillScale, 0.4, 1.6);
+		if (!isHexColor(this.settings.defaultInkColor)) {
+			this.settings.defaultInkColor = DEFAULT_INK_COLOR;
+		}
+		setDefaultInkColor(this.settings.defaultInkColor);
 		this.settings.drawerHeightScale = clamp(this.settings.drawerHeightScale, 0.3, 1.5);
 		this.settings.idleAdvanceMs = clamp(Math.round(this.settings.idleAdvanceMs), 500, 5000);
 		this.settings.releaseAdvanceDelayMs = clamp(

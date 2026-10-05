@@ -4,6 +4,23 @@
 
 export const DEFAULT_INK_COLOR = '#111827';
 
+// The user's chosen default ink colour (settings → "Default ink colour"): what a fresh pen starts
+// in when there's no neighbouring ink to continue. Process-wide like the clipboard; main.ts keeps
+// it in sync with the setting.
+let defaultInkColor = DEFAULT_INK_COLOR;
+
+export function getDefaultInkColor(): string {
+	return defaultInkColor;
+}
+
+export function setDefaultInkColor(color: string): void {
+	defaultInkColor = isHexColor(color) ? color.toLowerCase() : DEFAULT_INK_COLOR;
+}
+
+export function isHexColor(value: unknown): value is string {
+	return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+}
+
 // 32 colours: greys, then a spectrum in two tones (deep + bright).
 export const INK_PALETTE: string[] = [
 	'#111827', '#374151', '#6b7280', '#9ca3af', '#d1d5db', '#ffffff',

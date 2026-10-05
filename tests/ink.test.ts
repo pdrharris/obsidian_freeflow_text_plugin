@@ -166,6 +166,26 @@ test('serialize -> parse round-trips meta.widthScale', () => {
 	eq(parseInkDocument(serializeInkDocument(d)).meta.widthScale, 0.45);
 });
 
+test('parse preserves and clamps meta.lineScale; absent stays undefined', () => {
+	const base = (lineScale?: number) =>
+		JSON.stringify({
+			version: INK_DOC_VERSION,
+			meta: { lineHeight: 180, cursor: { line: 0, word: 0 }, selection: null, lineScale },
+			lines: [{ id: 'l', words: [] }],
+		});
+	eq(parseInkDocument(base(1.4)).meta.lineScale, 1.4);
+	eq(parseInkDocument(base(9)).meta.lineScale, 3, 'over-max size clamps to 3');
+	eq(parseInkDocument(base(0.1)).meta.lineScale, 0.5, 'below-min size clamps to 0.5');
+	eq(parseInkDocument(base(undefined)).meta.lineScale, undefined, 'absent size stays undefined');
+});
+
+test('serialize -> parse round-trips meta.lineScale; unscaled blocks omit it', () => {
+	const d = mkDoc([W('a')]);
+	ok(!serializeInkDocument(d).includes('lineScale'), 'no lineScale key when unset');
+	d.meta.lineScale = 1.7;
+	eq(parseInkDocument(serializeInkDocument(d)).meta.lineScale, 1.7);
+});
+
 // ---- v4 compact wire format -----------------------------------------------
 
 test('v4 serialize packs points as arrays and omits ids', () => {

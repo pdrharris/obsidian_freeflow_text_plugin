@@ -42,7 +42,7 @@ import {
 	underlineThickness,
 	wordUnderline,
 } from './render';
-import { ColorPopupHandle, DEFAULT_INK_COLOR, openColorPopup } from './palette';
+import { ColorPopupHandle, getDefaultInkColor, openColorPopup } from './palette';
 
 const BACKDROP_CLOSE_GUARD_MS = 420;
 const MIN_POINT_DISTANCE_SQ = 0.35;
@@ -169,7 +169,7 @@ export class InkDrawer {
 	private committedStrokeCount = 0;
 
 	// Current "pen" style applied to new strokes.
-	private penColor = DEFAULT_INK_COLOR;
+	private penColor = getDefaultInkColor();
 	private penBold = false;
 	private penUnderline = false;
 	private colorPopup: ColorPopupHandle | null = null;
@@ -1311,7 +1311,7 @@ export class InkDrawer {
 
 	// Make the pen continue in the colour/bold/underline of the stroke just left of the cursor, so
 	// writing carries on in the style already in use. With nothing to the left (a blank block, or the
-	// start of a line) it resets to the defaults: black, no bold, no underline.
+	// start of a line) it resets to the defaults: the default ink colour, no bold, no underline.
 	private syncPenStyleToContext(): void {
 		const style = this.styleBeforeCursor();
 		if (style) {
@@ -1319,7 +1319,7 @@ export class InkDrawer {
 			this.penBold = style.bold;
 			this.penUnderline = style.underline;
 		} else {
-			this.penColor = DEFAULT_INK_COLOR;
+			this.penColor = getDefaultInkColor();
 			this.penBold = false;
 			this.penUnderline = false;
 		}

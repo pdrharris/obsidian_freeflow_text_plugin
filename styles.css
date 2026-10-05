@@ -217,6 +217,15 @@
 	text-decoration: underline;
 }
 
+/* The per-block size readout ("120%") between A− and A+: a text button, so it sizes to its label. */
+.freeflow-ink-meta-action.freeflow-ink-size-label {
+	width: auto;
+	min-width: 28px;
+	padding: 0 6px;
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+}
+
 .freeflow-ink-meta-action .svg-icon {
 	width: 16px;
 	height: 16px;
