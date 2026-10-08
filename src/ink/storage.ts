@@ -1,24 +1,67 @@
-import { App, TFile } from 'obsidian';
+import { App, Editor, TFile } from 'obsidian';
 import { INK_CODE_BLOCK_LANGUAGE } from './doc';
+import { minimalReplacement } from './textdiff';
 
 export interface SectionInfoLike {
 	lineStart: number;
 	lineEnd: number;
 }
 
+// Where a block's note text is read from and written back to. When the note is open in an
+// editor, go through the editor: that is what Obsidian recommends for changing an open note, and
+// it is the ONLY route that works for an encrypted note (Meld Encrypt) — the file on disk is
+// ciphertext, so a disk-level splice can't find the block, and a disk-level write would clobber
+// the encryption. The editor holds the readable text and the note view re-encrypts on save.
+// Without an open editor (e.g. the note was closed with a save still pending) fall back to the
+// vault file.
+export interface InkNoteTarget {
+	read(): Promise<string>;
+	write(previous: string, next: string): Promise<void>;
+}
+
+export function vaultNoteTarget(app: App, sourcePath: string, what: string): InkNoteTarget {
+	const file = app.vault.getAbstractFileByPath(sourcePath);
+	if (!(file instanceof TFile)) {
+		throw new Error(`Unable to ${what}: file not found.`);
+	}
+	if (file.extension !== 'md') {
+		// Not a plain markdown file (an encrypted note whose editor is no longer open, say): a disk
+		// write would corrupt it. Better to lose one save than the whole note.
+		throw new Error(`Unable to ${what}: the note isn't open and isn't plain markdown.`);
+	}
+	return {
+		read: () => app.vault.cachedRead(file),
+		write: (_previous, next) => app.vault.modify(file, next),
+	};
+}
+
+export function editorNoteTarget(editor: Editor): InkNoteTarget {
+	return {
+		read: () => Promise.resolve(editor.getValue()),
+		write: (previous, next) => {
+			// `previous` was read from this same editor, so offsets line up unless the user typed in
+			// between; re-read to be safe and bail if the text moved under us (the block remounts on
+			// every note change, so the next save gets a fresh section anyway).
+			const current = editor.getValue();
+			if (current !== previous) {
+				throw new Error('note changed while saving; will retry on the next edit');
+			}
+			const change = minimalReplacement(previous, next);
+			if (change) {
+				editor.replaceRange(change.text, editor.offsetToPos(change.from), editor.offsetToPos(change.to));
+			}
+			return Promise.resolve();
+		},
+	};
+}
+
 export async function persistInkCodeBlock(
-	app: App,
-	sourcePath: string,
+	target: InkNoteTarget,
 	sectionInfo: SectionInfoLike,
 	serialized: string,
 ): Promise<void> {
-	const file = app.vault.getAbstractFileByPath(sourcePath);
-	if (!(file instanceof TFile)) {
-		throw new Error('Unable to persist fii-ink block: file not found.');
-	}
-
 	const replacementBlock = buildFenceBlock(serialized);
-	const content = await app.vault.cachedRead(file);
+	const content = await target.read();
 	const newline = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(/\r?\n/);
 	const start = clamp(sectionInfo.lineStart, 0, Math.max(0, lines.length - 1));
@@ -36,7 +79,7 @@ export async function persistInkCodeBlock(
 	}
 
 	if (nextContent !== content) {
-		await app.vault.modify(file, nextContent);
+		await target.write(content, nextContent);
 	}
 }
 
@@ -57,6 +100,12 @@ export async function persistInkSearchFrontmatter(
 	const file = app.vault.getAbstractFileByPath(sourcePath);
 	if (!(file instanceof TFile)) {
 		throw new Error('Unable to persist fii-ink search text: file not found.');
+	}
+	if (file.extension !== 'md') {
+		// An encrypted note: writing frontmatter to the file on disk would both corrupt the
+		// ciphertext and leak the recognised words in the clear. The UI checks this first; this
+		// is the safety net.
+		throw new Error('Search indexing is not available in encrypted notes.');
 	}
 	// One list entry per handwritten line (recognition returns lines separated by "\n").
 	const lines = text
@@ -96,16 +145,11 @@ function buildSearchCommentLine(text: string): string | null {
 // Upsert (or, for empty text, remove) the hidden search-text comment for a block. Anchored to the
 // block's closing fence via its section, so it stays attached to the right block in multi-block notes.
 export async function persistInkSearchText(
-	app: App,
-	sourcePath: string,
+	target: InkNoteTarget,
 	sectionInfo: SectionInfoLike,
 	text: string,
 ): Promise<void> {
-	const file = app.vault.getAbstractFileByPath(sourcePath);
-	if (!(file instanceof TFile)) {
-		throw new Error('Unable to persist fii-ink search text: file not found.');
-	}
-	const content = await app.vault.cachedRead(file);
+	const content = await target.read();
 	const newline = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(/\r?\n/);
 	const start = clamp(sectionInfo.lineStart, 0, Math.max(0, lines.length - 1));
@@ -138,22 +182,16 @@ export async function persistInkSearchText(
 
 	const next = lines.join(newline);
 	if (next !== content) {
-		await app.vault.modify(file, next);
+		await target.write(content, next);
 	}
 }
 
 // Remove an entire fii-ink fence (open line, body, close line) from the file.
 export async function removeInkCodeBlock(
-	app: App,
-	sourcePath: string,
+	target: InkNoteTarget,
 	sectionInfo: SectionInfoLike,
 ): Promise<void> {
-	const file = app.vault.getAbstractFileByPath(sourcePath);
-	if (!(file instanceof TFile)) {
-		throw new Error('Unable to delete fii-ink block: file not found.');
-	}
-
-	const content = await app.vault.cachedRead(file);
+	const content = await target.read();
 	const newline = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(/\r?\n/);
 	const start = clamp(sectionInfo.lineStart, 0, Math.max(0, lines.length - 1));
@@ -187,7 +225,7 @@ export async function removeInkCodeBlock(
 	}
 
 	if (nextContent !== content) {
-		await app.vault.modify(file, nextContent);
+		await target.write(content, nextContent);
 	}
 }
 

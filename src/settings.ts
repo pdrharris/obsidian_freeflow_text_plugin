@@ -4,7 +4,7 @@ import { DEFAULT_INK_COLOR } from './ink/palette';
 
 // Bump this whenever you want to confirm at a glance that the iPad pulled the latest build.
 // Keep it in step with the manifest "Sync marker".
-export const FREEFLOW_BUILD_MARKER = '2026-10-05B';
+export const FREEFLOW_BUILD_MARKER = '2026-10-05C';
 
 export interface FreeFlowInkSettings {
 	// Width of the rendered (inline) handwriting block as a fraction of the FULL editor pane width

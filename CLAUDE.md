@@ -146,7 +146,13 @@ attaches a per-point width (`LaidPoint.w`) derived from pen speed (self-normalis
 
 **Saving**: `storage.ts` uses `SectionInfo` line numbers for a precise splice, with a fallback
 regex search. Saves are blocked above `hardBlockLimitKb`. Persistence is format-agnostic — it
-just splices an opaque serialized string.
+just splices an opaque serialized string. Writes go through an `InkNoteTarget`: the **open
+note's editor** when one exists (`editorNoteTarget`, applying the rewrite as one minimal
+`replaceRange` via `textdiff.ts`), else the vault file (`vaultNoteTarget`). Editor-first is what
+makes blocks work inside **Meld Encrypt** notes: the file on disk is ciphertext, so a disk-level
+splice can't find the block; the editor holds the plaintext and Meld re-encrypts on save. The
+vault fallback refuses non-`.md` files, and search indexing (frontmatter on disk) is disabled in
+encrypted notes.
 
 **Cross-platform input**: the drawer uses pointer events with `setPointerCapture` on
 desktop/Android; on iOS (`Platform.isIosApp`) `allowAnyNonMousePointer` accepts touch input and

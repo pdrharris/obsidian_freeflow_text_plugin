@@ -38,10 +38,13 @@ import { applyListMarkupToRecognizedText, buildRecognitionStrokes, inkSignature 
 import { hasMyScriptKeys, MyScriptCredentials, recognizeText } from './myscript';
 import { ColorPopupHandle, getDefaultInkColor, openColorPopup } from './palette';
 import {
+	InkNoteTarget,
+	editorNoteTarget,
 	persistInkCodeBlock,
 	persistInkSearchFrontmatter,
 	persistInkSearchText,
 	removeInkCodeBlock,
+	vaultNoteTarget,
 	SectionInfoLike,
 } from './storage';
 import { InkToolbar, ToolbarTarget } from './toolbar';
@@ -235,6 +238,37 @@ export class InkBlockRegistry {
 				this.mountBlock(source, el, ctx);
 			},
 		);
+	}
+
+	// Where to write a block's note: the editor of the note view that contains the block (or, if
+	// the block isn't attached, any open view of that note), else the vault file. See InkNoteTarget
+	// for why the editor comes first — in short, it's the only route that works for encrypted notes.
+	private noteTarget(el: HTMLElement, sourcePath: string, what: string): InkNoteTarget {
+		const found: { containing: MarkdownView | null; byPath: MarkdownView | null } = {
+			containing: null,
+			byPath: null,
+		};
+		this.plugin.app.workspace.iterateAllLeaves((leaf) => {
+			const view = leaf.view;
+			if (!(view instanceof MarkdownView)) {
+				return;
+			}
+			if (view.containerEl.contains(el)) {
+				found.containing = found.containing ?? view;
+			} else if (view.file?.path === sourcePath) {
+				found.byPath = found.byPath ?? view;
+			}
+		});
+		const view = found.containing ?? found.byPath;
+		return view ? editorNoteTarget(view.editor) : vaultNoteTarget(this.plugin.app, sourcePath, what);
+	}
+
+	// Search indexing writes recognised words into the note's frontmatter ON DISK, which is only
+	// safe (and only meaningful) for a plain markdown file — in an encrypted note it would corrupt
+	// the ciphertext and leak the text in the clear.
+	private canIndexForSearch(sourcePath: string): boolean {
+		const file = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
+		return file instanceof TFile && file.extension === 'md';
 	}
 
 	private renderOptions(): InlineRenderOptions {
@@ -525,7 +559,7 @@ export class InkBlockRegistry {
 			}
 
 			try {
-				await persistInkCodeBlock(this.plugin.app, ctx.sourcePath, section, serialized);
+				await persistInkCodeBlock(this.noteTarget(el, ctx.sourcePath, 'save fii-ink block'), section, serialized);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
 				new Notice(`FreeFlow Ink save failed: ${message}`);
@@ -564,7 +598,8 @@ export class InkBlockRegistry {
 			}
 			await flushSave();
 			try {
-				await persistInkSearchText(this.plugin.app, ctx.sourcePath, freshSection(), ''); // strip legacy comment
+				const target = this.noteTarget(el, ctx.sourcePath, 'update fii-ink search text');
+				await persistInkSearchText(target, freshSection(), ''); // strip legacy comment
 				await persistInkSearchFrontmatter(this.plugin.app, ctx.sourcePath, id, text);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
@@ -577,6 +612,12 @@ export class InkBlockRegistry {
 		// Notices for the manual button; the automatic path is silent.
 		const runRecognitionIndex = async (announce: boolean): Promise<void> => {
 			if (isDisposed || indexing) {
+				return;
+			}
+			if (!this.canIndexForSearch(ctx.sourcePath)) {
+				if (announce) {
+					new Notice('Search indexing isn’t available in encrypted notes.');
+				}
 				return;
 			}
 			const creds = this.getRecognitionCredentials();
@@ -1163,9 +1204,9 @@ export class InkBlockRegistry {
 					drawer.close();
 				}
 				try {
-					await removeInkCodeBlock(this.plugin.app, ctx.sourcePath, section);
+					await removeInkCodeBlock(this.noteTarget(el, ctx.sourcePath, 'delete fii-ink block'), section);
 					// Drop this block's search entry from the note frontmatter so it doesn't linger.
-					if (documentModel.meta.id) {
+					if (documentModel.meta.id && this.canIndexForSearch(ctx.sourcePath)) {
 						await persistInkSearchFrontmatter(this.plugin.app, ctx.sourcePath, documentModel.meta.id, '');
 					}
 				} catch (error) {
@@ -1406,12 +1447,15 @@ export class InkBlockRegistry {
 					lineStart: 0,
 					lineEnd: Number.MAX_SAFE_INTEGER,
 				};
-				persistInkCodeBlock(
-					this.plugin.app,
-					ctx.sourcePath,
-					section,
-					serializeInkDocument(documentModel),
-				).catch((error: unknown) => {
+				let target: InkNoteTarget;
+				try {
+					target = this.noteTarget(el, ctx.sourcePath, 'save fii-ink block');
+				} catch (error) {
+					const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
+					new Notice(`FreeFlow Ink checkbox save failed: ${message}`);
+					return;
+				}
+				persistInkCodeBlock(target, section, serializeInkDocument(documentModel)).catch((error: unknown) => {
 					const message = error instanceof Error ? error.message : 'Unknown fii-ink save error.';
 					new Notice(`FreeFlow Ink checkbox save failed: ${message}`);
 				});

@@ -38,6 +38,7 @@ import {
 import { layoutDocument } from '../src/ink/layout';
 import { applyListMarkupToRecognizedText, buildRecognitionStrokes, inkSignature } from '../src/ink/recognize';
 import { compactInkBlocksInContent } from '../src/ink/compact';
+import { minimalReplacement } from '../src/ink/textdiff';
 import { Text } from '@codemirror/state';
 import { editViolatesInkBlock, inkBlockAt } from '../src/ink/guard';
 
@@ -164,6 +165,19 @@ test('serialize -> parse round-trips meta.widthScale', () => {
 	const d = mkDoc([W('a')]);
 	d.meta.widthScale = 0.45;
 	eq(parseInkDocument(serializeInkDocument(d)).meta.widthScale, 0.45);
+});
+
+test('minimalReplacement finds the smallest single edit', () => {
+	eq(minimalReplacement('abc', 'abc'), null, 'identical → no change');
+	eq(minimalReplacement('a\n```fii-ink\nOLD\n```\nz', 'a\n```fii-ink\nNEW!\n```\nz'), {
+		from: 13,
+		to: 16,
+		text: 'NEW!',
+	});
+	eq(minimalReplacement('abc', 'abXc'), { from: 2, to: 2, text: 'X' }, 'pure insertion');
+	eq(minimalReplacement('abXc', 'abc'), { from: 2, to: 3, text: '' }, 'pure deletion');
+	eq(minimalReplacement('aaa', 'aa'), { from: 2, to: 3, text: '' }, 'overlapping prefix/suffix');
+	eq(minimalReplacement('', 'x'), { from: 0, to: 0, text: 'x' });
 });
 
 test('parse preserves and clamps meta.lineScale; absent stays undefined', () => {
