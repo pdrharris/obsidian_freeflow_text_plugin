@@ -78,8 +78,9 @@ No absolute screen positions are stored. Intra-word geometry is preserved, but i
 and line height are **layout constants**, computed at render time. `meta.cursor: InkCursor`
 (`{line, word}`, an insertion slot) and `meta.selection: InkSelection | null` are the single
 source of truth for caret/selection and are persisted. `meta.widthScale?: number` is an optional
-per-block display width (a fraction 0.3–1 of the content column) set by dragging the block's
-right-edge handle; when absent the block uses the global "Displayed line width" default. It is
+per-block display width (a fraction 0.3–1 of the block's maximum width: the text column when
+"Match text width" is on, else the full pane) set by dragging the block's right-edge handle;
+dragging to the edge clears it; when absent the block uses the global "Displayed line width" default. It is
 device-independent (a fraction, not px) so it survives sync between desktop and iPad.
 `meta.lineScale?: number` (0.5–3, absent = 1) is a per-block multiplier on the global "Rendered
 line spacing", stepped by the block's A−/A+ meta-row buttons; since glyphs scale with line height it

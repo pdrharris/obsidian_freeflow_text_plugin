@@ -259,11 +259,13 @@ export class InkBlockRegistry {
 		return { ...this.renderOptions(), wrapWidth: Number.POSITIVE_INFINITY };
 	}
 
-	// Size the block box. Precedence:
-	//   1. An explicit per-block width (the drag handle) — a fraction of the readable-line column.
-	//   2. "Match text width" on — the natural column width, lined up with surrounding text.
-	//   3. Otherwise — a fraction of the full editor-pane width (the slider), broken out of the
-	//      readable-line column and centred.
+	// Size the block box. Two modes:
+	//   - "Match text width" on — the block lives in the readable-line column, lined up with the
+	//     surrounding text. A per-block width (the drag handle) is a fraction of that column.
+	//   - Off — the block breaks out of the column to a fraction of the full editor-pane width and
+	//     is centred. The fraction is the per-block width when set, else the global slider. (Before,
+	//     a dragged width was always a column fraction, so once a full-page block had been shrunk it
+	//     could never be dragged back out to the page width.)
 	//
 	// Centring is computed from WIDTHS ONLY (no getBoundingClientRect of positions): the block's
 	// containing column (parent) is centred in the pane by Obsidian, so centring the block on its
@@ -277,26 +279,38 @@ export class InkBlockRegistry {
 			containerEl.style.removeProperty('max-width');
 		};
 		const ws = doc.meta.widthScale;
-		if (typeof ws === 'number') {
-			clearBreakout();
-			containerEl.setCssStyles({ width: `${(clampWidthScale(ws) * 100).toFixed(2)}%` });
-			return;
-		}
-		const pane = this.getMatchTextWidth()
-			? null
-			: containerEl.closest('.markdown-preview-view, .cm-scroller');
+		const pane = this.fillWidthPane(containerEl);
 		const parent = containerEl.parentElement;
-		if (!(pane instanceof HTMLElement) || !parent || pane.clientWidth < 240 || parent.clientWidth < 80) {
+		if (!pane || !parent || parent.clientWidth < 80) {
 			clearBreakout();
-			containerEl.setCssStyles({ width: '' });
+			containerEl.setCssStyles({
+				width: typeof ws === 'number' ? `${(clampWidthScale(ws) * 100).toFixed(2)}%` : '',
+			});
 			return;
 		}
-		const fraction = Math.max(0.3, Math.min(1, this.getWidthFraction()));
-		const widthPx = Math.round((pane.clientWidth - 16) * fraction); // small inset off the pane edges
+		const fraction =
+			typeof ws === 'number' ? clampWidthScale(ws) : Math.max(0.3, Math.min(1, this.getWidthFraction()));
+		const widthPx = Math.round(this.fillWidthAvailablePx(pane) * fraction);
 		const marginLeft = Math.round((parent.clientWidth - widthPx) / 2);
 		containerEl.classList.add('is-fill-width');
 		containerEl.setCssStyles({ width: `${widthPx}px`, maxWidth: 'none', marginLeft: `${marginLeft}px` });
 		releaseAncestorContainment(containerEl, pane);
+	}
+
+	// The pane the block breaks out to in full-width mode, or null when the block should stay in
+	// the text column ("match text width" on, not attached to a pane yet, or a pane too narrow to
+	// bother). Both the sizing and the drag handle use this so they agree on the reference width.
+	private fillWidthPane(containerEl: HTMLElement): HTMLElement | null {
+		if (this.getMatchTextWidth()) {
+			return null;
+		}
+		const pane = containerEl.closest('.markdown-preview-view, .cm-scroller');
+		return pane instanceof HTMLElement && pane.clientWidth >= 240 ? pane : null;
+	}
+
+	// Width a 100% block gets in full-width mode: the pane less a small inset off its edges.
+	private fillWidthAvailablePx(pane: HTMLElement): number {
+		return pane.clientWidth - 16;
 	}
 
 	private mountBlock(
@@ -781,11 +795,28 @@ export class InkBlockRegistry {
 				scheduleSave();
 			}
 		};
+		// Dragging to (nearly) the full available width clears the per-block override rather than
+		// storing ~1.0, so the block returns to tracking the global default. Snapping also means a
+		// pen that lands a few px short of the edge still restores "full width".
+		const FULL_WIDTH_SNAP = 0.97;
 		const applyResizeAt = (clientX: number): void => {
-			const left = containerEl.getBoundingClientRect().left;
-			const fraction = clampWidthScale((clientX - left) / Math.max(1, resizeColumnWidth));
-			documentModel.meta.widthScale = fraction;
-			containerEl.setCssStyles({ width: `${(fraction * 100).toFixed(2)}%` });
+			const pane = this.fillWidthPane(containerEl);
+			let fraction: number;
+			if (pane) {
+				// Full-width mode: the block is centred in the pane, so measure the drag from the
+				// pane's centre (both edges move together) against the pane's available width.
+				const paneRect = pane.getBoundingClientRect();
+				const centreX = paneRect.left + paneRect.width / 2;
+				fraction = (2 * (clientX - centreX)) / Math.max(1, this.fillWidthAvailablePx(pane));
+			} else {
+				const left = containerEl.getBoundingClientRect().left;
+				fraction = (clientX - left) / Math.max(1, resizeColumnWidth);
+			}
+			if (fraction >= FULL_WIDTH_SNAP) {
+				delete documentModel.meta.widthScale;
+			} else {
+				documentModel.meta.widthScale = clampWidthScale(fraction);
+			}
 			renderInline();
 			if (isActiveKey(blockKey)) {
 				drawer.refreshLayout();
@@ -1244,7 +1275,7 @@ export class InkBlockRegistry {
 		const resizeObserver = new ResizeObserver(() => {
 			renderInline();
 		});
-		resizeObserver.observe(containerEl.parentElement ?? containerEl);
+		observeBlockGeometry(resizeObserver, containerEl);
 
 		ctx.addChild(
 			new (class extends MarkdownRenderChild {
@@ -1414,7 +1445,7 @@ export class InkBlockRegistry {
 
 		// Observe the pane ancestor (see the editable path) so fill-width blocks track pane resizes.
 		const resizeObserver = new ResizeObserver(() => render());
-		resizeObserver.observe(containerEl.parentElement ?? containerEl);
+		observeBlockGeometry(resizeObserver, containerEl);
 
 		const cleanup = (): void => {
 			if (disposed) {
@@ -1482,6 +1513,25 @@ export class InkBlockRegistry {
 // full-width block to the readable-line column even with overflow visible — a stylesheet rule can't
 // beat inline !important, so we override it inline on the element itself (inline beats inline). Only
 // touches per-block widget wrappers that actually carry containment, not the shared editor scroller.
+// What a block watches to know its width may need recomputing. The parent column covers normal
+// pane/window resizes (in fill-width mode the block's own box is a fixed px width, so a pane
+// resize wouldn't change it). The block itself covers attach/detach: live preview can build the
+// widget before it's in the DOM, or re-parent it later (CodeMirror recycles the wrappers around
+// embed blocks), and an observer on the ORIGINAL parent never fires again after that — which left
+// blocks intermittently stuck at the column width in full-width mode. The pane, when already
+// reachable, catches resizes that don't ripple down to the column.
+function observeBlockGeometry(observer: ResizeObserver, containerEl: HTMLElement): void {
+	observer.observe(containerEl);
+	const parent = containerEl.parentElement;
+	if (parent) {
+		observer.observe(parent);
+	}
+	const pane = containerEl.closest('.markdown-preview-view, .cm-scroller');
+	if (pane instanceof HTMLElement) {
+		observer.observe(pane);
+	}
+}
+
 function releaseAncestorContainment(containerEl: HTMLElement, pane: HTMLElement): void {
 	let el: HTMLElement | null = containerEl.parentElement;
 	let guard = 0;

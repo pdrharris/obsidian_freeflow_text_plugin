@@ -76,7 +76,8 @@ export interface InkDocument {
 		lineHeight: number;
 		cursor: InkCursor;
 		selection: InkSelection | null;
-		// Per-block display width as a fraction (0.3..1) of the available content column. Stored
+		// Per-block display width as a fraction (0.3..1) of the width the block would otherwise get
+		// at 100%: the text column when "match text width" is on, else the full editor pane. Stored
 		// with the block so a resized block keeps its width on every device and through sync. When
 		// absent, the block uses the global "Displayed line width" default.
 		widthScale?: number;
